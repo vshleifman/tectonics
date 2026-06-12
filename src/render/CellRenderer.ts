@@ -11,12 +11,20 @@ import type { CellData } from "../data/CellData";
  * colours never bleed across cell borders. Geometry is built once; recolouring
  * only rewrites the colour buffer.
  */
+/** Push edge lines this far above the unit sphere to avoid z-fighting with faces. */
+const EDGE_RADIUS = 1.003;
+
 export class CellRenderer {
-    readonly mesh: THREE.Mesh;
+    /** Group holding the filled faces and (optionally visible) black edges. */
+    readonly object3D = new THREE.Group();
 
     private readonly geometry: THREE.BufferGeometry;
     private readonly material: THREE.MeshBasicMaterial;
     private readonly colours: Float32Array;
+
+    private readonly edgeGeometry: THREE.BufferGeometry;
+    private readonly edgeMaterial: THREE.LineBasicMaterial;
+    private readonly edges: THREE.LineSegments;
 
     /** First vertex index for each cell (CSR-style, length cellCount + 1). */
     private readonly cellVertexStart: Int32Array;
@@ -30,17 +38,22 @@ export class CellRenderer {
         // Count vertices/triangles: per cell = 1 centre + C corners, C triangles.
         this.cellVertexStart = new Int32Array(cellCount + 1);
         let triangleCount = 0;
+        let cornerTotal = 0;
         for (let i = 0; i < cellCount; i++) {
             const corners = cellMesh.polygon(i).length;
-            this.cellVertexStart[i + 1] =
-                this.cellVertexStart[i] + corners + 1;
+            this.cellVertexStart[i + 1] = this.cellVertexStart[i] + corners + 1;
             triangleCount += corners;
+            cornerTotal += corners;
         }
         const vertexCount = this.cellVertexStart[cellCount];
 
         const positions = new Float32Array(vertexCount * 3);
         this.colours = new Float32Array(vertexCount * 3);
         const indices = new Uint32Array(triangleCount * 3);
+
+        // Edge line segments: one per polygon side, both endpoints per segment.
+        const edgePositions = new Float32Array(cornerTotal * 2 * 3);
+        let edgeWrite = 0;
 
         let indexWrite = 0;
         for (let i = 0; i < cellCount; i++) {
@@ -65,6 +78,16 @@ export class CellRenderer {
                 indices[indexWrite++] = base;
                 indices[indexWrite++] = base + 1 + k;
                 indices[indexWrite++] = base + 1 + next;
+
+                // Boundary segment corner[k] -> corner[next], pushed outward.
+                const a = corners[k];
+                const b = corners[next];
+                edgePositions[edgeWrite++] = a[0] * EDGE_RADIUS;
+                edgePositions[edgeWrite++] = a[1] * EDGE_RADIUS;
+                edgePositions[edgeWrite++] = a[2] * EDGE_RADIUS;
+                edgePositions[edgeWrite++] = b[0] * EDGE_RADIUS;
+                edgePositions[edgeWrite++] = b[1] * EDGE_RADIUS;
+                edgePositions[edgeWrite++] = b[2] * EDGE_RADIUS;
             }
         }
 
@@ -81,17 +104,32 @@ export class CellRenderer {
         this.geometry.computeBoundingSphere();
 
         this.material = new THREE.MeshBasicMaterial({ vertexColors: true });
-        this.mesh = new THREE.Mesh(this.geometry, this.material);
+        const mesh = new THREE.Mesh(this.geometry, this.material);
+
+        this.edgeGeometry = new THREE.BufferGeometry();
+        this.edgeGeometry.setAttribute(
+            "position",
+            new THREE.BufferAttribute(edgePositions, 3),
+        );
+        this.edgeMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
+        this.edges = new THREE.LineSegments(this.edgeGeometry, this.edgeMaterial);
+        this.edges.visible = false;
+
+        this.object3D.add(mesh, this.edges);
     }
 
     /**
      * Rewrite the colour buffer from current elevation. Cheap: no geometry
-     * rebuild, just one colour attribute upload.
+     * rebuild, just one colour attribute upload. `seaLevel` is the elevation
+     * threshold below which a cell is rendered as ocean. When `dataMode` is
+     * set, faces are rendered flat white (the black edges carry the structure).
      */
-    updateColours(data: CellData): void {
+    updateColours(data: CellData, seaLevel = 0, dataMode = false): void {
         const { cellCount } = this.cellMesh;
         for (let i = 0; i < cellCount; i++) {
-            const [r, g, b] = colourForElevation(data.elevation[i]);
+            const [r, g, b] = dataMode
+                ? [1, 1, 1]
+                : colourForElevation(data.elevation[i], seaLevel);
             const start = this.cellVertexStart[i];
             const end = this.cellVertexStart[i + 1];
             for (let v = start; v < end; v++) {
@@ -106,21 +144,40 @@ export class CellRenderer {
         attr.needsUpdate = true;
     }
 
+    /** Show or hide the black cell-boundary lines (used in data mode). */
+    setEdgesVisible(visible: boolean): void {
+        this.edges.visible = visible;
+    }
+
     dispose(): void {
         this.geometry.dispose();
         this.material.dispose();
+        this.edgeGeometry.dispose();
+        this.edgeMaterial.dispose();
     }
 }
 
-/** Map an elevation value (~-10..+10) to an RGB triple in [0, 1]. */
-const colourForElevation = (elevation: number): [number, number, number] => {
-    if (elevation < 0) {
-        // Ocean: deep navy to shallow cyan.
-        const t = clamp01(1 + elevation / 10);
+const MIN_ELEVATION = -10;
+const MAX_ELEVATION = 10;
+
+/**
+ * Map an elevation value (~-10..+10) to an RGB triple in [0, 1], with `seaLevel`
+ * as the ocean/land boundary. Both the ocean and land ramps are normalised
+ * relative to sea level so the full gradient is used at any threshold.
+ */
+const colourForElevation = (
+    elevation: number,
+    seaLevel: number,
+): [number, number, number] => {
+    if (elevation < seaLevel) {
+        // Ocean: deep navy (deepest) to shallow cyan (near sea level).
+        const span = seaLevel - MIN_ELEVATION || 1;
+        const t = clamp01((elevation - MIN_ELEVATION) / span);
         return mix([0.02, 0.05, 0.2], [0.1, 0.45, 0.6], t);
     }
-    // Land: beach -> green -> brown -> snow.
-    const t = clamp01(elevation / 10);
+    // Land: beach -> green -> brown -> snow, normalised above sea level.
+    const span = MAX_ELEVATION - seaLevel || 1;
+    const t = clamp01((elevation - seaLevel) / span);
     if (t < 0.15) return mix([0.78, 0.72, 0.5], [0.25, 0.5, 0.2], t / 0.15);
     if (t < 0.6)
         return mix([0.25, 0.5, 0.2], [0.45, 0.35, 0.22], (t - 0.15) / 0.45);

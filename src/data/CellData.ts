@@ -46,8 +46,7 @@ export const seedTestElevation = (
         let norm = 0;
         for (let o = 0; o < octaves; o++) {
             sum +=
-                amplitude *
-                noise(x * frequency, y * frequency, z * frequency);
+                amplitude * noise(x * frequency, y * frequency, z * frequency);
             norm += amplitude;
             amplitude *= gain;
             frequency *= lacunarity;

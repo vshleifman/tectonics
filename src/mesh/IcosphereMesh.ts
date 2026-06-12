@@ -123,7 +123,7 @@ export class IcosphereMesh implements CellMesh {
         }
 
         // Face centroids on the unit sphere (the dual cell corners).
-        const faceCentroids: V3[] = faces.map((face) => {
+        const faceCentroids: V3[] = faces.map(face => {
             const centroid = scale(
                 add(add(verts[face[0]], verts[face[1]]), verts[face[2]]),
                 1 / 3,
@@ -151,16 +151,14 @@ export class IcosphereMesh implements CellMesh {
             this.polyOffsets[i + 1] =
                 this.polyOffsets[i] + incidentFaces[i].length;
         }
-        this.polyCorners = new Float32Array(
-            this.polyOffsets[verts.length] * 3,
-        );
+        this.polyCorners = new Float32Array(this.polyOffsets[verts.length] * 3);
         this.areas = new Float32Array(verts.length);
 
         for (let i = 0; i < verts.length; i++) {
             const centre = verts[i];
             const ordered = orderCornersAround(
                 centre,
-                incidentFaces[i].map((f) => faceCentroids[f]),
+                incidentFaces[i].map(f => faceCentroids[f]),
             );
             let w = this.polyOffsets[i] * 3;
             for (const corner of ordered) {
@@ -244,13 +242,13 @@ const orderCornersAround = (centre: V3, corners: V3[]): V3[] => {
     const reference = sub(corners[0], scale(centre, dot(corners[0], centre)));
     const uAxis = normalise(reference);
     const vAxis = cross(centre, uAxis);
-    const withAngle = corners.map((corner) => {
+    const withAngle = corners.map(corner => {
         const d = sub(corner, scale(centre, dot(corner, centre)));
         const angle = Math.atan2(dot(d, vAxis), dot(d, uAxis));
         return { corner, angle };
     });
     withAngle.sort((p, q) => p.angle - q.angle);
-    return withAngle.map((p) => p.corner);
+    return withAngle.map(p => p.corner);
 };
 
 /** Solid angle (= unit-sphere area) of a triangle of unit vectors. */
