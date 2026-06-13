@@ -15,10 +15,12 @@ import { PlateRegistry } from "./plates/PlateRegistry";
 import { Picker } from "./interaction/Picker";
 import { step } from "./sim/step";
 import { createControls, type ViewMode } from "./ui/controls";
+import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
 
 const INITIAL_LEVEL = 6;
 const INITIAL_SEA_LEVEL = 0;
 const INITIAL_AUTO_ROTATE = false;
+const INITIAL_PROJECTION: Projection = "sphere";
 const INITIAL_VIEW_MODE: ViewMode = "plate";
 const INITIAL_SEED_MODE = true;
 const INITIAL_BRANCHES_PER_SEED = 3;
@@ -41,6 +43,24 @@ const camera = new THREE.PerspectiveCamera(
 );
 camera.position.set(0, 1.4, 2.6);
 
+/** Margin around the 2x2 Mercator map so it never touches the viewport edge. */
+const MAP_MARGIN = 1.1;
+
+/** Orthographic camera framing the flat Mercator map (looking straight down -z). */
+const mapCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
+mapCamera.position.set(0, 0, 5);
+
+const setMapFrustum = (aspect: number): void => {
+    const halfH = MAP_HALF_EXTENT * MAP_MARGIN;
+    const halfW = halfH * aspect;
+    mapCamera.left = -halfW;
+    mapCamera.right = halfW;
+    mapCamera.top = halfH;
+    mapCamera.bottom = -halfH;
+    mapCamera.updateProjectionMatrix();
+};
+setMapFrustum(window.innerWidth / window.innerHeight);
+
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -52,6 +72,23 @@ controls.minDistance = 1.2;
 controls.maxDistance = 8;
 controls.autoRotate = INITIAL_AUTO_ROTATE;
 controls.autoRotateSpeed = 0.6;
+
+// Map navigation: left-drag pans, wheel zooms; rotation is disabled so the map
+// stays flat. Reuses OrbitControls (what MapControls is built on).
+const mapControls = new OrbitControls(mapCamera, renderer.domElement);
+mapControls.enableDamping = true;
+mapControls.enableRotate = false;
+mapControls.screenSpacePanning = true;
+mapControls.mouseButtons = {
+    LEFT: THREE.MOUSE.PAN,
+    MIDDLE: THREE.MOUSE.DOLLY,
+    RIGHT: THREE.MOUSE.PAN,
+};
+mapControls.enabled = false;
+
+/** The camera + controls pair currently driving the view. */
+let activeCamera: THREE.Camera = camera;
+let activeControls: OrbitControls = controls;
 
 const cellLabels = new CellLabels(document.body);
 scene.add(cellLabels.object3D);
@@ -72,6 +109,7 @@ const plateRegistry = new PlateRegistry();
 /** Scratch buffer for raw flood-fill labels before they are mapped to stable ids. */
 let rawLabels = new Int32Array(0);
 let seaLevel = INITIAL_SEA_LEVEL;
+let projection: Projection = INITIAL_PROJECTION;
 let viewMode: ViewMode = INITIAL_VIEW_MODE;
 let seedMode = INITIAL_SEED_MODE;
 let branchesPerSeed = INITIAL_BRANCHES_PER_SEED;
@@ -104,6 +142,25 @@ const reassignPlates = (initCrust: boolean): number => {
 
 const applyVelocities = (): void => {
     cellRenderer?.setVelocitiesVisible(showVelocities);
+};
+
+/**
+ * Switch between the sphere and the flat Mercator map: re-project the renderer
+ * and labels, swap the active camera + controls, and point the picker at the
+ * new camera so seed placement keeps working.
+ */
+const applyProjection = (): void => {
+    const onMap = projection === "mercator";
+    cellRenderer?.setProjection(projection);
+    cellLabels.setProjection(projection);
+
+    activeCamera = onMap ? mapCamera : camera;
+    activeControls = onMap ? mapControls : controls;
+    controls.enabled = !onMap;
+    mapControls.enabled = onMap;
+    activeControls.update();
+
+    picker.setProjection(projection, activeCamera);
 };
 
 const applyViewMode = (): void => {
@@ -151,6 +208,8 @@ const rebuild = (level: number): void => {
 
     cellLabels.build(cellMesh, cellData);
 
+    cellRenderer.setProjection(projection);
+
     ui.setCellCount(cellMesh.cellCount);
     ui.setPlateCount(plateCount);
     applyViewMode();
@@ -178,6 +237,7 @@ const ui = createControls(
         level: INITIAL_LEVEL,
         seaLevel: INITIAL_SEA_LEVEL,
         autoRotate: INITIAL_AUTO_ROTATE,
+        projection: INITIAL_PROJECTION,
         viewMode: INITIAL_VIEW_MODE,
         seedMode: INITIAL_SEED_MODE,
         branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
@@ -191,6 +251,10 @@ const ui = createControls(
         },
         onAutoRotateChange: enabled => {
             controls.autoRotate = enabled;
+        },
+        onProjectionChange: nextProjection => {
+            projection = nextProjection;
+            applyProjection();
         },
         onViewModeChange: mode => {
             viewMode = mode;
@@ -223,6 +287,7 @@ const ui = createControls(
 );
 
 rebuild(INITIAL_LEVEL);
+applyProjection();
 
 // --- Seed placement: a click (not an orbit drag) in seed mode --------------
 
@@ -268,16 +333,18 @@ const animate = (): void => {
         ui.setFps(fpsEma);
     }
 
-    controls.update();
-    renderer.render(scene, camera);
-    cellLabels.update(camera);
-    cellLabels.render(scene, camera);
+    activeControls.update();
+    renderer.render(scene, activeCamera);
+    cellLabels.update(activeCamera);
+    cellLabels.render(scene, activeCamera);
 };
 animate();
 
 window.addEventListener("resize", () => {
-    camera.aspect = window.innerWidth / window.innerHeight;
+    const aspect = window.innerWidth / window.innerHeight;
+    camera.aspect = aspect;
     camera.updateProjectionMatrix();
+    setMapFrustum(aspect);
     renderer.setSize(window.innerWidth, window.innerHeight);
     cellLabels.resize();
 });

@@ -1,3 +1,5 @@
+import type { Projection } from "../render/projection";
+
 /**
  * How cells render: elevation colour ("colour"), greyscale with per-cell
  * id/elevation labels ("data"), solid per-plate colours ("plate"), crust type
@@ -10,6 +12,7 @@ export interface ControlsCallbacks {
     onLevelChange: (level: number) => void;
     onSeaLevelChange: (seaLevel: number) => void;
     onAutoRotateChange: (enabled: boolean) => void;
+    onProjectionChange: (projection: Projection) => void;
     onViewModeChange: (mode: ViewMode) => void;
     onSeedModeChange: (enabled: boolean) => void;
     onBranchesChange: (branches: number) => void;
@@ -22,6 +25,7 @@ export interface ControlsOptions {
     level: number;
     seaLevel: number;
     autoRotate: boolean;
+    projection: Projection;
     viewMode: ViewMode;
     seedMode: boolean;
     branchesPerSeed: number;
@@ -33,6 +37,7 @@ export interface Controls {
     readonly level: number;
     readonly seaLevel: number;
     readonly autoRotate: boolean;
+    readonly projection: Projection;
     readonly viewMode: ViewMode;
     readonly seedMode: boolean;
     readonly branchesPerSeed: number;
@@ -63,6 +68,7 @@ export const createControls = (
     let level = clamp(options.level, MIN_LEVEL, MAX_LEVEL);
     let seaLevel = clamp(options.seaLevel, MIN_SEA_LEVEL, MAX_SEA_LEVEL);
     let autoRotate = options.autoRotate;
+    let projection = options.projection;
     let viewMode = options.viewMode;
     let seedMode = options.seedMode;
     let branchesPerSeed = clamp(
@@ -106,6 +112,17 @@ export const createControls = (
 
     // Auto-rotate toggle.
     const rotateToggle = makeToggle("Auto-rotate", autoRotate);
+
+    // Projection selector (sphere / Mercator map).
+    const projectionLabel = makeLabel();
+    projectionLabel.textContent = "Projection";
+    const projectionSelect = makeSelect(
+        [
+            { value: "sphere", label: "Sphere" },
+            { value: "mercator", label: "Mercator map" },
+        ],
+        projection,
+    );
 
     // View-mode selector (colour / data / plate).
     const viewLabel = makeLabel();
@@ -194,6 +211,11 @@ export const createControls = (
         callbacks.onAutoRotateChange(autoRotate);
     });
 
+    projectionSelect.addEventListener("change", () => {
+        projection = projectionSelect.value as Projection;
+        callbacks.onProjectionChange(projection);
+    });
+
     viewSelect.addEventListener("change", () => {
         viewMode = viewSelect.value as ViewMode;
         callbacks.onViewModeChange(viewMode);
@@ -230,6 +252,8 @@ export const createControls = (
         seaLabel,
         seaSlider,
         rotateToggle.row,
+        projectionLabel,
+        projectionSelect,
         viewLabel,
         viewSelect,
         seedToggle.row,
@@ -251,6 +275,9 @@ export const createControls = (
         },
         get autoRotate() {
             return autoRotate;
+        },
+        get projection() {
+            return projection;
         },
         get viewMode() {
             return viewMode;

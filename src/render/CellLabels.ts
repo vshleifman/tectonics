@@ -5,6 +5,7 @@ import {
 } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import type { CellMesh } from "../mesh/CellMesh";
 import type { CellData } from "../data/CellData";
+import { projectPoint, type Projection } from "./projection";
 
 /**
  * Above this cell count we skip per-cell text labels: the DOM cost is too high
@@ -39,6 +40,7 @@ export class CellLabels {
     private visible = false;
     private suppressed = false; // true when cellCount exceeded LABEL_LIMIT
     private data: CellData | null = null; // current data, for in-place refresh
+    private projection: Projection = "sphere";
 
     constructor(container: HTMLElement) {
         this.css.setSize(window.innerWidth, window.innerHeight);
@@ -86,6 +88,22 @@ export class CellLabels {
                 normal: new THREE.Vector3(x, y, z),
             });
         }
+        this.reposition();
+    }
+
+    /** Switch which projection labels are positioned in. */
+    setProjection(projection: Projection): void {
+        this.projection = projection;
+        this.reposition();
+    }
+
+    /** Re-place every label at its cell centre in the active projection. */
+    private reposition(): void {
+        for (const label of this.labels) {
+            const n = label.normal;
+            const [x, y, z] = projectPoint(n.x, n.y, n.z, this.projection, 0);
+            label.object.position.set(x, y, z);
+        }
     }
 
     setVisible(visible: boolean): void {
@@ -109,6 +127,11 @@ export class CellLabels {
     /** Per-frame: show only labels on the camera-facing hemisphere. */
     update(camera: THREE.Camera): void {
         if (!this.visible) return;
+        // The flat map has no back face, so every label is shown.
+        if (this.projection === "mercator") {
+            for (const label of this.labels) label.object.visible = true;
+            return;
+        }
         const cam = camera.position;
         for (const label of this.labels) {
             // Front-facing when the camera lies beyond the cell's tangent plane:

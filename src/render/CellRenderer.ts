@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { CellMesh } from "../mesh/CellMesh";
 import type { CellData } from "../data/CellData";
 import { DENSITY_MAX, DENSITY_MIN, type PlateData } from "../plates/PlateData";
+import { longitudeOf, projectPoint, type Projection } from "./projection";
 
 /**
  * Builds a single static Three.js mesh for the whole cell grid and exposes a
@@ -12,13 +13,15 @@ import { DENSITY_MAX, DENSITY_MIN, type PlateData } from "../plates/PlateData";
  * colours never bleed across cell borders. Geometry is built once; recolouring
  * only rewrites the colour buffer.
  */
-/** Push edge lines this far above the unit sphere to avoid z-fighting with faces. */
-const EDGE_RADIUS = 1.003;
-/** Faults sit slightly above the faint wireframe so they read on top. */
-const FAULT_RADIUS = 1.005;
-
-/** Velocity arrows float above everything else so they stay readable. */
-const VELOCITY_RADIUS = 1.01;
+/**
+ * How far each overlay floats above the faces. On the sphere this scales the
+ * radius (`1 + lift`); on the Mercator map it becomes a small +z offset toward
+ * the camera. Edges sit just above the faces, faults above the wireframe, and
+ * velocity arrows above everything else so they stay readable.
+ */
+const EDGE_LIFT = 0.003;
+const FAULT_LIFT = 0.005;
+const VELOCITY_LIFT = 0.01;
 
 /** Arrow length per unit surface speed (rad/Myr) — tuned for visibility. */
 const VELOCITY_SCALE = 15;
@@ -40,9 +43,26 @@ export class CellRenderer {
     private readonly material: THREE.MeshBasicMaterial;
     private readonly colours: Float32Array;
 
+    /** Face vertex positions precomputed for both projections; swapped on toggle. */
+    private readonly spherePositions: Float32Array;
+    private readonly mercatorPositions: Float32Array;
+
     private readonly edgeGeometry: THREE.BufferGeometry;
     private readonly edgeMaterial: THREE.LineBasicMaterial;
     private readonly edges: THREE.LineSegments;
+
+    /** Edge segment positions precomputed for both projections; swapped on toggle. */
+    private readonly sphereEdgePositions: Float32Array;
+    private readonly mercatorEdgePositions: Float32Array;
+
+    /** Active projection. Overlays are re-derived through it on every update. */
+    private projection: Projection = "sphere";
+
+    /** Last overlay inputs, cached so a projection switch can re-place them. */
+    private crackedCache: Uint8Array | null = null;
+    private seedsCache: readonly number[] | null = null;
+    private velocityPlateData: PlateData | null = null;
+    private velocityData: CellData | null = null;
 
     /** Bright overlay drawing only the cracked arcs (the fault network). */
     private readonly faultGeometry: THREE.BufferGeometry;
@@ -82,28 +102,56 @@ export class CellRenderer {
         const vertexCount = this.cellVertexStart[cellCount];
 
         const positions = new Float32Array(vertexCount * 3);
+        const mercatorPositions = new Float32Array(vertexCount * 3);
         this.colours = new Float32Array(vertexCount * 3);
         const indices = new Uint32Array(triangleCount * 3);
 
         // Edge line segments: one per polygon side, both endpoints per segment.
         const edgePositions = new Float32Array(cornerTotal * 2 * 3);
-        let edgeWrite = 0;
+        const mercatorEdgePositions = new Float32Array(cornerTotal * 2 * 3);
+        let edgeVertex = 0;
+
+        const writeTriple = (
+            target: Float32Array,
+            index: number,
+            p: readonly [number, number, number],
+        ): void => {
+            target[index * 3] = p[0];
+            target[index * 3 + 1] = p[1];
+            target[index * 3 + 2] = p[2];
+        };
 
         let indexWrite = 0;
         for (let i = 0; i < cellCount; i++) {
             const centre = cellMesh.position(i);
             const corners = cellMesh.polygon(i);
             const base = this.cellVertexStart[i];
+            // Unwrap every corner of this cell to the centre longitude so the
+            // polygon stays contiguous across the antimeridian seam on the map.
+            const refLon = longitudeOf(centre[0], centre[1], centre[2]);
 
             // Vertex 0 of the cell is the centre; 1..C are the corners.
-            positions[base * 3] = centre[0];
-            positions[base * 3 + 1] = centre[1];
-            positions[base * 3 + 2] = centre[2];
+            writeTriple(positions, base, centre);
+            writeTriple(
+                mercatorPositions,
+                base,
+                projectPoint(centre[0], centre[1], centre[2], "mercator", 0, refLon),
+            );
             for (let k = 0; k < corners.length; k++) {
                 const v = base + 1 + k;
-                positions[v * 3] = corners[k][0];
-                positions[v * 3 + 1] = corners[k][1];
-                positions[v * 3 + 2] = corners[k][2];
+                writeTriple(positions, v, corners[k]);
+                writeTriple(
+                    mercatorPositions,
+                    v,
+                    projectPoint(
+                        corners[k][0],
+                        corners[k][1],
+                        corners[k][2],
+                        "mercator",
+                        0,
+                        refLon,
+                    ),
+                );
             }
 
             // Fan triangles: (centre, corner k, corner k+1).
@@ -113,22 +161,43 @@ export class CellRenderer {
                 indices[indexWrite++] = base + 1 + k;
                 indices[indexWrite++] = base + 1 + next;
 
-                // Boundary segment corner[k] -> corner[next], pushed outward.
+                // Boundary segment corner[k] -> corner[next], lifted off the faces.
                 const a = corners[k];
                 const b = corners[next];
-                edgePositions[edgeWrite++] = a[0] * EDGE_RADIUS;
-                edgePositions[edgeWrite++] = a[1] * EDGE_RADIUS;
-                edgePositions[edgeWrite++] = a[2] * EDGE_RADIUS;
-                edgePositions[edgeWrite++] = b[0] * EDGE_RADIUS;
-                edgePositions[edgeWrite++] = b[1] * EDGE_RADIUS;
-                edgePositions[edgeWrite++] = b[2] * EDGE_RADIUS;
+                writeTriple(
+                    edgePositions,
+                    edgeVertex,
+                    projectPoint(a[0], a[1], a[2], "sphere", EDGE_LIFT),
+                );
+                writeTriple(
+                    mercatorEdgePositions,
+                    edgeVertex,
+                    projectPoint(a[0], a[1], a[2], "mercator", EDGE_LIFT, refLon),
+                );
+                edgeVertex++;
+                writeTriple(
+                    edgePositions,
+                    edgeVertex,
+                    projectPoint(b[0], b[1], b[2], "sphere", EDGE_LIFT),
+                );
+                writeTriple(
+                    mercatorEdgePositions,
+                    edgeVertex,
+                    projectPoint(b[0], b[1], b[2], "mercator", EDGE_LIFT, refLon),
+                );
+                edgeVertex++;
             }
         }
+
+        this.spherePositions = positions;
+        this.mercatorPositions = mercatorPositions;
+        this.sphereEdgePositions = edgePositions;
+        this.mercatorEdgePositions = mercatorEdgePositions;
 
         this.geometry = new THREE.BufferGeometry();
         this.geometry.setAttribute(
             "position",
-            new THREE.BufferAttribute(positions, 3),
+            new THREE.BufferAttribute(positions.slice(), 3),
         );
         this.geometry.setAttribute(
             "color",
@@ -137,17 +206,23 @@ export class CellRenderer {
         this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
         this.geometry.computeBoundingSphere();
 
-        this.material = new THREE.MeshBasicMaterial({ vertexColors: true });
+        // Double-sided: cell winding faces outward on the sphere, which flips to
+        // back-facing once flattened onto the Mercator plane under a top-down camera.
+        this.material = new THREE.MeshBasicMaterial({
+            vertexColors: true,
+            side: THREE.DoubleSide,
+        });
         const mesh = new THREE.Mesh(this.geometry, this.material);
 
         this.edgeGeometry = new THREE.BufferGeometry();
         this.edgeGeometry.setAttribute(
             "position",
-            new THREE.BufferAttribute(edgePositions, 3),
+            new THREE.BufferAttribute(edgePositions.slice(), 3),
         );
         this.edgeMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
         this.edges = new THREE.LineSegments(this.edgeGeometry, this.edgeMaterial);
         this.edges.visible = false;
+        this.edges.frustumCulled = false;
 
         // Fault overlay: preallocate room for every arc, draw only cracked ones.
         const graph = cellMesh.boundaryGraph();
@@ -164,6 +239,7 @@ export class CellRenderer {
             this.faultMaterial,
         );
         this.faultLines.visible = false;
+        this.faultLines.frustumCulled = false;
 
         this.seedGeometry = new THREE.BufferGeometry();
         this.seedGeometry.setAttribute(
@@ -177,6 +253,7 @@ export class CellRenderer {
         });
         this.seedPoints = new THREE.Points(this.seedGeometry, this.seedMaterial);
         this.seedPoints.visible = false;
+        this.seedPoints.frustumCulled = false;
 
         this.velocityGeometry = new THREE.BufferGeometry();
         this.velocityGeometry.setAttribute(
@@ -189,6 +266,7 @@ export class CellRenderer {
             this.velocityMaterial,
         );
         this.velocityLines.visible = false;
+        this.velocityLines.frustumCulled = false;
 
         this.object3D.add(
             mesh,
@@ -233,6 +311,7 @@ export class CellRenderer {
 
     /** Rebuild the bright fault overlay from the cracked-arc flags. */
     updateFaults(cracked: Uint8Array): void {
+        this.crackedCache = cracked;
         const graph = this.cellMesh.boundaryGraph();
         const { arcEnds, junctionPos } = graph;
         let w = 0;
@@ -240,12 +319,26 @@ export class CellRenderer {
             if (!cracked[a]) continue;
             const j0 = arcEnds[a * 2];
             const j1 = arcEnds[a * 2 + 1];
-            this.faultPositions[w++] = junctionPos[j0 * 3] * FAULT_RADIUS;
-            this.faultPositions[w++] = junctionPos[j0 * 3 + 1] * FAULT_RADIUS;
-            this.faultPositions[w++] = junctionPos[j0 * 3 + 2] * FAULT_RADIUS;
-            this.faultPositions[w++] = junctionPos[j1 * 3] * FAULT_RADIUS;
-            this.faultPositions[w++] = junctionPos[j1 * 3 + 1] * FAULT_RADIUS;
-            this.faultPositions[w++] = junctionPos[j1 * 3 + 2] * FAULT_RADIUS;
+            const x0 = junctionPos[j0 * 3];
+            const y0 = junctionPos[j0 * 3 + 1];
+            const z0 = junctionPos[j0 * 3 + 2];
+            // Keep the arc contiguous: unwrap its far end to the near end's longitude.
+            const refLon = longitudeOf(x0, y0, z0);
+            const p0 = projectPoint(x0, y0, z0, this.projection, FAULT_LIFT, refLon);
+            const p1 = projectPoint(
+                junctionPos[j1 * 3],
+                junctionPos[j1 * 3 + 1],
+                junctionPos[j1 * 3 + 2],
+                this.projection,
+                FAULT_LIFT,
+                refLon,
+            );
+            this.faultPositions[w++] = p0[0];
+            this.faultPositions[w++] = p0[1];
+            this.faultPositions[w++] = p0[2];
+            this.faultPositions[w++] = p1[0];
+            this.faultPositions[w++] = p1[1];
+            this.faultPositions[w++] = p1[2];
         }
         this.faultGeometry.setDrawRange(0, w / 3);
         const attr = this.faultGeometry.getAttribute(
@@ -256,13 +349,21 @@ export class CellRenderer {
 
     /** Rebuild the seed markers from the placed seed junctions. */
     updateSeeds(seeds: readonly number[]): void {
+        this.seedsCache = seeds;
         const { junctionPos } = this.cellMesh.boundaryGraph();
         const positions = new Float32Array(seeds.length * 3);
         for (let s = 0; s < seeds.length; s++) {
             const j = seeds[s];
-            positions[s * 3] = junctionPos[j * 3] * FAULT_RADIUS;
-            positions[s * 3 + 1] = junctionPos[j * 3 + 1] * FAULT_RADIUS;
-            positions[s * 3 + 2] = junctionPos[j * 3 + 2] * FAULT_RADIUS;
+            const p = projectPoint(
+                junctionPos[j * 3],
+                junctionPos[j * 3 + 1],
+                junctionPos[j * 3 + 2],
+                this.projection,
+                FAULT_LIFT,
+            );
+            positions[s * 3] = p[0];
+            positions[s * 3 + 1] = p[1];
+            positions[s * 3 + 2] = p[2];
         }
         this.seedGeometry.setAttribute(
             "position",
@@ -279,6 +380,8 @@ export class CellRenderer {
      * strokes, all pushed just above the surface.
      */
     updateVelocities(plateData: PlateData, data: CellData): void {
+        this.velocityPlateData = plateData;
+        this.velocityData = data;
         const centroids = plateData.centroids(this.cellMesh, data);
         const segments: number[] = [];
 
@@ -305,14 +408,36 @@ export class CellRenderer {
             const tipY = cy + dy * length;
             const tipZ = cz + dz * length;
 
+            // Project the whole arrow against the centroid longitude so it stays
+            // contiguous on the map seam.
+            const refLon = longitudeOf(cx, cy, cz);
+            const push = (
+                ax: number,
+                ay: number,
+                az: number,
+                bx: number,
+                by: number,
+                bz: number,
+            ): void =>
+                pushSegment(
+                    segments,
+                    this.projection,
+                    refLon,
+                    ax,
+                    ay,
+                    az,
+                    bx,
+                    by,
+                    bz,
+                );
+
             // Shaft.
-            pushSegment(segments, cx, cy, cz, tipX, tipY, tipZ);
+            push(cx, cy, cz, tipX, tipY, tipZ);
             // Two head strokes, swept back from the tip and out to each side.
             const backX = tipX - dx * head;
             const backY = tipY - dy * head;
             const backZ = tipZ - dz * head;
-            pushSegment(
-                segments,
+            push(
                 tipX,
                 tipY,
                 tipZ,
@@ -320,8 +445,7 @@ export class CellRenderer {
                 backY + sy * head,
                 backZ + sz * head,
             );
-            pushSegment(
-                segments,
+            push(
                 tipX,
                 tipY,
                 tipZ,
@@ -336,6 +460,42 @@ export class CellRenderer {
             new THREE.BufferAttribute(new Float32Array(segments), 3),
         );
         this.velocityGeometry.getAttribute("position").needsUpdate = true;
+    }
+
+    /**
+     * Switch the projection the scene is drawn in. Swaps the precomputed face
+     * and edge buffers and re-derives the dynamic overlays (faults, seeds,
+     * velocity arrows) from their cached inputs so the map shows exactly what
+     * the sphere showed. Colours are untouched.
+     */
+    setProjection(projection: Projection): void {
+        if (projection === this.projection) return;
+        this.projection = projection;
+
+        const facePositions =
+            projection === "sphere" ? this.spherePositions : this.mercatorPositions;
+        const faceAttr = this.geometry.getAttribute(
+            "position",
+        ) as THREE.BufferAttribute;
+        (faceAttr.array as Float32Array).set(facePositions);
+        faceAttr.needsUpdate = true;
+        this.geometry.computeBoundingSphere();
+
+        const edgePositions =
+            projection === "sphere"
+                ? this.sphereEdgePositions
+                : this.mercatorEdgePositions;
+        const edgeAttr = this.edgeGeometry.getAttribute(
+            "position",
+        ) as THREE.BufferAttribute;
+        (edgeAttr.array as Float32Array).set(edgePositions);
+        edgeAttr.needsUpdate = true;
+
+        if (this.crackedCache) this.updateFaults(this.crackedCache);
+        if (this.seedsCache) this.updateSeeds(this.seedsCache);
+        if (this.velocityPlateData && this.velocityData) {
+            this.updateVelocities(this.velocityPlateData, this.velocityData);
+        }
     }
 
     /** Show or hide the plate-velocity arrows. */
@@ -368,9 +528,11 @@ export class CellRenderer {
     }
 }
 
-/** Append a single line segment (two xyz points, pushed above the surface). */
+/** Append a single line segment, projecting both endpoints above the surface. */
 const pushSegment = (
     out: number[],
+    projection: Projection,
+    refLon: number,
     ax: number,
     ay: number,
     az: number,
@@ -378,14 +540,9 @@ const pushSegment = (
     by: number,
     bz: number,
 ): void => {
-    out.push(
-        ax * VELOCITY_RADIUS,
-        ay * VELOCITY_RADIUS,
-        az * VELOCITY_RADIUS,
-        bx * VELOCITY_RADIUS,
-        by * VELOCITY_RADIUS,
-        bz * VELOCITY_RADIUS,
-    );
+    const a = projectPoint(ax, ay, az, projection, VELOCITY_LIFT, refLon);
+    const b = projectPoint(bx, by, bz, projection, VELOCITY_LIFT, refLon);
+    out.push(a[0], a[1], a[2], b[0], b[1], b[2]);
 };
 
 /** Pick a cell's colour for the active mode. */
