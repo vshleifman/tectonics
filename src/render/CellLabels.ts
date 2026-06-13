@@ -17,6 +17,15 @@ interface Label {
     normal: THREE.Vector3; // cell centre direction (unit), for front-face culling
 }
 
+/** Multi-line debug dump of every per-cell property for a given cell. */
+const labelText = (data: CellData, i: number): string =>
+    `id ${i}\n` +
+    `plate ${data.plateId[i]}\n` +
+    `elev ${data.elevation[i].toFixed(2)}\n` +
+    `crust ${data.crustType[i] === 1 ? "cont" : "ocean"}\n` +
+    `age ${data.age[i].toFixed(1)}\n` +
+    `dens ${data.density[i].toFixed(2)}`;
+
 /**
  * Overlays crisp HTML labels (cell id + elevation) on each cell using a
  * CSS2DRenderer. Labels are only built when the cell count is small enough,
@@ -29,6 +38,7 @@ export class CellLabels {
     private readonly labels: Label[] = [];
     private visible = false;
     private suppressed = false; // true when cellCount exceeded LABEL_LIMIT
+    private data: CellData | null = null; // current data, for in-place refresh
 
     constructor(container: HTMLElement) {
         this.css.setSize(window.innerWidth, window.innerHeight);
@@ -51,6 +61,7 @@ export class CellLabels {
     /** Rebuild labels for a new mesh + data. Clears any previous labels. */
     build(mesh: CellMesh, data: CellData): void {
         this.clear();
+        this.data = data;
         this.suppressed = mesh.cellCount > LABEL_LIMIT;
         if (this.suppressed) return;
 
@@ -65,7 +76,7 @@ export class CellLabels {
                 textShadow: "0 0 2px #000, 0 0 2px #000, 0 0 3px #000",
                 pointerEvents: "none",
             } satisfies Partial<CSSStyleDeclaration>);
-            element.textContent = `${i}\n${data.elevation[i].toFixed(1)}`;
+            element.textContent = labelText(data, i);
 
             const object = new CSS2DObject(element);
             object.position.set(x, y, z);
@@ -81,6 +92,18 @@ export class CellLabels {
         this.visible = visible;
         this.object3D.visible = visible;
         this.css.domElement.style.display = visible ? "block" : "none";
+    }
+
+    /**
+     * Rewrite each label's text from the current cell data without rebuilding
+     * the DOM objects. Call after per-cell properties change (e.g. plate
+     * reassignment) so the debug dump stays accurate.
+     */
+    refresh(): void {
+        if (this.suppressed || !this.data) return;
+        for (let i = 0; i < this.labels.length; i++) {
+            this.labels[i].object.element.textContent = labelText(this.data, i);
+        }
     }
 
     /** Per-frame: show only labels on the camera-facing hemisphere. */

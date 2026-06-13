@@ -1,8 +1,9 @@
 /**
  * How cells render: elevation colour ("colour"), greyscale with per-cell
- * id/elevation labels ("data"), or solid per-plate colours ("plate").
+ * id/elevation labels ("data"), solid per-plate colours ("plate"), crust type
+ * ("crust"), or density ramp ("density").
  */
-export type ViewMode = "colour" | "data" | "plate";
+export type ViewMode = "colour" | "data" | "plate" | "crust" | "density";
 
 /** Callbacks the control panel reports user input through. */
 export interface ControlsCallbacks {
@@ -12,6 +13,7 @@ export interface ControlsCallbacks {
     onViewModeChange: (mode: ViewMode) => void;
     onSeedModeChange: (enabled: boolean) => void;
     onBranchesChange: (branches: number) => void;
+    onVelocitiesChange: (enabled: boolean) => void;
     onClearFaults: () => void;
 }
 
@@ -23,6 +25,7 @@ export interface ControlsOptions {
     viewMode: ViewMode;
     seedMode: boolean;
     branchesPerSeed: number;
+    showVelocities: boolean;
 }
 
 /** Imperative handle for pushing live readouts back into the panel. */
@@ -33,6 +36,7 @@ export interface Controls {
     readonly viewMode: ViewMode;
     readonly seedMode: boolean;
     readonly branchesPerSeed: number;
+    readonly showVelocities: boolean;
     setCellCount: (count: number) => void;
     setPlateCount: (count: number) => void;
     setFps: (fps: number) => void;
@@ -66,6 +70,7 @@ export const createControls = (
         MIN_BRANCHES,
         MAX_BRANCHES,
     );
+    let showVelocities = options.showVelocities;
 
     const panel = document.createElement("div");
     Object.assign(panel.style, {
@@ -108,14 +113,19 @@ export const createControls = (
     const viewSelect = makeSelect(
         [
             { value: "colour", label: "Elevation colour" },
-            { value: "data", label: "Data (ids + elevation)" },
+            { value: "data", label: "Data (all properties)" },
             { value: "plate", label: "Plates" },
+            { value: "crust", label: "Crust type" },
+            { value: "density", label: "Density" },
         ],
         viewMode,
     );
 
     // Seed-placement mode: clicks drop plate seeds instead of orbiting.
     const seedToggle = makeToggle("Place plate seeds (click globe)", seedMode);
+
+    // Plate-velocity arrows overlay toggle.
+    const velocityToggle = makeToggle("Show plate velocities", showVelocities);
 
     // Branches-per-seed slider (how many faults each seed fans out).
     const branchesLabel = makeLabel();
@@ -194,6 +204,11 @@ export const createControls = (
         callbacks.onSeedModeChange(seedMode);
     });
 
+    velocityToggle.input.addEventListener("change", () => {
+        showVelocities = velocityToggle.input.checked;
+        callbacks.onVelocitiesChange(showVelocities);
+    });
+
     branchesSlider.addEventListener("input", () => {
         branchesPerSeed = clamp(
             Math.round(Number(branchesSlider.value)),
@@ -218,6 +233,7 @@ export const createControls = (
         viewLabel,
         viewSelect,
         seedToggle.row,
+        velocityToggle.row,
         branchesLabel,
         branchesSlider,
         clearButton,
@@ -244,6 +260,9 @@ export const createControls = (
         },
         get branchesPerSeed() {
             return branchesPerSeed;
+        },
+        get showVelocities() {
+            return showVelocities;
         },
         setCellCount: (count: number) => {
             cellEl.textContent = `Cells: ${count.toLocaleString()}`;

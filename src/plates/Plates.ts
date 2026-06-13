@@ -1,5 +1,4 @@
 import type { BoundaryGraph, CellMesh } from "../mesh/CellMesh";
-import type { CellData } from "../data/CellData";
 import { makeRng } from "../data/CellData";
 
 /** Tunable knobs for crack propagation. */
@@ -205,12 +204,16 @@ export class Plates {
 
     /**
      * Flood-fill the cell graph, never crossing a cracked arc, and write the
-     * resulting connected-component id into `data.plateId`. Returns the plate
-     * count. Linear in cell count.
+     * resulting connected-component id into `out` (a raw label per cell, in
+     * [0, plateCount)). Returns the plate count. Linear in cell count.
+     *
+     * These labels are renumbered on every call and carry no identity across
+     * calls; {@link PlateRegistry.relabel} maps them onto stable ids. Keeping
+     * the fill a pure component labeller is what makes the matcher testable.
      */
-    assignPlates(data: CellData): number {
+    assignPlates(out: Int32Array): number {
         const { cellCount } = this.mesh;
-        const plateId = data.plateId;
+        const plateId = out;
         plateId.fill(-1);
 
         const stack: number[] = [];

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { CellMesh } from "../mesh/CellMesh";
 import type { CellData } from "../data/CellData";
+import { DENSITY_MAX, DENSITY_MIN, type PlateData } from "../plates/PlateData";
 
 /**
  * Builds a single static Three.js mesh for the whole cell grid and exposes a
@@ -16,8 +17,20 @@ const EDGE_RADIUS = 1.003;
 /** Faults sit slightly above the faint wireframe so they read on top. */
 const FAULT_RADIUS = 1.005;
 
-/** How cells are coloured: by elevation, flat (data view), or by plate id. */
-export type ColourMode = "elevation" | "data" | "plate";
+/** Velocity arrows float above everything else so they stay readable. */
+const VELOCITY_RADIUS = 1.01;
+
+/** Arrow length per unit surface speed (rad/Myr) — tuned for visibility. */
+const VELOCITY_SCALE = 15;
+
+/** Arrowhead size as a fraction of the arrow shaft length. */
+const HEAD_FRACTION = 0.3;
+
+/**
+ * How cells are coloured: by elevation, flat (data view), by plate id, by crust
+ * type (oceanic vs continental), or by density.
+ */
+export type ColourMode = "elevation" | "data" | "plate" | "crust" | "density";
 
 export class CellRenderer {
     /** Group holding the filled faces, the faint wireframe, faults and seeds. */
@@ -41,6 +54,11 @@ export class CellRenderer {
     private readonly seedGeometry: THREE.BufferGeometry;
     private readonly seedMaterial: THREE.PointsMaterial;
     private readonly seedPoints: THREE.Points;
+
+    /** One arrow per plate showing its linear velocity at its centroid. */
+    private readonly velocityGeometry: THREE.BufferGeometry;
+    private readonly velocityMaterial: THREE.LineBasicMaterial;
+    private readonly velocityLines: THREE.LineSegments;
 
     /** First vertex index for each cell (CSR-style, length cellCount + 1). */
     private readonly cellVertexStart: Int32Array;
@@ -160,7 +178,25 @@ export class CellRenderer {
         this.seedPoints = new THREE.Points(this.seedGeometry, this.seedMaterial);
         this.seedPoints.visible = false;
 
-        this.object3D.add(mesh, this.edges, this.faultLines, this.seedPoints);
+        this.velocityGeometry = new THREE.BufferGeometry();
+        this.velocityGeometry.setAttribute(
+            "position",
+            new THREE.BufferAttribute(new Float32Array(0), 3),
+        );
+        this.velocityMaterial = new THREE.LineBasicMaterial({ color: 0xffffff });
+        this.velocityLines = new THREE.LineSegments(
+            this.velocityGeometry,
+            this.velocityMaterial,
+        );
+        this.velocityLines.visible = false;
+
+        this.object3D.add(
+            mesh,
+            this.edges,
+            this.faultLines,
+            this.seedPoints,
+            this.velocityLines,
+        );
     }
 
     /**
@@ -170,6 +206,8 @@ export class CellRenderer {
      * - `"elevation"`: ocean/land ramp split at `seaLevel`.
      * - `"data"`: flat white faces (the black wireframe carries the structure).
      * - `"plate"`: a stable per-`plateId` hue so plates read as solid regions.
+     * - `"crust"`: oceanic vs continental two-tone.
+     * - `"density"`: a light-to-dark ramp over the crust density range.
      */
     updateColours(
         data: CellData,
@@ -178,12 +216,7 @@ export class CellRenderer {
     ): void {
         const { cellCount } = this.cellMesh;
         for (let i = 0; i < cellCount; i++) {
-            const [r, g, b] =
-                mode === "data"
-                    ? [1, 1, 1]
-                    : mode === "plate"
-                      ? colourForPlate(data.plateId[i])
-                      : colourForElevation(data.elevation[i], seaLevel);
+            const [r, g, b] = colourForCell(data, mode, i, seaLevel);
             const start = this.cellVertexStart[i];
             const end = this.cellVertexStart[i + 1];
             for (let v = start; v < end; v++) {
@@ -238,6 +271,78 @@ export class CellRenderer {
         this.seedGeometry.getAttribute("position").needsUpdate = true;
     }
 
+    /**
+     * Rebuild the per-plate velocity arrows. Each plate gets one arrow at its
+     * centroid pointing along its linear surface velocity (`omega x centroid`),
+     * with length scaled by speed. Plates that are empty or effectively still
+     * are skipped. Arrows are drawn as line segments: a shaft plus two head
+     * strokes, all pushed just above the surface.
+     */
+    updateVelocities(plateData: PlateData, data: CellData): void {
+        const centroids = plateData.centroids(this.cellMesh, data);
+        const segments: number[] = [];
+
+        for (const [id, centroid] of centroids) {
+            const [cx, cy, cz] = centroid;
+            if (cx === 0 && cy === 0 && cz === 0) continue; // empty plate
+
+            const v = plateData.linearVelocity(id, [cx, cy, cz]);
+            const speed = Math.hypot(v[0], v[1], v[2]);
+            if (speed < 1e-6) continue; // effectively still
+
+            // Unit heading along the velocity and a perpendicular in the
+            // tangent plane (centroid is the surface normal) for the arrowhead.
+            const dx = v[0] / speed;
+            const dy = v[1] / speed;
+            const dz = v[2] / speed;
+            const sx = cy * dz - cz * dy;
+            const sy = cz * dx - cx * dz;
+            const sz = cx * dy - cy * dx;
+
+            const length = speed * VELOCITY_SCALE;
+            const head = length * HEAD_FRACTION;
+            const tipX = cx + dx * length;
+            const tipY = cy + dy * length;
+            const tipZ = cz + dz * length;
+
+            // Shaft.
+            pushSegment(segments, cx, cy, cz, tipX, tipY, tipZ);
+            // Two head strokes, swept back from the tip and out to each side.
+            const backX = tipX - dx * head;
+            const backY = tipY - dy * head;
+            const backZ = tipZ - dz * head;
+            pushSegment(
+                segments,
+                tipX,
+                tipY,
+                tipZ,
+                backX + sx * head,
+                backY + sy * head,
+                backZ + sz * head,
+            );
+            pushSegment(
+                segments,
+                tipX,
+                tipY,
+                tipZ,
+                backX - sx * head,
+                backY - sy * head,
+                backZ - sz * head,
+            );
+        }
+
+        this.velocityGeometry.setAttribute(
+            "position",
+            new THREE.BufferAttribute(new Float32Array(segments), 3),
+        );
+        this.velocityGeometry.getAttribute("position").needsUpdate = true;
+    }
+
+    /** Show or hide the plate-velocity arrows. */
+    setVelocitiesVisible(visible: boolean): void {
+        this.velocityLines.visible = visible;
+    }
+
     /** Show or hide the black cell-boundary lines (used in data mode). */
     setEdgesVisible(visible: boolean): void {
         this.edges.visible = visible;
@@ -258,8 +363,61 @@ export class CellRenderer {
         this.faultMaterial.dispose();
         this.seedGeometry.dispose();
         this.seedMaterial.dispose();
+        this.velocityGeometry.dispose();
+        this.velocityMaterial.dispose();
     }
 }
+
+/** Append a single line segment (two xyz points, pushed above the surface). */
+const pushSegment = (
+    out: number[],
+    ax: number,
+    ay: number,
+    az: number,
+    bx: number,
+    by: number,
+    bz: number,
+): void => {
+    out.push(
+        ax * VELOCITY_RADIUS,
+        ay * VELOCITY_RADIUS,
+        az * VELOCITY_RADIUS,
+        bx * VELOCITY_RADIUS,
+        by * VELOCITY_RADIUS,
+        bz * VELOCITY_RADIUS,
+    );
+};
+
+/** Pick a cell's colour for the active mode. */
+const colourForCell = (
+    data: CellData,
+    mode: ColourMode,
+    i: number,
+    seaLevel: number,
+): [number, number, number] => {
+    switch (mode) {
+        case "data":
+            return [1, 1, 1];
+        case "plate":
+            return colourForPlate(data.plateId[i]);
+        case "crust":
+            return colourForCrust(data.crustType[i]);
+        case "density":
+            return colourForDensity(data.density[i]);
+        default:
+            return colourForElevation(data.elevation[i], seaLevel);
+    }
+};
+
+/** Oceanic crust reads cool blue; continental crust reads warm tan. */
+const colourForCrust = (crustType: number): [number, number, number] =>
+    crustType === 1 ? [0.82, 0.71, 0.48] : [0.13, 0.32, 0.55];
+
+/** Light (least dense) to dark (most dense) ramp over the density range. */
+const colourForDensity = (density: number): [number, number, number] => {
+    const t = clamp01((density - DENSITY_MIN) / (DENSITY_MAX - DENSITY_MIN));
+    return mix([0.95, 0.93, 0.82], [0.35, 0.12, 0.18], t);
+};
 
 const MIN_ELEVATION = -10;
 const MAX_ELEVATION = 10;

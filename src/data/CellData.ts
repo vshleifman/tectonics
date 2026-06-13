@@ -1,4 +1,3 @@
-import { createNoise3D } from "simplex-noise";
 import type { CellMesh } from "../mesh/CellMesh";
 
 /**
@@ -9,58 +8,49 @@ import type { CellMesh } from "../mesh/CellMesh";
  * structure to keep even if hot loops later move to a Web Worker / WASM / GPU.
  */
 export class CellData {
-    /** Prototype elevation scale roughly -10..+10. */
+    /** Elevation per cell: freshly-cooled crust, ~-2..+2. */
     readonly elevation: Float32Array;
 
     /** Plate membership. Present now but unused (all 0) until the plates phase. */
     readonly plateId: Int32Array;
 
+    /** Crust type per cell: 0 = oceanic, 1 = continental. */
+    readonly crustType: Uint8Array;
+
+    /** Crust age per cell, in millions of years (Myr). */
+    readonly age: Float32Array;
+
+    /** Crust density per cell (g/cm3), derived from crust type and age. */
+    readonly density: Float32Array;
+
     constructor(cellCount: number) {
         this.elevation = new Float32Array(cellCount);
         this.plateId = new Int32Array(cellCount);
+        this.crustType = new Uint8Array(cellCount);
+        this.age = new Float32Array(cellCount);
+        this.density = new Float32Array(cellCount);
     }
 }
 
+/** Freshly-cooled crust: mostly uniform, with faint variation within -2..+2. */
+const ELEVATION_VARIATION = 2;
+
 /**
- * Seed a deterministic test-pattern elevation so cells render with distinct,
- * structured colours. Layered 3D simplex noise sampled at each cell centre
- * gives continent-like blobs; this is purely to prove the render path, not a
- * simulation step.
+ * Seed a near-uniform starting elevation. The planet begins as a freshly-cooled
+ * crust: every cell sits close to sea level with only slight low-amplitude
+ * jitter so faces remain faintly distinct. Plate interactions and simulated
+ * geomorphology will produce real relief later.
  */
-export const seedTestElevation = (
+export const seedUniformElevation = (
     mesh: CellMesh,
     data: CellData,
     seed = "tectonics",
 ): void => {
-    const noise = createNoise3D(makeRng(seed));
-    const octaves = 4;
-    const lacunarity = 2;
-    const gain = 0.5;
-    const baseFrequency = 1.6;
-
+    const rng = makeRng(seed);
     for (let i = 0; i < mesh.cellCount; i++) {
-        const [x, y, z] = mesh.position(i);
-        let amplitude = 1;
-        let frequency = baseFrequency;
-        let sum = 0;
-        let norm = 0;
-        for (let o = 0; o < octaves; o++) {
-            sum +=
-                amplitude * noise(x * frequency, y * frequency, z * frequency);
-            norm += amplitude;
-            amplitude *= gain;
-            frequency *= lacunarity;
-        }
-        // Normalised to [-1, 1], then shaped and scaled to the elevation range.
-        const n = sum / norm;
-        data.elevation[i] = shapeElevation(n) * 10;
+        // Centred on 0 with a small symmetric jitter, kept inside [-2, +2].
+        data.elevation[i] = (rng() * 2 - 1) * ELEVATION_VARIATION;
     }
-};
-
-/** Bias the noise so there is a clear sea-level split between low and high. */
-const shapeElevation = (n: number): number => {
-    const ridged = Math.sign(n) * Math.pow(Math.abs(n), 1.2);
-    return Math.max(-1, Math.min(1, ridged));
 };
 
 /** Tiny deterministic PRNG (mulberry32) seeded from a string. */
