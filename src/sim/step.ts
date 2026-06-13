@@ -1,5 +1,5 @@
-import type { CellMesh } from "../mesh/CellMesh";
 import type { CellData } from "../data/CellData";
+import type { CellMesh } from "../mesh/CellMesh";
 
 /**
  * Simulation step — a NO-OP for Prototype 1.
@@ -10,5 +10,5 @@ import type { CellData } from "../data/CellData";
  * later moved into a Web Worker without restructuring anything upstream.
  */
 export const step = (_mesh: CellMesh, _data: CellData): void => {
-    // No tectonics yet. See DesignDoc "Out of Scope (Later Phases)".
+  // No tectonics yet. See DesignDoc "Out of Scope (Later Phases)".
 };

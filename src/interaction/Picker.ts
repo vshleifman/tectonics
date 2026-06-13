@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import type { BoundaryGraph } from "../mesh/CellMesh";
-import { unprojectMercator, type Projection } from "../render/projection";
+import { type Projection, unprojectMercator } from "../render/projection";
 
 /**
  * Resolves a pointer event to the nearest fault junction on the globe.
@@ -13,59 +13,59 @@ import { unprojectMercator, type Projection } from "../render/projection";
  * at 100k+ cells.
  */
 export class Picker {
-    private readonly raycaster = new THREE.Raycaster();
-    private readonly sphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 1);
-    private readonly ndc = new THREE.Vector2();
-    private readonly hit = new THREE.Vector3();
-    private readonly point = new THREE.Vector3();
-    private projection: Projection = "sphere";
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly sphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 1);
+  private readonly ndc = new THREE.Vector2();
+  private readonly hit = new THREE.Vector3();
+  private readonly point = new THREE.Vector3();
+  private projection: Projection = "sphere";
 
-    constructor(
-        private camera: THREE.Camera,
-        private readonly domElement: HTMLElement,
-    ) {}
+  constructor(
+    private camera: THREE.Camera,
+    private readonly domElement: HTMLElement,
+  ) {}
 
-    /** Switch which camera + projection subsequent picks are resolved against. */
-    setProjection(projection: Projection, camera: THREE.Camera): void {
-        this.projection = projection;
-        this.camera = camera;
+  /** Switch which camera + projection subsequent picks are resolved against. */
+  setProjection(projection: Projection, camera: THREE.Camera): void {
+    this.projection = projection;
+    this.camera = camera;
+  }
+
+  /** Junction id under the pointer, or null if the pointer misses the world. */
+  pickJunction(event: PointerEvent, graph: BoundaryGraph): number | null {
+    const rect = this.domElement.getBoundingClientRect();
+    this.ndc.set(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -(((event.clientY - rect.top) / rect.height) * 2 - 1),
+    );
+
+    let x: number;
+    let y: number;
+    let z: number;
+    if (this.projection === "mercator") {
+      // Unproject to the map plane; x/y are the map coords regardless of
+      // depth under an axis-aligned orthographic camera.
+      this.point.set(this.ndc.x, this.ndc.y, 0).unproject(this.camera);
+      [x, y, z] = unprojectMercator(this.point.x, this.point.y);
+    } else {
+      this.raycaster.setFromCamera(this.ndc, this.camera);
+      if (!this.raycaster.ray.intersectSphere(this.sphere, this.hit)) {
+        return null;
+      }
+      ({ x, y, z } = this.hit);
     }
 
-    /** Junction id under the pointer, or null if the pointer misses the world. */
-    pickJunction(event: PointerEvent, graph: BoundaryGraph): number | null {
-        const rect = this.domElement.getBoundingClientRect();
-        this.ndc.set(
-            ((event.clientX - rect.left) / rect.width) * 2 - 1,
-            -(((event.clientY - rect.top) / rect.height) * 2 - 1),
-        );
-
-        let x: number;
-        let y: number;
-        let z: number;
-        if (this.projection === "mercator") {
-            // Unproject to the map plane; x/y are the map coords regardless of
-            // depth under an axis-aligned orthographic camera.
-            this.point.set(this.ndc.x, this.ndc.y, 0).unproject(this.camera);
-            [x, y, z] = unprojectMercator(this.point.x, this.point.y);
-        } else {
-            this.raycaster.setFromCamera(this.ndc, this.camera);
-            if (!this.raycaster.ray.intersectSphere(this.sphere, this.hit)) {
-                return null;
-            }
-            ({ x, y, z } = this.hit);
-        }
-
-        const pos = graph.junctionPos;
-        let best = -1;
-        let bestDot = -Infinity;
-        for (let j = 0; j < graph.junctionCount; j++) {
-            const o = j * 3;
-            const dot = pos[o] * x + pos[o + 1] * y + pos[o + 2] * z;
-            if (dot > bestDot) {
-                bestDot = dot;
-                best = j;
-            }
-        }
-        return best;
+    const pos = graph.junctionPos;
+    let best = -1;
+    let bestDot = -Infinity;
+    for (let j = 0; j < graph.junctionCount; j++) {
+      const o = j * 3;
+      const dot = pos[o] * x + pos[o + 1] * y + pos[o + 2] * z;
+      if (dot > bestDot) {
+        bestDot = dot;
+        best = j;
+      }
     }
+    return best;
+  }
 }

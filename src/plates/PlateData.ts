@@ -1,6 +1,8 @@
-import type { CellMesh, Vec3 } from "../mesh/CellMesh";
 import type { CellData } from "../data/CellData";
 import { makeRng } from "../data/CellData";
+import { clamp01 } from "../math/scalar";
+import { cross, normalise, type Vec3 } from "../math/vec3";
+import type { CellMesh } from "../mesh/CellMesh";
 import type { RelabelReport } from "./PlateRegistry";
 
 /**
@@ -18,67 +20,58 @@ import type { RelabelReport } from "./PlateRegistry";
  * linear velocity is `omega x position`, derived on demand and never stored.
  */
 export interface PlateProperties {
-    /** Angular velocity (rad/Myr); direction = Euler pole, magnitude = spin. */
-    omega: [number, number, number];
-    /** Whether the plate's crust is continental (buoyant) vs oceanic. */
-    continental: boolean;
+  /** Angular velocity (rad/Myr); direction = Euler pole, magnitude = spin. */
+  omega: [number, number, number];
+  /** Whether the plate's crust is continental (buoyant) vs oceanic. */
+  continental: boolean;
 }
 
 export class PlateData {
-    /** Properties per live stable plate id. */
-    readonly byId = new Map<number, PlateProperties>();
+  /** Properties per live stable plate id. */
+  readonly byId = new Map<number, PlateProperties>();
 
-    /** Number of live plates. */
-    get count(): number {
-        return this.byId.size;
-    }
+  /** Number of live plates. */
+  get count(): number {
+    return this.byId.size;
+  }
 
-    /**
-     * Linear (tangent) velocity plate `id` imparts at world point `pos`: the
-     * cross product `omega x pos`. For a point on the unit sphere this is a
-     * vector tangent to the surface whose length is the local surface speed.
-     * Returns the zero vector for an unknown id.
-     */
-    linearVelocity(id: number, pos: Vec3): [number, number, number] {
-        const props = this.byId.get(id);
-        if (!props) return [0, 0, 0];
-        const [ox, oy, oz] = props.omega;
-        return [
-            oy * pos[2] - oz * pos[1],
-            oz * pos[0] - ox * pos[2],
-            ox * pos[1] - oy * pos[0],
-        ];
-    }
+  /**
+   * Linear (tangent) velocity plate `id` imparts at world point `pos`: the
+   * cross product `omega x pos`. For a point on the unit sphere this is a
+   * vector tangent to the surface whose length is the local surface speed.
+   * Returns the zero vector for an unknown id.
+   */
+  linearVelocity(id: number, pos: Vec3): Vec3 {
+    const props = this.byId.get(id);
+    if (!props) return [0, 0, 0];
+    return cross(props.omega, pos);
+  }
 
-    /**
-     * Unit-sphere centroid of every live plate, keyed by stable id. Computed by
-     * averaging member-cell centres and renormalising; a good anchor for drawing
-     * one velocity arrow per plate.
-     */
-    centroids(mesh: CellMesh, data: CellData): Map<number, Vec3> {
-        const acc = new Map<number, [number, number, number]>();
-        for (let i = 0; i < mesh.cellCount; i++) {
-            const id = data.plateId[i];
-            if (id < 0) continue;
-            const pos = mesh.position(i);
-            const sum = acc.get(id);
-            if (sum) {
-                sum[0] += pos[0];
-                sum[1] += pos[1];
-                sum[2] += pos[2];
-            } else {
-                acc.set(id, [pos[0], pos[1], pos[2]]);
-            }
-        }
-        for (const sum of acc.values()) {
-            const len = Math.hypot(sum[0], sum[1], sum[2]);
-            if (len === 0) continue;
-            sum[0] /= len;
-            sum[1] /= len;
-            sum[2] /= len;
-        }
-        return acc;
+  /**
+   * Unit-sphere centroid of every live plate, keyed by stable id. Computed by
+   * averaging member-cell centres and renormalising; a good anchor for drawing
+   * one velocity arrow per plate.
+   */
+  centroids(mesh: CellMesh, data: CellData): Map<number, Vec3> {
+    const acc = new Map<number, [number, number, number]>();
+    for (let i = 0; i < mesh.cellCount; i++) {
+      const id = data.plateId[i];
+      if (id < 0) continue;
+      const pos = mesh.position(i);
+      const sum = acc.get(id);
+      if (sum) {
+        sum[0] += pos[0];
+        sum[1] += pos[1];
+        sum[2] += pos[2];
+      } else {
+        acc.set(id, [pos[0], pos[1], pos[2]]);
+      }
     }
+    // Renormalise each accumulated sum back onto the unit sphere.
+    const centroids = new Map<number, Vec3>();
+    for (const [id, sum] of acc) centroids.set(id, normalise(sum));
+    return centroids;
+  }
 }
 
 /** Fraction of plates that start as (buoyant) continental crust. */
@@ -125,26 +118,25 @@ export const DENSITY_MAX = OCEANIC_DENSITY_OLD;
  * so persist across relabels (see {@link initialiseCrust}).
  */
 export const reconcilePlateProperties = (
-    plateData: PlateData,
-    report: RelabelReport,
-    seed = "tectonics",
+  plateData: PlateData,
+  report: RelabelReport,
+  seed = "tectonics",
 ): void => {
-    for (const id of report.retiredIds) plateData.byId.delete(id);
+  for (const id of report.retiredIds) plateData.byId.delete(id);
 
-    for (const id of report.newIds) {
-        const parent = report.parentOf.get(id) ?? -1;
-        const parentProps =
-            parent >= 0 ? plateData.byId.get(parent) : undefined;
-        const rng = makeRng(`${seed}:plate:${id}`);
-        if (parentProps) {
-            plateData.byId.set(id, {
-                omega: perturbOmega(parentProps.omega, rng),
-                continental: parentProps.continental,
-            });
-        } else {
-            plateData.byId.set(id, freshPlate(rng));
-        }
+  for (const id of report.newIds) {
+    const parent = report.parentOf.get(id) ?? -1;
+    const parentProps = parent >= 0 ? plateData.byId.get(parent) : undefined;
+    const rng = makeRng(`${seed}:plate:${id}`);
+    if (parentProps) {
+      plateData.byId.set(id, {
+        omega: perturbOmega(parentProps.omega, rng),
+        continental: parentProps.continental,
+      });
+    } else {
+      plateData.byId.set(id, freshPlate(rng));
     }
+  }
 };
 
 /**
@@ -155,53 +147,51 @@ export const reconcilePlateProperties = (
  * these arrays alone. Age is keyed per cell so it is stable and reproducible.
  */
 export const initialiseCrust = (
-    mesh: CellMesh,
-    data: CellData,
-    plateData: PlateData,
-    seed = "tectonics",
+  mesh: CellMesh,
+  data: CellData,
+  plateData: PlateData,
+  seed = "tectonics",
 ): void => {
-    for (let i = 0; i < mesh.cellCount; i++) {
-        const id = data.plateId[i];
-        const props = id >= 0 ? plateData.byId.get(id) : undefined;
-        const isContinental = props?.continental ? 1 : 0;
-        const rng = makeRng(`${seed}:cell:${i}`);
-        data.crustType[i] = isContinental;
-        if (isContinental) {
-            data.age[i] =
-                CONTINENTAL_AGE_MIN +
-                rng() * (CONTINENTAL_AGE_MAX - CONTINENTAL_AGE_MIN);
-            data.density[i] = CONTINENTAL_DENSITY;
-        } else {
-            const age = rng() * MAX_OCEANIC_AGE;
-            data.age[i] = age;
-            const t = clamp01(age / MAX_OCEANIC_AGE);
-            data.density[i] =
-                OCEANIC_DENSITY_YOUNG +
-                t * (OCEANIC_DENSITY_OLD - OCEANIC_DENSITY_YOUNG);
-        }
+  for (let i = 0; i < mesh.cellCount; i++) {
+    const id = data.plateId[i];
+    const props = id >= 0 ? plateData.byId.get(id) : undefined;
+    const isContinental = props?.continental ? 1 : 0;
+    const rng = makeRng(`${seed}:cell:${i}`);
+    data.crustType[i] = isContinental;
+    if (isContinental) {
+      data.age[i] =
+        CONTINENTAL_AGE_MIN +
+        rng() * (CONTINENTAL_AGE_MAX - CONTINENTAL_AGE_MIN);
+      data.density[i] = CONTINENTAL_DENSITY;
+    } else {
+      const age = rng() * MAX_OCEANIC_AGE;
+      data.age[i] = age;
+      const t = clamp01(age / MAX_OCEANIC_AGE);
+      data.density[i] =
+        OCEANIC_DENSITY_YOUNG +
+        t * (OCEANIC_DENSITY_OLD - OCEANIC_DENSITY_YOUNG);
     }
+  }
 };
 
 /** A brand-new plate: random Euler pole, random speed, random crust type. */
 const freshPlate = (rng: () => number): PlateProperties => {
-    // Uniform random unit axis (the Euler pole).
-    const z = rng() * 2 - 1;
-    const phi = rng() * 2 * Math.PI;
-    const r = Math.sqrt(Math.max(0, 1 - z * z));
-    const speed = MIN_SPEED + rng() * (MAX_SPEED - MIN_SPEED);
-    return {
-        omega: [r * Math.cos(phi) * speed, r * Math.sin(phi) * speed, z * speed],
-        continental: rng() < CONTINENTAL_PROBABILITY,
-    };
+  // Uniform random unit axis (the Euler pole).
+  const z = rng() * 2 - 1;
+  const phi = rng() * 2 * Math.PI;
+  const r = Math.sqrt(Math.max(0, 1 - z * z));
+  const speed = MIN_SPEED + rng() * (MAX_SPEED - MIN_SPEED);
+  return {
+    omega: [r * Math.cos(phi) * speed, r * Math.sin(phi) * speed, z * speed],
+    continental: rng() < CONTINENTAL_PROBABILITY,
+  };
 };
 
 /** Inherit a parent's angular velocity with a small per-axis jitter. */
 const perturbOmega = (
-    omega: readonly [number, number, number],
-    rng: () => number,
+  omega: readonly [number, number, number],
+  rng: () => number,
 ): [number, number, number] => {
-    const jitter = (): number => 1 + (rng() * 2 - 1) * SPLIT_PERTURB;
-    return [omega[0] * jitter(), omega[1] * jitter(), omega[2] * jitter()];
+  const jitter = (): number => 1 + (rng() * 2 - 1) * SPLIT_PERTURB;
+  return [omega[0] * jitter(), omega[1] * jitter(), omega[2] * jitter()];
 };
-
-const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));

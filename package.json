@@ -6,13 +6,18 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "format": "biome format --write .",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "simplex-noise": "^4.0.3",
     "three": "^0.169.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.0",
     "@types/three": "^0.169.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"

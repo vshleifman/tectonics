@@ -9,6 +9,8 @@
  * `[-1, 1]` as well, so the map is square in world units.
  */
 
+import { clamp } from "../math/scalar";
+
 /** Which projection the scene is currently drawn in. */
 export type Projection = "sphere" | "mercator";
 
@@ -22,12 +24,9 @@ export const MAP_HALF_EXTENT = 1;
  */
 export const MERCATOR_LAT_LIMIT = (85.05 * Math.PI) / 180;
 
-const clamp = (x: number, min: number, max: number): number =>
-    Math.max(min, Math.min(max, x));
-
 /** Forward Mercator latitude stretch. */
 const mercatorY = (lat: number): number =>
-    Math.log(Math.tan(Math.PI / 4 + lat / 2.5));
+  Math.log(Math.tan(Math.PI / 4 + lat / 2.5));
 
 /**
  * Shift `lon` by whole turns so it lands within PI of `refLon`. This is the
@@ -36,15 +35,15 @@ const mercatorY = (lat: number): number =>
  * tearing across the whole map.
  */
 export const unwrapLon = (lon: number, refLon: number): number => {
-    let result = lon;
-    while (result - refLon > Math.PI) result -= 2 * Math.PI;
-    while (result - refLon < -Math.PI) result += 2 * Math.PI;
-    return result;
+  let result = lon;
+  while (result - refLon > Math.PI) result -= 2 * Math.PI;
+  while (result - refLon < -Math.PI) result += 2 * Math.PI;
+  return result;
 };
 
 /** Longitude of a unit-sphere point, for use as an unwrap reference. */
 export const longitudeOf = (x: number, _y: number, z: number): number =>
-    Math.atan2(z, x);
+  Math.atan2(z, x);
 
 /**
  * Project a unit-sphere point into the active projection.
@@ -55,25 +54,25 @@ export const longitudeOf = (x: number, _y: number, z: number): number =>
  *   reference so multi-point shapes don't tear at the seam.
  */
 export const projectPoint = (
-    x: number,
-    y: number,
-    z: number,
-    projection: Projection,
-    lift = 0,
-    refLon?: number,
+  x: number,
+  y: number,
+  z: number,
+  projection: Projection,
+  lift = 0,
+  refLon?: number,
 ): [number, number, number] => {
-    if (projection === "sphere") {
-        const r = 1 + lift;
-        return [x * r, y * r, z * r];
-    }
-    let lon = Math.atan2(z, x);
-    if (refLon !== undefined) lon = unwrapLon(lon, refLon);
-    const lat = clamp(
-        Math.asin(clamp(y, -1, 1)),
-        -MERCATOR_LAT_LIMIT,
-        MERCATOR_LAT_LIMIT,
-    );
-    return [lon / Math.PI, mercatorY(lat) / Math.PI, lift];
+  if (projection === "sphere") {
+    const r = 1 + lift;
+    return [x * r, y * r, z * r];
+  }
+  let lon = Math.atan2(z, x);
+  if (refLon !== undefined) lon = unwrapLon(lon, refLon);
+  const lat = clamp(
+    Math.asin(clamp(y, -1, 1)),
+    -MERCATOR_LAT_LIMIT,
+    MERCATOR_LAT_LIMIT,
+  );
+  return [lon / Math.PI, mercatorY(lat) / Math.PI, lift];
 };
 
 /**
@@ -81,11 +80,11 @@ export const projectPoint = (
  * back to a unit-sphere direction, used to pick junctions under the pointer.
  */
 export const unprojectMercator = (
-    X: number,
-    Y: number,
+  X: number,
+  Y: number,
 ): [number, number, number] => {
-    const lon = X * Math.PI;
-    const lat = 2 * Math.atan(Math.exp(Y * Math.PI)) - Math.PI / 2;
-    const cosLat = Math.cos(lat);
-    return [cosLat * Math.cos(lon), Math.sin(lat), cosLat * Math.sin(lon)];
+  const lon = X * Math.PI;
+  const lat = 2 * Math.atan(Math.exp(Y * Math.PI)) - Math.PI / 2;
+  const cosLat = Math.cos(lat);
+  return [cosLat * Math.cos(lon), Math.sin(lat), cosLat * Math.sin(lon)];
 };
