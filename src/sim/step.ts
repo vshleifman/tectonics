@@ -1,14 +1,25 @@
 import type { CellData } from "../data/CellData";
 import type { CellMesh } from "../mesh/CellMesh";
+import type { PlateData } from "../plates/PlateData";
+import { advect } from "./advect";
 
 /**
- * Simulation step — a NO-OP for Prototype 1.
+ * One simulation tick: advance plate motion by `dtMyr`.
  *
- * Intentionally a pure function over the mesh interface and flat typed arrays:
- * it reads/writes only `data`'s arrays and never touches rendering or the DOM.
- * Keeping this signature stable now means tectonics can be implemented here and
- * later moved into a Web Worker without restructuring anything upstream.
+ * Reads crust from `src` and writes the advected result into `dst` (a separate
+ * back buffer), touching only flat typed arrays via the mesh interface — never
+ * rendering or the DOM. Keeping this signature pure means tectonics can later
+ * move into a Web Worker without restructuring anything upstream.
+ *
+ * For now the only rule is rigid rotation + crust advection; boundary
+ * classification and elevation response come in a later increment.
  */
-export const step = (_mesh: CellMesh, _data: CellData): void => {
-  // No tectonics yet. See DesignDoc "Out of Scope (Later Phases)".
+export const step = (
+  mesh: CellMesh,
+  src: CellData,
+  dst: CellData,
+  plateData: PlateData,
+  dtMyr: number,
+): void => {
+  advect(mesh, src, dst, plateData, dtMyr);
 };

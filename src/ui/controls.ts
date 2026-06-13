@@ -18,6 +18,7 @@ export interface ControlsCallbacks {
   onSeedModeChange: (enabled: boolean) => void;
   onBranchesChange: (branches: number) => void;
   onVelocitiesChange: (enabled: boolean) => void;
+  onRunChange: (enabled: boolean) => void;
   onClearFaults: () => void;
 }
 
@@ -31,6 +32,7 @@ export interface ControlsOptions {
   seedMode: boolean;
   branchesPerSeed: number;
   showVelocities: boolean;
+  running: boolean;
 }
 
 /** Imperative handle for pushing live readouts back into the panel. */
@@ -43,6 +45,7 @@ export interface Controls {
   readonly seedMode: boolean;
   readonly branchesPerSeed: number;
   readonly showVelocities: boolean;
+  readonly running: boolean;
   setCellCount: (count: number) => void;
   setPlateCount: (count: number) => void;
   setFps: (fps: number) => void;
@@ -78,6 +81,7 @@ export const createControls = (
     MAX_BRANCHES,
   );
   let showVelocities = options.showVelocities;
+  let running = options.running;
 
   const panel = document.createElement("div");
   Object.assign(panel.style, {
@@ -153,6 +157,9 @@ export const createControls = (
     1,
     branchesPerSeed,
   );
+
+  // Run-simulation toggle: advances plate motion while checked.
+  const runToggle = makeToggle("Run simulation", running);
 
   // Clear-faults button.
   const clearButton = makeButton("Clear faults");
@@ -232,6 +239,11 @@ export const createControls = (
     callbacks.onVelocitiesChange(showVelocities);
   });
 
+  runToggle.input.addEventListener("change", () => {
+    running = runToggle.input.checked;
+    callbacks.onRunChange(running);
+  });
+
   branchesSlider.addEventListener("input", () => {
     branchesPerSeed = clamp(
       Math.round(Number(branchesSlider.value)),
@@ -261,6 +273,7 @@ export const createControls = (
     velocityToggle.row,
     branchesLabel,
     branchesSlider,
+    runToggle.row,
     clearButton,
     readout,
     note,
@@ -291,6 +304,9 @@ export const createControls = (
     },
     get showVelocities() {
       return showVelocities;
+    },
+    get running() {
+      return running;
     },
     setCellCount: (count: number) => {
       cellEl.textContent = `Cells: ${count.toLocaleString()}`;

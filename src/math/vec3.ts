@@ -43,6 +43,28 @@ export const cross = (a: Vec3, b: Vec3): Vec3 => [
 ];
 
 /**
+ * Rotate `v` about a unit `axis` by `angle` radians (Rodrigues' formula). This
+ * is the core of plate motion: a rigid plate moves by rotating its crust about
+ * its Euler pole. `axis` is assumed to be a unit vector; a zero `angle` (or a
+ * degenerate axis) returns `v` unchanged so callers can pass `omega * dt`
+ * straight through without special-casing stationary plates.
+ */
+export const rotateAboutAxis = (v: Vec3, axis: Vec3, angle: number): Vec3 => {
+  if (angle === 0) return v;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const d = dot(axis, v);
+  const c = cross(axis, v);
+  // v*cos + (axis x v)*sin + axis*(axis.v)*(1 - cos)
+  const k = d * (1 - cos);
+  return [
+    v[0] * cos + c[0] * sin + axis[0] * k,
+    v[1] * cos + c[1] * sin + axis[1] * k,
+    v[2] * cos + c[2] * sin + axis[2] * k,
+  ];
+};
+
+/**
  * Component of `v` tangent to the unit sphere at `normal`, i.e. `v` with its
  * radial part removed. `normal` is assumed to be a unit vector.
  */

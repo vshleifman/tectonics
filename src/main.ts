@@ -25,7 +25,10 @@ const INITIAL_VIEW_MODE: ViewMode = "plate";
 const INITIAL_SEED_MODE = true;
 const INITIAL_BRANCHES_PER_SEED = 3;
 const INITIAL_SHOW_VELOCITIES = false;
+const INITIAL_RUNNING = false;
 const SIM_INTERVAL_MS = 1000; // tectonics ticks slowly, decoupled from render
+/** Myr of plate motion advanced per simulation tick (tunable). */
+const DT_MYR = 2;
 /** Pointer travel (px) above which a press counts as an orbit drag, not a click. */
 const CLICK_DRAG_THRESHOLD = 6;
 
@@ -99,6 +102,8 @@ const picker = new Picker(camera, renderer.domElement);
 
 let cellMesh: CellMesh;
 let cellData: CellData;
+/** Back buffer the simulation gathers into before copying back over `cellData`. */
+let backBuffer: CellData;
 let cellRenderer: CellRenderer | null = null;
 let plates: Plates | null = null;
 let plateData: PlateData | null = null;
@@ -114,6 +119,7 @@ let viewMode: ViewMode = INITIAL_VIEW_MODE;
 let seedMode = INITIAL_SEED_MODE;
 let branchesPerSeed = INITIAL_BRANCHES_PER_SEED;
 let showVelocities = INITIAL_SHOW_VELOCITIES;
+let running = INITIAL_RUNNING;
 
 /** Map the UI view mode onto the renderer's colour mode. */
 const colourMode = (): ColourMode =>
@@ -192,6 +198,7 @@ const rebuild = (level: number): void => {
 
   cellMesh = new IcosphereMesh(level);
   cellData = new CellData(cellMesh.cellCount);
+  backBuffer = new CellData(cellMesh.cellCount);
   seedUniformElevation(cellMesh, cellData);
   rawLabels = new Int32Array(cellMesh.cellCount);
 
@@ -242,6 +249,7 @@ const ui = createControls(
     seedMode: INITIAL_SEED_MODE,
     branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
     showVelocities: INITIAL_SHOW_VELOCITIES,
+    running: INITIAL_RUNNING,
   },
   {
     onLevelChange: (level) => rebuild(level),
@@ -271,6 +279,9 @@ const ui = createControls(
     onVelocitiesChange: (enabled) => {
       showVelocities = enabled;
       applyVelocities();
+    },
+    onRunChange: (enabled) => {
+      running = enabled;
     },
     onClearFaults: () => {
       if (!plates || !cellRenderer) return;
@@ -308,12 +319,24 @@ renderer.domElement.addEventListener("pointerup", (event) => {
 });
 
 // --- Simulation tick: decoupled from rendering -----------------------------
-// Pure no-op for now; recolour only if data changed (it never does yet).
+// Advect crust one step into the back buffer, copy it back over the live data
+// (keeping every existing reference to `cellData` valid), then refresh visuals.
+
+const copyCellData = (from: CellData, to: CellData): void => {
+  to.elevation.set(from.elevation);
+  to.plateId.set(from.plateId);
+  to.crustType.set(from.crustType);
+  to.age.set(from.age);
+  to.density.set(from.density);
+};
 
 window.setInterval(() => {
-  step(cellMesh, cellData);
-  // When tectonics writes elevation later, recolour here:
-  // cellRenderer?.updateColours(cellData);
+  if (!running || !plateData || !cellRenderer) return;
+  step(cellMesh, cellData, backBuffer, plateData, DT_MYR);
+  copyCellData(backBuffer, cellData);
+  recolour();
+  cellRenderer.updateVelocities(plateData, cellData);
+  cellLabels.refresh();
 }, SIM_INTERVAL_MS);
 
 // --- Render loop: 60fps, only re-colours / redraws a static mesh -----------
