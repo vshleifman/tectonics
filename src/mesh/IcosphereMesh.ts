@@ -1,4 +1,4 @@
-import type { CellMesh, Vec3 } from "./CellMesh";
+import type { BoundaryGraph, CellMesh, Vec3 } from "./CellMesh";
 
 /** Mutable 3-component vector used during the build (number[] for speed). */
 type V3 = [number, number, number];
@@ -77,6 +77,12 @@ export class IcosphereMesh implements CellMesh {
     private readonly neighbourOffsets: Int32Array;
     private readonly neighbourList: Int32Array;
 
+    /** Arc index for each neighbour-list entry (same CSR layout as above). */
+    private readonly neighbourArcList: Int32Array;
+
+    /** Dual edge skeleton used to define faults; built once, retained by ref. */
+    private readonly boundary: BoundaryGraph;
+
     /** Polygon corners in CSR form: corner xyz triples sliced by polyOffsets. */
     private readonly polyOffsets: Int32Array;
     private readonly polyCorners: Float32Array;
@@ -122,7 +128,7 @@ export class IcosphereMesh implements CellMesh {
             neighbourSets[c].add(b);
         }
 
-        // Face centroids on the unit sphere (the dual cell corners).
+        // Face centroids on the unit sphere (the dual cell corners = junctions).
         const faceCentroids: V3[] = faces.map(face => {
             const centroid = scale(
                 add(add(verts[face[0]], verts[face[1]]), verts[face[2]]),
@@ -131,7 +137,83 @@ export class IcosphereMesh implements CellMesh {
             return normalise(centroid);
         });
 
-        // Flatten neighbour graph (CSR).
+        // --- Dual edge skeleton (boundary graph) -----------------------------
+        // Junctions are faces; arcs are primal edges. Each primal edge (a,b) is
+        // shared by exactly two faces (its junction endpoints) and separates the
+        // two cells a, b. `edgeToArc` also lets the neighbour list record which
+        // arc severs each link.
+        const vertCount = verts.length;
+        const edgeKey = (a: number, b: number): number =>
+            a < b ? a * vertCount + b : b * vertCount + a;
+        const edgeFaces = new Map<number, [number, number]>();
+        const edgeCells = new Map<number, [number, number]>();
+        for (let f = 0; f < faces.length; f++) {
+            const [a, b, c] = faces[f];
+            const tri: [number, number][] = [
+                [a, b],
+                [b, c],
+                [c, a],
+            ];
+            for (const [u, v] of tri) {
+                const key = edgeKey(u, v);
+                const existing = edgeFaces.get(key);
+                if (existing === undefined) {
+                    edgeFaces.set(key, [f, -1]);
+                    edgeCells.set(key, u < v ? [u, v] : [v, u]);
+                } else {
+                    existing[1] = f;
+                }
+            }
+        }
+
+        const arcCount = edgeFaces.size;
+        const arcEnds = new Int32Array(arcCount * 2);
+        const arcCells = new Int32Array(arcCount * 2);
+        const edgeToArc = new Map<number, number>();
+        // Junction (face) degrees, for the CSR adjacency below.
+        const junctionArcOffsets = new Int32Array(faces.length + 1);
+        let arcIndex = 0;
+        for (const [key, [f0, f1]] of edgeFaces) {
+            const cells = edgeCells.get(key) as [number, number];
+            arcEnds[arcIndex * 2] = f0;
+            arcEnds[arcIndex * 2 + 1] = f1;
+            arcCells[arcIndex * 2] = cells[0];
+            arcCells[arcIndex * 2 + 1] = cells[1];
+            edgeToArc.set(key, arcIndex);
+            junctionArcOffsets[f0 + 1]++;
+            if (f1 >= 0) junctionArcOffsets[f1 + 1]++;
+            arcIndex++;
+        }
+        for (let j = 0; j < faces.length; j++) {
+            junctionArcOffsets[j + 1] += junctionArcOffsets[j];
+        }
+        const junctionArcs = new Int32Array(junctionArcOffsets[faces.length]);
+        const junctionWrite = junctionArcOffsets.slice(0, faces.length);
+        for (let a = 0; a < arcCount; a++) {
+            const f0 = arcEnds[a * 2];
+            const f1 = arcEnds[a * 2 + 1];
+            junctionArcs[junctionWrite[f0]++] = a;
+            if (f1 >= 0) junctionArcs[junctionWrite[f1]++] = a;
+        }
+
+        const junctionPos = new Float32Array(faces.length * 3);
+        for (let f = 0; f < faces.length; f++) {
+            junctionPos[f * 3] = faceCentroids[f][0];
+            junctionPos[f * 3 + 1] = faceCentroids[f][1];
+            junctionPos[f * 3 + 2] = faceCentroids[f][2];
+        }
+
+        this.boundary = {
+            junctionCount: faces.length,
+            junctionPos,
+            arcCount,
+            arcEnds,
+            arcCells,
+            junctionArcOffsets,
+            junctionArcs,
+        };
+
+        // Flatten neighbour graph (CSR), recording the arc that severs each link.
         this.neighbourOffsets = new Int32Array(verts.length + 1);
         for (let i = 0; i < verts.length; i++) {
             this.neighbourOffsets[i + 1] =
@@ -140,9 +222,16 @@ export class IcosphereMesh implements CellMesh {
         this.neighbourList = new Int32Array(
             this.neighbourOffsets[verts.length],
         );
+        this.neighbourArcList = new Int32Array(
+            this.neighbourOffsets[verts.length],
+        );
         for (let i = 0; i < verts.length; i++) {
             let w = this.neighbourOffsets[i];
-            for (const n of neighbourSets[i]) this.neighbourList[w++] = n;
+            for (const n of neighbourSets[i]) {
+                this.neighbourList[w] = n;
+                this.neighbourArcList[w] = edgeToArc.get(edgeKey(i, n)) ?? -1;
+                w++;
+            }
         }
 
         // Build ordered polygon corners + areas for each cell.
@@ -200,6 +289,18 @@ export class IcosphereMesh implements CellMesh {
 
     area(i: number): number {
         return this.areas[i];
+    }
+
+    boundaryGraph(): BoundaryGraph {
+        return this.boundary;
+    }
+
+    neighbourArcs(i: number): readonly number[] {
+        const start = this.neighbourOffsets[i];
+        const end = this.neighbourOffsets[i + 1];
+        const out: number[] = [];
+        for (let k = start; k < end; k++) out.push(this.neighbourArcList[k]);
+        return out;
     }
 }
 

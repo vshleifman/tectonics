@@ -64,7 +64,7 @@ const shapeElevation = (n: number): number => {
 };
 
 /** Tiny deterministic PRNG (mulberry32) seeded from a string. */
-const makeRng = (seed: string): (() => number) => {
+export const makeRng = (seed: string): (() => number) => {
     let h = 1779033703 ^ seed.length;
     for (let i = 0; i < seed.length; i++) {
         h = Math.imul(h ^ seed.charCodeAt(i), 3432918353);

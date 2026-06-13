@@ -13,9 +13,14 @@ import type { CellData } from "../data/CellData";
  */
 /** Push edge lines this far above the unit sphere to avoid z-fighting with faces. */
 const EDGE_RADIUS = 1.003;
+/** Faults sit slightly above the faint wireframe so they read on top. */
+const FAULT_RADIUS = 1.005;
+
+/** How cells are coloured: by elevation, flat (data view), or by plate id. */
+export type ColourMode = "elevation" | "data" | "plate";
 
 export class CellRenderer {
-    /** Group holding the filled faces and (optionally visible) black edges. */
+    /** Group holding the filled faces, the faint wireframe, faults and seeds. */
     readonly object3D = new THREE.Group();
 
     private readonly geometry: THREE.BufferGeometry;
@@ -25,6 +30,17 @@ export class CellRenderer {
     private readonly edgeGeometry: THREE.BufferGeometry;
     private readonly edgeMaterial: THREE.LineBasicMaterial;
     private readonly edges: THREE.LineSegments;
+
+    /** Bright overlay drawing only the cracked arcs (the fault network). */
+    private readonly faultGeometry: THREE.BufferGeometry;
+    private readonly faultMaterial: THREE.LineBasicMaterial;
+    private readonly faultLines: THREE.LineSegments;
+    private readonly faultPositions: Float32Array;
+
+    /** Markers at the seed junctions the player placed. */
+    private readonly seedGeometry: THREE.BufferGeometry;
+    private readonly seedMaterial: THREE.PointsMaterial;
+    private readonly seedPoints: THREE.Points;
 
     /** First vertex index for each cell (CSR-style, length cellCount + 1). */
     private readonly cellVertexStart: Int32Array;
@@ -115,21 +131,59 @@ export class CellRenderer {
         this.edges = new THREE.LineSegments(this.edgeGeometry, this.edgeMaterial);
         this.edges.visible = false;
 
-        this.object3D.add(mesh, this.edges);
+        // Fault overlay: preallocate room for every arc, draw only cracked ones.
+        const graph = cellMesh.boundaryGraph();
+        this.faultPositions = new Float32Array(graph.arcCount * 2 * 3);
+        this.faultGeometry = new THREE.BufferGeometry();
+        this.faultGeometry.setAttribute(
+            "position",
+            new THREE.BufferAttribute(this.faultPositions, 3),
+        );
+        this.faultGeometry.setDrawRange(0, 0);
+        this.faultMaterial = new THREE.LineBasicMaterial({ color: 0xff5a3c });
+        this.faultLines = new THREE.LineSegments(
+            this.faultGeometry,
+            this.faultMaterial,
+        );
+        this.faultLines.visible = false;
+
+        this.seedGeometry = new THREE.BufferGeometry();
+        this.seedGeometry.setAttribute(
+            "position",
+            new THREE.BufferAttribute(new Float32Array(0), 3),
+        );
+        this.seedMaterial = new THREE.PointsMaterial({
+            color: 0xffe14d,
+            size: 9,
+            sizeAttenuation: false,
+        });
+        this.seedPoints = new THREE.Points(this.seedGeometry, this.seedMaterial);
+        this.seedPoints.visible = false;
+
+        this.object3D.add(mesh, this.edges, this.faultLines, this.seedPoints);
     }
 
     /**
-     * Rewrite the colour buffer from current elevation. Cheap: no geometry
-     * rebuild, just one colour attribute upload. `seaLevel` is the elevation
-     * threshold below which a cell is rendered as ocean. When `dataMode` is
-     * set, faces are rendered flat white (the black edges carry the structure).
+     * Rewrite the colour buffer for the given mode. Cheap: no geometry rebuild,
+     * just one colour attribute upload.
+     *
+     * - `"elevation"`: ocean/land ramp split at `seaLevel`.
+     * - `"data"`: flat white faces (the black wireframe carries the structure).
+     * - `"plate"`: a stable per-`plateId` hue so plates read as solid regions.
      */
-    updateColours(data: CellData, seaLevel = 0, dataMode = false): void {
+    updateColours(
+        data: CellData,
+        mode: ColourMode = "elevation",
+        seaLevel = 0,
+    ): void {
         const { cellCount } = this.cellMesh;
         for (let i = 0; i < cellCount; i++) {
-            const [r, g, b] = dataMode
-                ? [1, 1, 1]
-                : colourForElevation(data.elevation[i], seaLevel);
+            const [r, g, b] =
+                mode === "data"
+                    ? [1, 1, 1]
+                    : mode === "plate"
+                      ? colourForPlate(data.plateId[i])
+                      : colourForElevation(data.elevation[i], seaLevel);
             const start = this.cellVertexStart[i];
             const end = this.cellVertexStart[i + 1];
             for (let v = start; v < end; v++) {
@@ -144,9 +198,55 @@ export class CellRenderer {
         attr.needsUpdate = true;
     }
 
+    /** Rebuild the bright fault overlay from the cracked-arc flags. */
+    updateFaults(cracked: Uint8Array): void {
+        const graph = this.cellMesh.boundaryGraph();
+        const { arcEnds, junctionPos } = graph;
+        let w = 0;
+        for (let a = 0; a < graph.arcCount; a++) {
+            if (!cracked[a]) continue;
+            const j0 = arcEnds[a * 2];
+            const j1 = arcEnds[a * 2 + 1];
+            this.faultPositions[w++] = junctionPos[j0 * 3] * FAULT_RADIUS;
+            this.faultPositions[w++] = junctionPos[j0 * 3 + 1] * FAULT_RADIUS;
+            this.faultPositions[w++] = junctionPos[j0 * 3 + 2] * FAULT_RADIUS;
+            this.faultPositions[w++] = junctionPos[j1 * 3] * FAULT_RADIUS;
+            this.faultPositions[w++] = junctionPos[j1 * 3 + 1] * FAULT_RADIUS;
+            this.faultPositions[w++] = junctionPos[j1 * 3 + 2] * FAULT_RADIUS;
+        }
+        this.faultGeometry.setDrawRange(0, w / 3);
+        const attr = this.faultGeometry.getAttribute(
+            "position",
+        ) as THREE.BufferAttribute;
+        attr.needsUpdate = true;
+    }
+
+    /** Rebuild the seed markers from the placed seed junctions. */
+    updateSeeds(seeds: readonly number[]): void {
+        const { junctionPos } = this.cellMesh.boundaryGraph();
+        const positions = new Float32Array(seeds.length * 3);
+        for (let s = 0; s < seeds.length; s++) {
+            const j = seeds[s];
+            positions[s * 3] = junctionPos[j * 3] * FAULT_RADIUS;
+            positions[s * 3 + 1] = junctionPos[j * 3 + 1] * FAULT_RADIUS;
+            positions[s * 3 + 2] = junctionPos[j * 3 + 2] * FAULT_RADIUS;
+        }
+        this.seedGeometry.setAttribute(
+            "position",
+            new THREE.BufferAttribute(positions, 3),
+        );
+        this.seedGeometry.getAttribute("position").needsUpdate = true;
+    }
+
     /** Show or hide the black cell-boundary lines (used in data mode). */
     setEdgesVisible(visible: boolean): void {
         this.edges.visible = visible;
+    }
+
+    /** Show or hide the fault overlay and seed markers together. */
+    setFaultsVisible(visible: boolean): void {
+        this.faultLines.visible = visible;
+        this.seedPoints.visible = visible;
     }
 
     dispose(): void {
@@ -154,6 +254,10 @@ export class CellRenderer {
         this.material.dispose();
         this.edgeGeometry.dispose();
         this.edgeMaterial.dispose();
+        this.faultGeometry.dispose();
+        this.faultMaterial.dispose();
+        this.seedGeometry.dispose();
+        this.seedMaterial.dispose();
     }
 }
 
@@ -182,6 +286,34 @@ const colourForElevation = (
     if (t < 0.6)
         return mix([0.25, 0.5, 0.2], [0.45, 0.35, 0.22], (t - 0.15) / 0.45);
     return mix([0.45, 0.35, 0.22], [0.95, 0.95, 0.98], (t - 0.6) / 0.4);
+};
+
+/** Golden-ratio hue stepping gives every plate a distinct, stable colour. */
+const colourForPlate = (plateId: number): [number, number, number] => {
+    if (plateId < 0) return [0.5, 0.5, 0.5];
+    const hue = (plateId * 0.6180339887498949) % 1;
+    return hslToRgb(hue, 0.55, 0.55);
+};
+
+const hslToRgb = (
+    h: number,
+    s: number,
+    l: number,
+): [number, number, number] => {
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const hp = h * 6;
+    const x = c * (1 - Math.abs((hp % 2) - 1));
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    if (hp < 1) [r, g, b] = [c, x, 0];
+    else if (hp < 2) [r, g, b] = [x, c, 0];
+    else if (hp < 3) [r, g, b] = [0, c, x];
+    else if (hp < 4) [r, g, b] = [0, x, c];
+    else if (hp < 5) [r, g, b] = [x, 0, c];
+    else [r, g, b] = [c, 0, x];
+    const m = l - c / 2;
+    return [r + m, g + m, b + m];
 };
 
 const clamp01 = (x: number): number => Math.max(0, Math.min(1, x));

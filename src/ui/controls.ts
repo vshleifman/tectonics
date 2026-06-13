@@ -1,5 +1,8 @@
-/** Whether cells render in colour, or greyscale with per-cell id/elevation labels. */
-export type ViewMode = "colour" | "data";
+/**
+ * How cells render: elevation colour ("colour"), greyscale with per-cell
+ * id/elevation labels ("data"), or solid per-plate colours ("plate").
+ */
+export type ViewMode = "colour" | "data" | "plate";
 
 /** Callbacks the control panel reports user input through. */
 export interface ControlsCallbacks {
@@ -7,6 +10,9 @@ export interface ControlsCallbacks {
     onSeaLevelChange: (seaLevel: number) => void;
     onAutoRotateChange: (enabled: boolean) => void;
     onViewModeChange: (mode: ViewMode) => void;
+    onSeedModeChange: (enabled: boolean) => void;
+    onBranchesChange: (branches: number) => void;
+    onClearFaults: () => void;
 }
 
 /** Initial values the panel opens with. */
@@ -15,6 +21,8 @@ export interface ControlsOptions {
     seaLevel: number;
     autoRotate: boolean;
     viewMode: ViewMode;
+    seedMode: boolean;
+    branchesPerSeed: number;
 }
 
 /** Imperative handle for pushing live readouts back into the panel. */
@@ -23,7 +31,10 @@ export interface Controls {
     readonly seaLevel: number;
     readonly autoRotate: boolean;
     readonly viewMode: ViewMode;
+    readonly seedMode: boolean;
+    readonly branchesPerSeed: number;
     setCellCount: (count: number) => void;
+    setPlateCount: (count: number) => void;
     setFps: (fps: number) => void;
     setNote: (text: string) => void;
 }
@@ -32,6 +43,8 @@ const MIN_LEVEL = 2;
 const MAX_LEVEL = 8;
 const MIN_SEA_LEVEL = -8;
 const MAX_SEA_LEVEL = 8;
+const MIN_BRANCHES = 1;
+const MAX_BRANCHES = 5;
 
 /**
  * Minimal framework-free overlay: subdivision-level and sea-level sliders, an
@@ -47,6 +60,12 @@ export const createControls = (
     let seaLevel = clamp(options.seaLevel, MIN_SEA_LEVEL, MAX_SEA_LEVEL);
     let autoRotate = options.autoRotate;
     let viewMode = options.viewMode;
+    let seedMode = options.seedMode;
+    let branchesPerSeed = clamp(
+        Math.round(options.branchesPerSeed),
+        MIN_BRANCHES,
+        MAX_BRANCHES,
+    );
 
     const panel = document.createElement("div");
     Object.assign(panel.style, {
@@ -83,8 +102,32 @@ export const createControls = (
     // Auto-rotate toggle.
     const rotateToggle = makeToggle("Auto-rotate", autoRotate);
 
-    // View-mode toggle (colour <-> data/labels).
-    const viewToggle = makeToggle("Data view (ids + elevation)", viewMode === "data");
+    // View-mode selector (colour / data / plate).
+    const viewLabel = makeLabel();
+    viewLabel.textContent = "View";
+    const viewSelect = makeSelect(
+        [
+            { value: "colour", label: "Elevation colour" },
+            { value: "data", label: "Data (ids + elevation)" },
+            { value: "plate", label: "Plates" },
+        ],
+        viewMode,
+    );
+
+    // Seed-placement mode: clicks drop plate seeds instead of orbiting.
+    const seedToggle = makeToggle("Place plate seeds (click globe)", seedMode);
+
+    // Branches-per-seed slider (how many faults each seed fans out).
+    const branchesLabel = makeLabel();
+    const branchesSlider = makeSlider(
+        MIN_BRANCHES,
+        MAX_BRANCHES,
+        1,
+        branchesPerSeed,
+    );
+
+    // Clear-faults button.
+    const clearButton = makeButton("Clear faults");
 
     const readout = document.createElement("div");
     Object.assign(readout.style, {
@@ -97,7 +140,8 @@ export const createControls = (
 
     const fpsEl = document.createElement("span");
     const cellEl = document.createElement("span");
-    readout.append(fpsEl, cellEl);
+    const plateEl = document.createElement("span");
+    readout.append(fpsEl, cellEl, plateEl);
 
     const note = document.createElement("div");
     Object.assign(note.style, {
@@ -113,10 +157,15 @@ export const createControls = (
     const renderSeaLabel = (): void => {
         seaLabel.textContent = `Sea level: ${seaLevel.toFixed(1)}`;
     };
+    const renderBranchesLabel = (): void => {
+        branchesLabel.textContent = `Branches per seed: ${branchesPerSeed}`;
+    };
     renderLevelLabel();
     renderSeaLabel();
+    renderBranchesLabel();
     fpsEl.textContent = "FPS: --";
     cellEl.textContent = "Cells: --";
+    plateEl.textContent = "Plates: --";
 
     levelSlider.addEventListener("input", () => {
         level = clamp(Math.round(Number(levelSlider.value)), MIN_LEVEL, MAX_LEVEL);
@@ -135,9 +184,28 @@ export const createControls = (
         callbacks.onAutoRotateChange(autoRotate);
     });
 
-    viewToggle.input.addEventListener("change", () => {
-        viewMode = viewToggle.input.checked ? "data" : "colour";
+    viewSelect.addEventListener("change", () => {
+        viewMode = viewSelect.value as ViewMode;
         callbacks.onViewModeChange(viewMode);
+    });
+
+    seedToggle.input.addEventListener("change", () => {
+        seedMode = seedToggle.input.checked;
+        callbacks.onSeedModeChange(seedMode);
+    });
+
+    branchesSlider.addEventListener("input", () => {
+        branchesPerSeed = clamp(
+            Math.round(Number(branchesSlider.value)),
+            MIN_BRANCHES,
+            MAX_BRANCHES,
+        );
+        renderBranchesLabel();
+        callbacks.onBranchesChange(branchesPerSeed);
+    });
+
+    clearButton.addEventListener("click", () => {
+        callbacks.onClearFaults();
     });
 
     panel.append(
@@ -147,7 +215,12 @@ export const createControls = (
         seaLabel,
         seaSlider,
         rotateToggle.row,
-        viewToggle.row,
+        viewLabel,
+        viewSelect,
+        seedToggle.row,
+        branchesLabel,
+        branchesSlider,
+        clearButton,
         readout,
         note,
     );
@@ -166,8 +239,17 @@ export const createControls = (
         get viewMode() {
             return viewMode;
         },
+        get seedMode() {
+            return seedMode;
+        },
+        get branchesPerSeed() {
+            return branchesPerSeed;
+        },
         setCellCount: (count: number) => {
             cellEl.textContent = `Cells: ${count.toLocaleString()}`;
+        },
+        setPlateCount: (count: number) => {
+            plateEl.textContent = `Plates: ${count.toLocaleString()}`;
         },
         setFps: (fps: number) => {
             fpsEl.textContent = `FPS: ${fps.toFixed(0)}`;
@@ -176,6 +258,54 @@ export const createControls = (
             note.textContent = text;
         },
     };
+};
+
+interface SelectOption {
+    value: string;
+    label: string;
+}
+
+const makeSelect = (
+    options: SelectOption[],
+    selected: string,
+): HTMLSelectElement => {
+    const select = document.createElement("select");
+    Object.assign(select.style, {
+        width: "100%",
+        marginBottom: "10px",
+        padding: "4px 6px",
+        background: "rgba(20, 26, 38, 0.9)",
+        color: "#e6ecf5",
+        border: "1px solid rgba(120, 140, 180, 0.3)",
+        borderRadius: "6px",
+        font: "13px/1.4 ui-sans-serif, system-ui, sans-serif",
+        cursor: "pointer",
+    } satisfies Partial<CSSStyleDeclaration>);
+    for (const option of options) {
+        const element = document.createElement("option");
+        element.value = option.value;
+        element.textContent = option.label;
+        if (option.value === selected) element.selected = true;
+        select.append(element);
+    }
+    return select;
+};
+
+const makeButton = (labelText: string): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.textContent = labelText;
+    Object.assign(button.style, {
+        width: "100%",
+        marginBottom: "10px",
+        padding: "6px 8px",
+        background: "rgba(79, 143, 240, 0.18)",
+        color: "#e6ecf5",
+        border: "1px solid rgba(120, 140, 180, 0.35)",
+        borderRadius: "6px",
+        font: "13px/1.4 ui-sans-serif, system-ui, sans-serif",
+        cursor: "pointer",
+    } satisfies Partial<CSSStyleDeclaration>);
+    return button;
 };
 
 interface Toggle {
