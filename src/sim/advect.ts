@@ -70,6 +70,68 @@ const copyCell = (
 };
 
 /**
+ * Source cell whose crust rotates into `d` under `d`'s *own* plate's motion: the
+ * inverse of the forward scatter. Doubles as the test for an interior aliasing
+ * hole -- if the result is a same-plate cell, `d` is still inside its plate and
+ * should keep that plate's crust rather than letting a neighbour bleed across a
+ * boundary. Returns `d` itself for stationary or unowned crust.
+ */
+const gatherSource = (
+  mesh: CellMesh,
+  d: number,
+  src: CellData,
+  plateData: PlateData,
+  dtMyr: number,
+): number => {
+  const plate = src.plateId[d];
+  const props = plate >= 0 ? plateData.byId.get(plate) : undefined;
+  const angle = props ? length(props.omega) * dtMyr : 0;
+  if (!props || angle === 0) return d;
+  const axis = normalise(props.omega);
+  // Inverse rotation: where did the crust now arriving at `d` come from?
+  const from = rotateAboutAxis(mesh.position(d), axis, -angle);
+  return nearestCell(mesh, from, d);
+};
+
+/**
+ * Representative source cell of the plate that dominates `d`'s already-resolved
+ * neighbours, or -1 if no neighbour was claimed this step.
+ *
+ * Used to fill a hole with the crust actually sweeping into it: an interior
+ * aliasing hole is ringed by its own plate and so refills seamlessly, while a
+ * trailing-edge gap is dominated by the advancing neighbour and is taken over by
+ * it -- instead of being re-seeded with the departing plate's crust, which is
+ * what smears a trail behind a moving plate. Neighbour counts use the fully
+ * resolved `winner` map, so iteration order in pass 2 does not matter.
+ */
+const dominantNeighbourSource = (
+  mesh: CellMesh,
+  d: number,
+  src: CellData,
+  winner: Int32Array,
+): number => {
+  const nbrs = mesh.neighbors(d);
+  let bestCount = 0;
+  let bestSource = -1;
+  for (let k = 0; k < nbrs.length; k++) {
+    const w = winner[nbrs[k]];
+    if (w < 0) continue;
+    const plate = src.plateId[w];
+    // Tally how many neighbours carry this plate, keeping one source for it.
+    let count = 0;
+    for (let j = 0; j < nbrs.length; j++) {
+      const wj = winner[nbrs[j]];
+      if (wj >= 0 && src.plateId[wj] === plate) count++;
+    }
+    if (count > bestCount) {
+      bestCount = count;
+      bestSource = w;
+    }
+  }
+  return bestSource;
+};
+
+/**
  * Advance one tick of rigid plate motion by conservative forward-scatter
  * advection.
  *
@@ -127,7 +189,9 @@ export const advect = (
     }
   }
 
-  // Pass 1: resolve each destination's winner, accreting and ledgering losers.
+  // Pass 1: resolve each destination's winner. At a genuine convergent boundary
+  // the loser subducts and is ledgered; an interior collision is discretisation
+  // noise, so the survivor simply occupies the cell and the loser is dropped.
   for (let i = 0; i < cellCount; i++) {
     const d = dest[i];
     const w = winner[d];
@@ -144,11 +208,15 @@ export const advect = (
     const loser = iWins ? w : i;
     winner[d] = survivor;
 
-    const loserMass = mesh.area(loser) * src.thickness[loser];
-    const accretedMass = ACCRETION_FRACTION * loserMass;
-    subductedThisStep += loserMass - accretedMass;
-    accreted[d] += accretedMass / mesh.area(d);
-    subducted[d] = 1;
+    // Only real convergence destroys crust; interior aliasing collisions must
+    // not, or they would pollute the subduction ledger and erode plate interiors.
+    if (boundaries.cellKind[d] === BoundaryKind.CONVERGENT) {
+      const loserMass = mesh.area(loser) * src.thickness[loser];
+      const accretedMass = ACCRETION_FRACTION * loserMass;
+      subductedThisStep += loserMass - accretedMass;
+      accreted[d] += accretedMass / mesh.area(d);
+      subducted[d] = 1;
+    }
   }
 
   // Pass 2: write the surviving crust into each destination (or open a rift).
@@ -167,8 +235,25 @@ export const advect = (
       dst.thickness[d] = 0;
       riftCell[d] = 1;
     } else {
-      // Discretisation noise inside a plate: keep the cell's own crust.
-      copyCell(src, dst, d, d);
+      // Hole: no crust scattered onto `d`. Decide what fills it.
+      const ownSource = gatherSource(mesh, d, src, plateData, dtMyr);
+      if (ownSource !== d && src.plateId[ownSource] === src.plateId[d]) {
+        // Interior aliasing hole: `d`'s own plate still rotates into it, so keep
+        // it same-plate. No foreign crust bleeds across a boundary (no speckle).
+        copyCell(src, dst, ownSource, d);
+      } else {
+        // `d`'s plate has genuinely vacated it: hand the cell to the plate
+        // sweeping in (its dominant claimed neighbour), so an advancing plate
+        // takes over the trailing edge instead of the departing plate smearing a
+        // trail. A wholly vacated pocket (no claimed neighbour) keeps `ownSource`.
+        const neighbourSource = dominantNeighbourSource(mesh, d, src, winner);
+        copyCell(
+          src,
+          dst,
+          neighbourSource >= 0 ? neighbourSource : ownSource,
+          d,
+        );
+      }
     }
   }
 
