@@ -1,4 +1,4 @@
-# 10 — Move simulation into a Web Worker (optional)
+# 11 — Move simulation into a Web Worker (optional)
 
 ## Goal
 
@@ -7,7 +7,7 @@ off the main thread.
 
 ## Why it matters
 
-Once the step does real work (04-09), a large world could stutter the UI. The
+Once the step does real work (04-10), a large world could stutter the UI. The
 step is already a pure function over typed arrays, so it can move to a worker
 without restructuring upstream.
 
@@ -24,4 +24,4 @@ without restructuring upstream.
 
 ## Dependencies
 
-- Worth doing only after 04-09 make the step expensive enough to justify it.
+- Worth doing only after 04-10 make the step expensive enough to justify it.

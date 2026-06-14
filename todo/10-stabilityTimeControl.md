@@ -1,4 +1,4 @@
-# 09 — Numerical stability & time control
+# 10 — Numerical stability & time control
 
 ## Goal
 
@@ -24,4 +24,4 @@ Players also need to control simulation speed and inspect elapsed time.
 
 ## Dependencies
 
-- 05-07 (stability only matters once the step does real physics).
+- 05, 07, 08 (stability only matters once the step does real physics).

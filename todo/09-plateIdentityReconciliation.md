@@ -1,4 +1,4 @@
-# 08 — Plate identity reconciliation under motion
+# 09 — Plate identity reconciliation under motion
 
 ## Goal
 
@@ -25,5 +25,5 @@ new rift crust can need an owner, so identity bookkeeping drifts out of sync.
 
 ## Dependencies
 
-- 06 and 07 (plates appear/disappear once geology and lifecycle are active).
+- 07 and 08 (plates appear/disappear once geology and lifecycle are active).
 - Cross-cutting decision: rift crust ownership.

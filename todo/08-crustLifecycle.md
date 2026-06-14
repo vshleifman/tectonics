@@ -1,4 +1,4 @@
-# 07 — Crust lifecycle: creation at rifts, destruction at subduction
+# 08 — Crust lifecycle: creation at rifts, destruction at subduction
 
 ## Goal
 
@@ -18,6 +18,9 @@ balances over deep time.
 - Subducted crust (from 05): removed from the budget, with the lost mass
   recorded for conservation accounting.
 - Age every cell each step and recompute oceanic density from age.
+- Continental crust differentiation: oceanic crust converting to continental
+  through accretion at convergent boundaries (deferred from 06, where all crust
+  is seeded oceanic).
 
 ## Acceptance criteria
 

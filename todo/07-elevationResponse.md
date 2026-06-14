@@ -1,4 +1,4 @@
-# 06 — Elevation response (terrain genesis)
+# 07 — Elevation response (terrain genesis)
 
 ## Goal
 
@@ -29,6 +29,7 @@ Elevation rules per boundary type and crust pairing:
 ## Dependencies
 
 - 05 (needs convergence/divergence resolved).
+- 06 (motion is density-driven, so boundary types are now meaningful).
 
 ## Open questions
 
