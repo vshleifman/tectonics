@@ -16,6 +16,7 @@ import { CellRenderer, type ColourMode } from "./render/CellRenderer";
 import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
 import { BoundaryField, classifyBoundaries } from "./sim/boundaries";
 import { AdvectionField, totalCrustMass } from "./sim/massBudget";
+import { updatePlateMotion } from "./sim/plateForces";
 import { step } from "./sim/step";
 import { createControls, type ViewMode } from "./ui/controls";
 
@@ -164,9 +165,12 @@ const reassignPlates = (initCrust: boolean): number => {
         cellData.plateId,
     );
     reconcilePlateProperties(plateData, report);
-    if (initCrust) initialiseCrust(cellMesh, cellData, plateData);
-    cellRenderer.updateVelocities(plateData, cellData);
+    if (initCrust) initialiseCrust(cellMesh, cellData);
+    // Derive density-driven motion from the (possibly fresh) crust, then classify
+    // so arrows and boundaries reflect it immediately on world build / seed.
+    if (boundaries) updatePlateMotion(cellMesh, cellData, plateData, boundaries);
     classify();
+    cellRenderer.updateVelocities(plateData, cellData);
     return plateCount;
 };
 
@@ -371,8 +375,10 @@ const copyCellData = (from: CellData, to: CellData): void => {
 window.setInterval(() => {
     if (!running || !plateData || !cellRenderer || !boundaries || !advection)
         return;
-    // Classify against the current crust so advection sees live boundaries,
-    // then scatter crust conservatively into the back buffer and copy it back.
+    // Recompute density-driven motion from the previous tick's boundaries and the
+    // current crust, then classify against the new omega so advection sees live
+    // boundaries, then scatter crust conservatively into the back buffer.
+    updatePlateMotion(cellMesh, cellData, plateData, boundaries);
     classify();
     step(
         cellMesh,

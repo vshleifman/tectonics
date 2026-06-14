@@ -22,8 +22,6 @@ import type { RelabelReport } from "./PlateRegistry";
 export interface PlateProperties {
   /** Angular velocity (rad/Myr); direction = Euler pole, magnitude = spin. */
   omega: [number, number, number];
-  /** Whether the plate's crust is continental (buoyant) vs oceanic. */
-  continental: boolean;
 }
 
 export class PlateData {
@@ -74,37 +72,22 @@ export class PlateData {
   }
 }
 
-/** Fraction of plates that start as (buoyant) continental crust. */
-const CONTINENTAL_PROBABILITY = 0.35;
-
-/** Angular speed range for a freshly seeded plate (rad/Myr). */
-const MIN_SPEED = 0.002;
-const MAX_SPEED = 0.02;
-
-/**
- * How far a freshly rifted fragment's motion is jittered from its parent's, per
- * axis. Small, because a new fragment initially co-moves with the plate it broke
- * off (inherit-then-perturb): it shares history, then begins to diverge.
- */
-const SPLIT_PERTURB = 0.15;
-
 /** Oceanic crust ages out to here before being treated as fully cooled (Myr). */
 const MAX_OCEANIC_AGE = 200;
 
-/** Continental crust is ancient; its age is cosmetic (density is age-independent). */
-const CONTINENTAL_AGE_MIN = 500;
-const CONTINENTAL_AGE_MAX = 2000;
-
-/** Densities (g/cm3): continental is buoyant; oceanic densifies as it cools. */
+/**
+ * Densities (g/cm3). Crust starts oceanic and densifies as it cools; the
+ * continental (buoyant) floor is reserved for crust that later differentiates
+ * through accretion, and anchors the renderer's density ramp.
+ */
 const CONTINENTAL_DENSITY = 2.7;
 const OCEANIC_DENSITY_YOUNG = 2.9;
 const OCEANIC_DENSITY_OLD = 3.0;
 
 /**
- * Starting crust thickness (km): continental crust is far thicker than oceanic.
- * Thickness is the conserved lever for advection — see {@link CellData.thickness}.
+ * Starting oceanic crust thickness (km). Thickness is the conserved lever for
+ * advection — see {@link CellData.thickness}.
  */
-const CONTINENTAL_THICKNESS = 35;
 const OCEANIC_THICKNESS = 7;
 
 /** Density bounds, exported so the renderer's density ramp stays in sync. */
@@ -115,10 +98,12 @@ export const DENSITY_MAX = OCEANIC_DENSITY_OLD;
  * Bring per-plate properties in line with a relabel.
  *
  * - Kept plates are left untouched, so a plate that survives a crack retains its
- *   Euler pole, speed and crust type (no flicker, stable colour).
- * - New plates inherit their parent's motion and crust then perturb it slightly
- *   when they split off an existing plate (a rifted fragment co-moves at first);
- *   genuinely new plates (first run, no parent) get fresh random values.
+ *   Euler pole and speed (no flicker, stable colour).
+ * - New plates that split off an existing plate inherit their parent's motion
+ *   (a rifted fragment co-moves at first), then relax toward their own
+ *   density-driven force balance (see `updatePlateMotion`).
+ * - Genuinely new plates (first run, no parent) start at rest; their motion
+ *   emerges from the crust they carry rather than from an RNG.
  * - Retired plates are dropped.
  *
  * Per-cell crust/age/density are NOT rewritten here: they advect with cells and
@@ -127,80 +112,51 @@ export const DENSITY_MAX = OCEANIC_DENSITY_OLD;
 export const reconcilePlateProperties = (
   plateData: PlateData,
   report: RelabelReport,
-  seed = "tectonics",
 ): void => {
   for (const id of report.retiredIds) plateData.byId.delete(id);
 
   for (const id of report.newIds) {
     const parent = report.parentOf.get(id) ?? -1;
     const parentProps = parent >= 0 ? plateData.byId.get(parent) : undefined;
-    const rng = makeRng(`${seed}:plate:${id}`);
     if (parentProps) {
       plateData.byId.set(id, {
-        omega: perturbOmega(parentProps.omega, rng),
-        continental: parentProps.continental,
+        omega: [
+          parentProps.omega[0],
+          parentProps.omega[1],
+          parentProps.omega[2],
+        ],
       });
     } else {
-      plateData.byId.set(id, freshPlate(rng));
+      plateData.byId.set(id, { omega: [0, 0, 0] });
     }
   }
 };
 
 /**
- * Seed per-cell crust type, age and derived density from each cell's plate.
+ * Seed per-cell crust: every cell starts as young oceanic crust with an age-
+ * driven density. Continental crust is not seeded — it emerges later through
+ * accretion at convergent boundaries (future ticket).
  *
  * Run once when a world is built: thereafter crust advects with cells and must
  * persist (the crust "remembers its history"), so relabels deliberately leave
- * these arrays alone. Age is keyed per cell so it is stable and reproducible.
+ * these arrays alone. The per-cell age spread (and thus the 2.9..3.0 density
+ * spread) is what gives each plate a density gradient to drift along, so motion
+ * is non-trivial from the very first step. Age is keyed per cell so it is stable
+ * and reproducible.
  */
 export const initialiseCrust = (
   mesh: CellMesh,
   data: CellData,
-  plateData: PlateData,
   seed = "tectonics",
 ): void => {
   for (let i = 0; i < mesh.cellCount; i++) {
-    const id = data.plateId[i];
-    const props = id >= 0 ? plateData.byId.get(id) : undefined;
-    const isContinental = props?.continental ? 1 : 0;
     const rng = makeRng(`${seed}:cell:${i}`);
-    data.crustType[i] = isContinental;
-    if (isContinental) {
-      data.age[i] =
-        CONTINENTAL_AGE_MIN +
-        rng() * (CONTINENTAL_AGE_MAX - CONTINENTAL_AGE_MIN);
-      data.density[i] = CONTINENTAL_DENSITY;
-      data.thickness[i] = CONTINENTAL_THICKNESS;
-    } else {
-      const age = rng() * MAX_OCEANIC_AGE;
-      data.age[i] = age;
-      const t = clamp01(age / MAX_OCEANIC_AGE);
-      data.density[i] =
-        OCEANIC_DENSITY_YOUNG +
-        t * (OCEANIC_DENSITY_OLD - OCEANIC_DENSITY_YOUNG);
-      data.thickness[i] = OCEANIC_THICKNESS;
-    }
+    const age = rng() * MAX_OCEANIC_AGE;
+    data.crustType[i] = 0; // oceanic
+    data.age[i] = age;
+    const t = clamp01(age / MAX_OCEANIC_AGE);
+    data.density[i] =
+      OCEANIC_DENSITY_YOUNG + t * (OCEANIC_DENSITY_OLD - OCEANIC_DENSITY_YOUNG);
+    data.thickness[i] = OCEANIC_THICKNESS;
   }
-};
-
-/** A brand-new plate: random Euler pole, random speed, random crust type. */
-const freshPlate = (rng: () => number): PlateProperties => {
-  // Uniform random unit axis (the Euler pole).
-  const z = rng() * 2 - 1;
-  const phi = rng() * 2 * Math.PI;
-  const r = Math.sqrt(Math.max(0, 1 - z * z));
-  const speed = MIN_SPEED + rng() * (MAX_SPEED - MIN_SPEED);
-  return {
-    omega: [r * Math.cos(phi) * speed, r * Math.sin(phi) * speed, z * speed],
-    continental: rng() < CONTINENTAL_PROBABILITY,
-  };
-};
-
-/** Inherit a parent's angular velocity with a small per-axis jitter. */
-const perturbOmega = (
-  omega: readonly [number, number, number],
-  rng: () => number,
-): [number, number, number] => {
-  const jitter = (): number => 1 + (rng() * 2 - 1) * SPLIT_PERTURB;
-  return [omega[0] * jitter(), omega[1] * jitter(), omega[2] * jitter()];
 };
