@@ -4,9 +4,15 @@ import type { Projection } from "../render/projection";
 /**
  * How cells render: elevation colour ("colour"), greyscale with per-cell
  * id/elevation labels ("data"), solid per-plate colours ("plate"), crust type
- * ("crust"), or density ramp ("density").
+ * ("crust"), density ramp ("density"), or boundary type ("boundary").
  */
-export type ViewMode = "colour" | "data" | "plate" | "crust" | "density";
+export type ViewMode =
+  | "colour"
+  | "data"
+  | "plate"
+  | "crust"
+  | "density"
+  | "boundary";
 
 /** Callbacks the control panel reports user input through. */
 export interface ControlsCallbacks {
@@ -139,6 +145,7 @@ export const createControls = (
       { value: "plate", label: "Plates" },
       { value: "crust", label: "Crust type" },
       { value: "density", label: "Density" },
+      { value: "boundary", label: "Boundaries" },
     ],
     viewMode,
   );

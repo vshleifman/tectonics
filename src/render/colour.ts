@@ -1,15 +1,22 @@
 import type { CellData } from "../data/CellData";
 import { clamp01, lerp } from "../math/scalar";
 import { DENSITY_MAX, DENSITY_MIN } from "../plates/PlateData";
+import { BoundaryKind } from "../sim/boundaries";
 
 /** An RGB colour with each channel in [0, 1]. */
 export type Rgb = [number, number, number];
 
 /**
  * How cells are coloured: by elevation, flat (data view), by plate id, by crust
- * type (oceanic vs continental), or by density.
+ * type (oceanic vs continental), by density, or by boundary type.
  */
-export type ColourMode = "elevation" | "data" | "plate" | "crust" | "density";
+export type ColourMode =
+  | "elevation"
+  | "data"
+  | "plate"
+  | "crust"
+  | "density"
+  | "boundary";
 
 const MIN_ELEVATION = -10;
 const MAX_ELEVATION = 10;
@@ -20,6 +27,7 @@ export const colourForCell = (
   mode: ColourMode,
   i: number,
   seaLevel: number,
+  boundaryKind?: Uint8Array,
 ): Rgb => {
   switch (mode) {
     case "data":
@@ -30,8 +38,29 @@ export const colourForCell = (
       return colourForCrust(data.crustType[i]);
     case "density":
       return colourForDensity(data.density[i]);
+    case "boundary":
+      return colourForBoundary(
+        boundaryKind ? boundaryKind[i] : BoundaryKind.NONE,
+      );
     default:
       return colourForElevation(data.elevation[i], seaLevel);
+  }
+};
+
+/**
+ * Debug palette for the boundary view: interiors and inactive boundaries read
+ * neutral grey, convergent red, divergent blue, transform yellow.
+ */
+const colourForBoundary = (kind: number): Rgb => {
+  switch (kind) {
+    case BoundaryKind.CONVERGENT:
+      return [0.86, 0.21, 0.18];
+    case BoundaryKind.DIVERGENT:
+      return [0.18, 0.45, 0.86];
+    case BoundaryKind.TRANSFORM:
+      return [0.92, 0.82, 0.22];
+    default:
+      return [0.22, 0.24, 0.28];
   }
 };
 

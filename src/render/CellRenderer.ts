@@ -283,15 +283,18 @@ export class CellRenderer {
    * - `"plate"`: a stable per-`plateId` hue so plates read as solid regions.
    * - `"crust"`: oceanic vs continental two-tone.
    * - `"density"`: a light-to-dark ramp over the crust density range.
+   * - `"boundary"`: each cell tinted by its dominant boundary type (needs
+   *   `boundaryKind`, the per-cell classification from {@link classifyBoundaries}).
    */
   updateColours(
     data: CellData,
     mode: ColourMode = "elevation",
     seaLevel = 0,
+    boundaryKind?: Uint8Array,
   ): void {
     const { cellCount } = this.cellMesh;
     for (let i = 0; i < cellCount; i++) {
-      const [r, g, b] = colourForCell(data, mode, i, seaLevel);
+      const [r, g, b] = colourForCell(data, mode, i, seaLevel, boundaryKind);
       const start = this.cellVertexStart[i];
       const end = this.cellVertexStart[i + 1];
       for (let v = start; v < end; v++) {
