@@ -100,6 +100,13 @@ const CONTINENTAL_DENSITY = 2.7;
 const OCEANIC_DENSITY_YOUNG = 2.9;
 const OCEANIC_DENSITY_OLD = 3.0;
 
+/**
+ * Starting crust thickness (km): continental crust is far thicker than oceanic.
+ * Thickness is the conserved lever for advection — see {@link CellData.thickness}.
+ */
+const CONTINENTAL_THICKNESS = 35;
+const OCEANIC_THICKNESS = 7;
+
 /** Density bounds, exported so the renderer's density ramp stays in sync. */
 export const DENSITY_MIN = CONTINENTAL_DENSITY;
 export const DENSITY_MAX = OCEANIC_DENSITY_OLD;
@@ -163,6 +170,7 @@ export const initialiseCrust = (
         CONTINENTAL_AGE_MIN +
         rng() * (CONTINENTAL_AGE_MAX - CONTINENTAL_AGE_MIN);
       data.density[i] = CONTINENTAL_DENSITY;
+      data.thickness[i] = CONTINENTAL_THICKNESS;
     } else {
       const age = rng() * MAX_OCEANIC_AGE;
       data.age[i] = age;
@@ -170,6 +178,7 @@ export const initialiseCrust = (
       data.density[i] =
         OCEANIC_DENSITY_YOUNG +
         t * (OCEANIC_DENSITY_OLD - OCEANIC_DENSITY_YOUNG);
+      data.thickness[i] = OCEANIC_THICKNESS;
     }
   }
 };

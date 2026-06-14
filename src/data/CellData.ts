@@ -23,12 +23,20 @@ export class CellData {
   /** Crust density per cell (g/cm3), derived from crust type and age. */
   readonly density: Float32Array;
 
+  /**
+   * Crust thickness per cell (km). The conserved lever: crust mass at cell `i`
+   * is `mesh.area(i) * thickness[i]`. Convergence thickens the surviving cell
+   * (accretion); subduction removes the loser's mass to a ledger.
+   */
+  readonly thickness: Float32Array;
+
   constructor(cellCount: number) {
     this.elevation = new Float32Array(cellCount);
     this.plateId = new Int32Array(cellCount);
     this.crustType = new Uint8Array(cellCount);
     this.age = new Float32Array(cellCount);
     this.density = new Float32Array(cellCount);
+    this.thickness = new Float32Array(cellCount);
   }
 }
 

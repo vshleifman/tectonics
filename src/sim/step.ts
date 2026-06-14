@@ -2,6 +2,8 @@ import type { CellData } from "../data/CellData";
 import type { CellMesh } from "../mesh/CellMesh";
 import type { PlateData } from "../plates/PlateData";
 import { advect } from "./advect";
+import type { BoundaryField } from "./boundaries";
+import type { AdvectionField } from "./massBudget";
 
 /**
  * One simulation tick: advance plate motion by `dtMyr`.
@@ -11,8 +13,10 @@ import { advect } from "./advect";
  * rendering or the DOM. Keeping this signature pure means tectonics can later
  * move into a Web Worker without restructuring anything upstream.
  *
- * For now the only rule is rigid rotation + crust advection; boundary
- * classification and elevation response come in a later increment.
+ * `boundaries` must already be classified against `src` so the conservative
+ * advection sees the current convergent/divergent edges; `out` collects the
+ * rift / subduction events and the conservation budget. Elevation response and
+ * crust lifecycle act on those outputs in later increments.
  */
 export const step = (
   mesh: CellMesh,
@@ -20,6 +24,8 @@ export const step = (
   dst: CellData,
   plateData: PlateData,
   dtMyr: number,
+  boundaries: BoundaryField,
+  out: AdvectionField,
 ): void => {
-  advect(mesh, src, dst, plateData, dtMyr);
+  advect(mesh, src, dst, plateData, dtMyr, boundaries, out);
 };

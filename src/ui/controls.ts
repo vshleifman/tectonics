@@ -55,6 +55,7 @@ export interface Controls {
   setCellCount: (count: number) => void;
   setPlateCount: (count: number) => void;
   setFps: (fps: number) => void;
+  setMassReadout: (liveMass: number, drift: number) => void;
   setNote: (text: string) => void;
 }
 
@@ -185,6 +186,14 @@ export const createControls = (
   const plateEl = document.createElement("span");
   readout.append(fpsEl, cellEl, plateEl);
 
+  // Conservation budget: live crust mass and its drift from the initial total.
+  const massEl = document.createElement("div");
+  Object.assign(massEl.style, {
+    marginTop: "6px",
+    fontVariantNumeric: "tabular-nums",
+    opacity: "0.95",
+  } satisfies Partial<CSSStyleDeclaration>);
+
   const note = document.createElement("div");
   Object.assign(note.style, {
     marginTop: "6px",
@@ -208,6 +217,7 @@ export const createControls = (
   fpsEl.textContent = "FPS: --";
   cellEl.textContent = "Cells: --";
   plateEl.textContent = "Plates: --";
+  massEl.textContent = "Mass: --";
 
   levelSlider.addEventListener("input", () => {
     level = clamp(Math.round(Number(levelSlider.value)), MIN_LEVEL, MAX_LEVEL);
@@ -283,6 +293,7 @@ export const createControls = (
     runToggle.row,
     clearButton,
     readout,
+    massEl,
     note,
   );
   parent.appendChild(panel);
@@ -323,6 +334,11 @@ export const createControls = (
     },
     setFps: (fps: number) => {
       fpsEl.textContent = `FPS: ${fps.toFixed(0)}`;
+    },
+    setMassReadout: (liveMass: number, drift: number) => {
+      const driftPct = (drift * 100).toFixed(3);
+      const sign = drift >= 0 ? "+" : "";
+      massEl.textContent = `Crust mass: ${liveMass.toFixed(2)} (drift ${sign}${driftPct}%)`;
     },
     setNote: (text: string) => {
       note.textContent = text;

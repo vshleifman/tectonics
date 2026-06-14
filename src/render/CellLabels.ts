@@ -25,7 +25,8 @@ const labelText = (data: CellData, i: number): string =>
   `elev ${data.elevation[i].toFixed(2)}\n` +
   `crust ${data.crustType[i] === 1 ? "cont" : "ocean"}\n` +
   `age ${data.age[i].toFixed(1)}\n` +
-  `dens ${data.density[i].toFixed(2)}`;
+  `dens ${data.density[i].toFixed(2)}\n` +
+  `thick ${data.thickness[i].toFixed(1)}`;
 
 /**
  * Overlays crisp HTML labels (cell id + elevation) on each cell using a

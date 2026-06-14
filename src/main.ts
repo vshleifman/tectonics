@@ -15,6 +15,7 @@ import { CellLabels } from "./render/CellLabels";
 import { CellRenderer, type ColourMode } from "./render/CellRenderer";
 import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
 import { BoundaryField, classifyBoundaries } from "./sim/boundaries";
+import { AdvectionField, totalCrustMass } from "./sim/massBudget";
 import { step } from "./sim/step";
 import { createControls, type ViewMode } from "./ui/controls";
 
@@ -27,7 +28,7 @@ const INITIAL_SEED_MODE = true;
 const INITIAL_BRANCHES_PER_SEED = 3;
 const INITIAL_SHOW_VELOCITIES = false;
 const INITIAL_RUNNING = false;
-const SIM_INTERVAL_MS = 100; // tectonics ticks slowly, decoupled from render
+const SIM_INTERVAL_MS = 500; // tectonics ticks slowly, decoupled from render
 /** Myr of plate motion advanced per simulation tick (tunable). */
 const DT_MYR = 2;
 /** Pointer travel (px) above which a press counts as an orbit drag, not a click. */
@@ -110,6 +111,10 @@ let plates: Plates | null = null;
 let plateData: PlateData | null = null;
 /** Boundary classification, recomputed whenever plates or crust change. */
 let boundaries: BoundaryField | null = null;
+/** Conservative-advection scratch + rift/subduction events + mass budget. */
+let advection: AdvectionField | null = null;
+/** Total crust mass when the world was last built, for conservation drift. */
+let initialMass = 0;
 
 /** Persistent plate identity across cracks/merges; reset only on world rebuild. */
 const plateRegistry = new PlateRegistry();
@@ -222,6 +227,7 @@ const rebuild = (level: number): void => {
         cellMesh.cellCount,
         cellMesh.boundaryGraph().arcCount,
     );
+    advection = new AdvectionField(cellMesh.cellCount);
     seedUniformElevation(cellMesh, cellData);
     rawLabels = new Int32Array(cellMesh.cellCount);
 
@@ -240,8 +246,16 @@ const rebuild = (level: number): void => {
 
     cellRenderer.setProjection(projection);
 
+    // Baseline for conservation drift: total crust mass of the fresh world.
+    initialMass = totalCrustMass(cellMesh, cellData);
+    if (advection) {
+        advection.liveMass = initialMass;
+        advection.subductedTotal = 0;
+    }
+
     ui.setCellCount(cellMesh.cellCount);
     ui.setPlateCount(plateCount);
+    ui.setMassReadout(initialMass, 0);
     applyViewMode();
 };
 
@@ -351,16 +365,35 @@ const copyCellData = (from: CellData, to: CellData): void => {
     to.crustType.set(from.crustType);
     to.age.set(from.age);
     to.density.set(from.density);
+    to.thickness.set(from.thickness);
 };
 
 window.setInterval(() => {
-    if (!running || !plateData || !cellRenderer) return;
-    step(cellMesh, cellData, backBuffer, plateData, DT_MYR);
+    if (!running || !plateData || !cellRenderer || !boundaries || !advection)
+        return;
+    // Classify against the current crust so advection sees live boundaries,
+    // then scatter crust conservatively into the back buffer and copy it back.
+    classify();
+    step(
+        cellMesh,
+        cellData,
+        backBuffer,
+        plateData,
+        DT_MYR,
+        boundaries,
+        advection,
+    );
     copyCellData(backBuffer, cellData);
     classify();
     recolour();
     cellRenderer.updateVelocities(plateData, cellData);
     cellLabels.refresh();
+
+    // Conservation budget: live + cumulative subducted should track the
+    // initial mass; report drift as a fraction of it.
+    const tracked = advection.liveMass + advection.subductedTotal;
+    const drift = initialMass > 0 ? (tracked - initialMass) / initialMass : 0;
+    ui.setMassReadout(advection.liveMass, drift);
 }, SIM_INTERVAL_MS);
 
 // --- Render loop: 60fps, only re-colours / redraws a static mesh -----------
