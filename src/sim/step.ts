@@ -3,6 +3,7 @@ import type { CellMesh } from "../mesh/CellMesh";
 import type { PlateData } from "../plates/PlateData";
 import { advect } from "./advect";
 import type { BoundaryField } from "./boundaries";
+import { applyElevation } from "./elevation";
 import type { AdvectionField } from "./massBudget";
 
 /**
@@ -15,8 +16,9 @@ import type { AdvectionField } from "./massBudget";
  *
  * `boundaries` must already be classified against `src` so the conservative
  * advection sees the current convergent/divergent edges; `out` collects the
- * rift / subduction events and the conservation budget. Elevation response and
- * crust lifecycle act on those outputs in later increments.
+ * rift / subduction events and the conservation budget. The elevation response
+ * then builds relief on the freshly advected `dst` from those same boundaries;
+ * crust lifecycle acts on the advection outputs in a later increment.
  */
 export const step = (
   mesh: CellMesh,
@@ -28,4 +30,5 @@ export const step = (
   out: AdvectionField,
 ): void => {
   advect(mesh, src, dst, plateData, dtMyr, boundaries, out);
+  applyElevation(mesh, dst, dtMyr, boundaries);
 };

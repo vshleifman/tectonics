@@ -3,6 +3,7 @@ import { makeRng } from "../data/CellData";
 import { clamp01 } from "../math/scalar";
 import { cross, normalise, type Vec3 } from "../math/vec3";
 import type { CellMesh } from "../mesh/CellMesh";
+import { baselineElevation } from "../sim/elevation";
 import type { RelabelReport } from "./PlateRegistry";
 
 /**
@@ -73,7 +74,7 @@ export class PlateData {
 }
 
 /** Oceanic crust ages out to here before being treated as fully cooled (Myr). */
-const MAX_OCEANIC_AGE = 200;
+export const MAX_OCEANIC_AGE = 200;
 
 /**
  * Densities (g/cm3). Crust starts oceanic and densifies as it cools; the
@@ -143,6 +144,10 @@ export const reconcilePlateProperties = (
  * spread) is what gives each plate a density gradient to drift along, so motion
  * is non-trivial from the very first step. Age is keyed per cell so it is stable
  * and reproducible.
+ *
+ * Elevation is seeded from the same age-driven isostatic baseline the elevation
+ * response relaxes toward, so a fresh world reads as plausible ocean (deepening
+ * with age) rather than random jitter, and boundary relief grows from there.
  */
 export const initialiseCrust = (
   mesh: CellMesh,
@@ -158,5 +163,10 @@ export const initialiseCrust = (
     data.density[i] =
       OCEANIC_DENSITY_YOUNG + t * (OCEANIC_DENSITY_OLD - OCEANIC_DENSITY_YOUNG);
     data.thickness[i] = OCEANIC_THICKNESS;
+    data.elevation[i] = baselineElevation(
+      data.crustType[i],
+      age,
+      OCEANIC_THICKNESS,
+    );
   }
 };
