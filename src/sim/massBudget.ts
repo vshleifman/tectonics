@@ -39,6 +39,12 @@ export class AdvectionField {
   /** Cumulative crust mass subducted since the world was built. */
   subductedTotal = 0;
 
+  /** Crust mass created at rifts this step (minted by the crust lifecycle). */
+  createdThisStep = 0;
+
+  /** Cumulative crust mass created at rifts since the world was built. */
+  createdTotal = 0;
+
   constructor(cellCount: number) {
     this.dest = new Int32Array(cellCount);
     this.winner = new Int32Array(cellCount);

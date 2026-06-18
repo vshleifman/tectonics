@@ -255,6 +255,7 @@ const rebuild = (level: number): void => {
     if (advection) {
         advection.liveMass = initialMass;
         advection.subductedTotal = 0;
+        advection.createdTotal = 0;
     }
 
     ui.setCellCount(cellMesh.cellCount);
@@ -395,9 +396,13 @@ window.setInterval(() => {
     cellRenderer.updateVelocities(plateData, cellData);
     cellLabels.refresh();
 
-    // Conservation budget: live + cumulative subducted should track the
-    // initial mass; report drift as a fraction of it.
-    const tracked = advection.liveMass + advection.subductedTotal;
+    // Conservation budget: live mass plus everything subducted, less everything
+    // created at rifts, should track the initial mass (net change = created
+    // minus destroyed); report drift as a fraction of it.
+    const tracked =
+        advection.liveMass +
+        advection.subductedTotal -
+        advection.createdTotal;
     const drift = initialMass > 0 ? (tracked - initialMass) / initialMass : 0;
     ui.setMassReadout(advection.liveMass, drift);
 }, SIM_INTERVAL_MS);
