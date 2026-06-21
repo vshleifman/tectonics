@@ -1,57 +1,9 @@
 import { clamp } from "../math/scalar";
 import type { Projection } from "../render/projection";
+import type { SettingsStore, ViewMode } from "./settingsStore";
 
-/**
- * How cells render: elevation colour ("colour"), greyscale with per-cell
- * id/elevation labels ("data"), solid per-plate colours ("plate"), crust type
- * ("crust"), density ramp ("density"), or boundary type ("boundary").
- */
-export type ViewMode =
-  | "colour"
-  | "data"
-  | "plate"
-  | "crust"
-  | "density"
-  | "boundary";
-
-/** Callbacks the control panel reports user input through. */
-export interface ControlsCallbacks {
-  onLevelChange: (level: number) => void;
-  onSeaLevelChange: (seaLevel: number) => void;
-  onAutoRotateChange: (enabled: boolean) => void;
-  onProjectionChange: (projection: Projection) => void;
-  onViewModeChange: (mode: ViewMode) => void;
-  onSeedModeChange: (enabled: boolean) => void;
-  onBranchesChange: (branches: number) => void;
-  onVelocitiesChange: (enabled: boolean) => void;
-  onRunChange: (enabled: boolean) => void;
-  onClearFaults: () => void;
-}
-
-/** Initial values the panel opens with. */
-export interface ControlsOptions {
-  level: number;
-  seaLevel: number;
-  autoRotate: boolean;
-  projection: Projection;
-  viewMode: ViewMode;
-  seedMode: boolean;
-  branchesPerSeed: number;
-  showVelocities: boolean;
-  running: boolean;
-}
-
-/** Imperative handle for pushing live readouts back into the panel. */
+/** Imperative handle for pushing live sim readouts back into the panel. */
 export interface Controls {
-  readonly level: number;
-  readonly seaLevel: number;
-  readonly autoRotate: boolean;
-  readonly projection: Projection;
-  readonly viewMode: ViewMode;
-  readonly seedMode: boolean;
-  readonly branchesPerSeed: number;
-  readonly showVelocities: boolean;
-  readonly running: boolean;
   setCellCount: (count: number) => void;
   setPlateCount: (count: number) => void;
   setFps: (fps: number) => void;
@@ -68,27 +20,17 @@ const MAX_BRANCHES = 5;
 
 /**
  * Minimal framework-free overlay: subdivision-level and sea-level sliders, an
- * auto-rotate toggle, plus live FPS and cell-count readouts. Inputs report
- * through the callbacks; the host decides what to rebuild / recolour.
+ * auto-rotate toggle, plus live FPS and cell-count readouts. The settings store
+ * is the single source of truth: inputs write to it, and the panel reflects any
+ * change back (including programmatic ones). Clear-faults is an action, not a
+ * setting, so it stays a dedicated callback.
  */
 export const createControls = (
   parent: HTMLElement,
-  options: ControlsOptions,
-  callbacks: ControlsCallbacks,
+  store: SettingsStore,
+  onClearFaults: () => void,
 ): Controls => {
-  let level = clamp(options.level, MIN_LEVEL, MAX_LEVEL);
-  let seaLevel = clamp(options.seaLevel, MIN_SEA_LEVEL, MAX_SEA_LEVEL);
-  let autoRotate = options.autoRotate;
-  let projection = options.projection;
-  let viewMode = options.viewMode;
-  let seedMode = options.seedMode;
-  let branchesPerSeed = clamp(
-    Math.round(options.branchesPerSeed),
-    MIN_BRANCHES,
-    MAX_BRANCHES,
-  );
-  let showVelocities = options.showVelocities;
-  let running = options.running;
+  const initial = store.getAll();
 
   const panel = document.createElement("div");
   Object.assign(panel.style, {
@@ -116,14 +58,19 @@ export const createControls = (
 
   // Subdivision-level slider.
   const levelLabel = makeLabel();
-  const levelSlider = makeSlider(MIN_LEVEL, MAX_LEVEL, 1, level);
+  const levelSlider = makeSlider(MIN_LEVEL, MAX_LEVEL, 1, initial.level);
 
   // Sea-level slider.
   const seaLabel = makeLabel();
-  const seaSlider = makeSlider(MIN_SEA_LEVEL, MAX_SEA_LEVEL, 0.5, seaLevel);
+  const seaSlider = makeSlider(
+    MIN_SEA_LEVEL,
+    MAX_SEA_LEVEL,
+    0.5,
+    initial.seaLevel,
+  );
 
   // Auto-rotate toggle.
-  const rotateToggle = makeToggle("Auto-rotate", autoRotate);
+  const rotateToggle = makeToggle("Auto-rotate", initial.autoRotate);
 
   // Projection selector (sphere / Mercator map).
   const projectionLabel = makeLabel();
@@ -133,7 +80,7 @@ export const createControls = (
       { value: "sphere", label: "Sphere" },
       { value: "mercator", label: "Mercator map" },
     ],
-    projection,
+    initial.projection,
   );
 
   // View-mode selector (colour / data / plate).
@@ -148,14 +95,20 @@ export const createControls = (
       { value: "density", label: "Density" },
       { value: "boundary", label: "Boundaries" },
     ],
-    viewMode,
+    initial.viewMode,
   );
 
   // Seed-placement mode: clicks drop plate seeds instead of orbiting.
-  const seedToggle = makeToggle("Place plate seeds (click globe)", seedMode);
+  const seedToggle = makeToggle(
+    "Place plate seeds (click globe)",
+    initial.seedMode,
+  );
 
   // Plate-velocity arrows overlay toggle.
-  const velocityToggle = makeToggle("Show plate velocities", showVelocities);
+  const velocityToggle = makeToggle(
+    "Show plate velocities",
+    initial.showVelocities,
+  );
 
   // Branches-per-seed slider (how many faults each seed fans out).
   const branchesLabel = makeLabel();
@@ -163,11 +116,11 @@ export const createControls = (
     MIN_BRANCHES,
     MAX_BRANCHES,
     1,
-    branchesPerSeed,
+    initial.branchesPerSeed,
   );
 
   // Run-simulation toggle: advances plate motion while checked.
-  const runToggle = makeToggle("Run simulation", running);
+  const runToggle = makeToggle("Run simulation", initial.running);
 
   // Clear-faults button.
   const clearButton = makeButton("Clear faults");
@@ -203,13 +156,15 @@ export const createControls = (
   } satisfies Partial<CSSStyleDeclaration>);
 
   const renderLevelLabel = (): void => {
-    levelLabel.textContent = `Subdivision level: ${level}`;
+    levelLabel.textContent = `Subdivision level: ${store.get("level")}`;
   };
   const renderSeaLabel = (): void => {
-    seaLabel.textContent = `Sea level: ${seaLevel.toFixed(1)}`;
+    seaLabel.textContent = `Sea level: ${store.get("seaLevel").toFixed(1)}`;
   };
   const renderBranchesLabel = (): void => {
-    branchesLabel.textContent = `Branches per seed: ${branchesPerSeed}`;
+    branchesLabel.textContent = `Branches per seed: ${store.get(
+      "branchesPerSeed",
+    )}`;
   };
   renderLevelLabel();
   renderSeaLabel();
@@ -220,59 +175,90 @@ export const createControls = (
   massEl.textContent = "Mass: --";
 
   levelSlider.addEventListener("input", () => {
-    level = clamp(Math.round(Number(levelSlider.value)), MIN_LEVEL, MAX_LEVEL);
-    renderLevelLabel();
-    callbacks.onLevelChange(level);
+    store.set({
+      level: clamp(Math.round(Number(levelSlider.value)), MIN_LEVEL, MAX_LEVEL),
+    });
   });
 
   seaSlider.addEventListener("input", () => {
-    seaLevel = clamp(Number(seaSlider.value), MIN_SEA_LEVEL, MAX_SEA_LEVEL);
-    renderSeaLabel();
-    callbacks.onSeaLevelChange(seaLevel);
+    store.set({
+      seaLevel: clamp(Number(seaSlider.value), MIN_SEA_LEVEL, MAX_SEA_LEVEL),
+    });
   });
 
   rotateToggle.input.addEventListener("change", () => {
-    autoRotate = rotateToggle.input.checked;
-    callbacks.onAutoRotateChange(autoRotate);
+    store.set({ autoRotate: rotateToggle.input.checked });
   });
 
   projectionSelect.addEventListener("change", () => {
-    projection = projectionSelect.value as Projection;
-    callbacks.onProjectionChange(projection);
+    store.set({ projection: projectionSelect.value as Projection });
   });
 
   viewSelect.addEventListener("change", () => {
-    viewMode = viewSelect.value as ViewMode;
-    callbacks.onViewModeChange(viewMode);
+    store.set({ viewMode: viewSelect.value as ViewMode });
   });
 
   seedToggle.input.addEventListener("change", () => {
-    seedMode = seedToggle.input.checked;
-    callbacks.onSeedModeChange(seedMode);
+    store.set({ seedMode: seedToggle.input.checked });
   });
 
   velocityToggle.input.addEventListener("change", () => {
-    showVelocities = velocityToggle.input.checked;
-    callbacks.onVelocitiesChange(showVelocities);
+    store.set({ showVelocities: velocityToggle.input.checked });
   });
 
   runToggle.input.addEventListener("change", () => {
-    running = runToggle.input.checked;
-    callbacks.onRunChange(running);
+    store.set({ running: runToggle.input.checked });
   });
 
   branchesSlider.addEventListener("input", () => {
-    branchesPerSeed = clamp(
-      Math.round(Number(branchesSlider.value)),
-      MIN_BRANCHES,
-      MAX_BRANCHES,
-    );
-    renderBranchesLabel();
-    callbacks.onBranchesChange(branchesPerSeed);
+    store.set({
+      branchesPerSeed: clamp(
+        Math.round(Number(branchesSlider.value)),
+        MIN_BRANCHES,
+        MAX_BRANCHES,
+      ),
+    });
   });
 
   clearButton.addEventListener("click", () => {
-    callbacks.onClearFaults();
+    onClearFaults();
+  });
+
+  // Reflect store changes (including programmatic ones) back into the panel.
+  // Writing input.value/checked does not fire an "input"/"change" event, so this
+  // cannot loop back into store.set.
+  store.subscribe((changed) => {
+    const state = store.getAll();
+    if (changed.has("level")) {
+      levelSlider.value = String(state.level);
+      renderLevelLabel();
+    }
+    if (changed.has("seaLevel")) {
+      seaSlider.value = String(state.seaLevel);
+      renderSeaLabel();
+    }
+    if (changed.has("autoRotate")) {
+      rotateToggle.input.checked = state.autoRotate;
+    }
+    if (changed.has("projection")) {
+      projectionSelect.value = state.projection;
+    }
+    if (changed.has("viewMode")) {
+      viewSelect.value = state.viewMode;
+    }
+    if (changed.has("seedMode")) {
+      seedToggle.input.checked = state.seedMode;
+    }
+    if (changed.has("showVelocities")) {
+      velocityToggle.input.checked = state.showVelocities;
+    }
+    if (changed.has("branchesPerSeed")) {
+      branchesSlider.value = String(state.branchesPerSeed);
+      renderBranchesLabel();
+    }
+    if (changed.has("running")) {
+      runToggle.input.checked = state.running;
+    }
   });
 
   panel.append(
@@ -299,33 +285,6 @@ export const createControls = (
   parent.appendChild(panel);
 
   return {
-    get level() {
-      return level;
-    },
-    get seaLevel() {
-      return seaLevel;
-    },
-    get autoRotate() {
-      return autoRotate;
-    },
-    get projection() {
-      return projection;
-    },
-    get viewMode() {
-      return viewMode;
-    },
-    get seedMode() {
-      return seedMode;
-    },
-    get branchesPerSeed() {
-      return branchesPerSeed;
-    },
-    get showVelocities() {
-      return showVelocities;
-    },
-    get running() {
-      return running;
-    },
     setCellCount: (count: number) => {
       cellEl.textContent = `Cells: ${count.toLocaleString()}`;
     },

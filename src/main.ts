@@ -18,7 +18,8 @@ import { BoundaryField, classifyBoundaries } from "./sim/boundaries";
 import { AdvectionField, totalCrustMass } from "./sim/massBudget";
 import { updatePlateMotion } from "./sim/plateForces";
 import { step } from "./sim/step";
-import { createControls, type ViewMode } from "./ui/controls";
+import { createControls } from "./ui/controls";
+import { createSettingsStore, type ViewMode } from "./ui/settingsStore";
 
 const INITIAL_LEVEL = 6;
 const INITIAL_SEA_LEVEL = 0;
@@ -122,23 +123,31 @@ const plateRegistry = new PlateRegistry();
 
 /** Scratch buffer for raw flood-fill labels before they are mapped to stable ids. */
 let rawLabels = new Int32Array(0);
-let seaLevel = INITIAL_SEA_LEVEL;
-let projection: Projection = INITIAL_PROJECTION;
-let viewMode: ViewMode = INITIAL_VIEW_MODE;
-let seedMode = INITIAL_SEED_MODE;
-let branchesPerSeed = INITIAL_BRANCHES_PER_SEED;
-let showVelocities = INITIAL_SHOW_VELOCITIES;
-let running = INITIAL_RUNNING;
+
+/** Single source of truth for every UI setting. */
+const settings = createSettingsStore({
+    level: INITIAL_LEVEL,
+    seaLevel: INITIAL_SEA_LEVEL,
+    autoRotate: INITIAL_AUTO_ROTATE,
+    projection: INITIAL_PROJECTION,
+    viewMode: INITIAL_VIEW_MODE,
+    seedMode: INITIAL_SEED_MODE,
+    branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
+    showVelocities: INITIAL_SHOW_VELOCITIES,
+    running: INITIAL_RUNNING,
+});
 
 /** Map the UI view mode onto the renderer's colour mode. */
-const colourMode = (): ColourMode =>
-    viewMode === "colour" ? "elevation" : viewMode;
+const colourMode = (): ColourMode => {
+    const viewMode = settings.get("viewMode");
+    return viewMode === "colour" ? "elevation" : viewMode;
+};
 
 const recolour = (): void => {
     cellRenderer?.updateColours(
         cellData,
         colourMode(),
-        seaLevel,
+        settings.get("seaLevel"),
         boundaries?.cellKind,
     );
 };
@@ -175,7 +184,7 @@ const reassignPlates = (initCrust: boolean): number => {
 };
 
 const applyVelocities = (): void => {
-    cellRenderer?.setVelocitiesVisible(showVelocities);
+    cellRenderer?.setVelocitiesVisible(settings.get("showVelocities"));
 };
 
 /**
@@ -184,6 +193,7 @@ const applyVelocities = (): void => {
  * new camera so seed placement keeps working.
  */
 const applyProjection = (): void => {
+    const projection = settings.get("projection");
     const onMap = projection === "mercator";
     cellRenderer?.setProjection(projection);
     cellLabels.setProjection(projection);
@@ -198,6 +208,7 @@ const applyProjection = (): void => {
 };
 
 const applyViewMode = (): void => {
+    const viewMode = settings.get("viewMode");
     const showLabels = viewMode === "data";
     recolour();
     cellRenderer?.setEdgesVisible(viewMode === "data");
@@ -210,7 +221,7 @@ const applyViewMode = (): void => {
                 ? "Labels hidden: too many cells. Lower subdivision level."
                 : "Showing all per-cell properties.",
         );
-    } else if (seedMode) {
+    } else if (settings.get("seedMode")) {
         ui.setNote("Click the globe to drop plate seeds; drag to orbit.");
     } else {
         ui.setNote("");
@@ -236,7 +247,7 @@ const rebuild = (level: number): void => {
     rawLabels = new Int32Array(cellMesh.cellCount);
 
     plates = new Plates(cellMesh);
-    plates.setBranchesPerSeed(branchesPerSeed);
+    plates.setBranchesPerSeed(settings.get("branchesPerSeed"));
     plateRegistry.reset();
     plateData = new PlateData();
 
@@ -248,7 +259,7 @@ const rebuild = (level: number): void => {
 
     cellLabels.build(cellMesh, cellData);
 
-    cellRenderer.setProjection(projection);
+    cellRenderer.setProjection(settings.get("projection"));
 
     // Baseline for conservation drift: total crust mass of the fresh world.
     initialMass = totalCrustMass(cellMesh, cellData);
@@ -280,64 +291,35 @@ const placeSeed = (event: PointerEvent): void => {
     cellLabels.refresh();
 };
 
-const ui = createControls(
-    document.body,
-    {
-        level: INITIAL_LEVEL,
-        seaLevel: INITIAL_SEA_LEVEL,
-        autoRotate: INITIAL_AUTO_ROTATE,
-        projection: INITIAL_PROJECTION,
-        viewMode: INITIAL_VIEW_MODE,
-        seedMode: INITIAL_SEED_MODE,
-        branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
-        showVelocities: INITIAL_SHOW_VELOCITIES,
-        running: INITIAL_RUNNING,
-    },
-    {
-        onLevelChange: level => rebuild(level),
-        onSeaLevelChange: nextSeaLevel => {
-            seaLevel = nextSeaLevel;
-            recolour();
-        },
-        onAutoRotateChange: enabled => {
-            controls.autoRotate = enabled;
-        },
-        onProjectionChange: nextProjection => {
-            projection = nextProjection;
-            applyProjection();
-        },
-        onViewModeChange: mode => {
-            viewMode = mode;
-            applyViewMode();
-        },
-        onSeedModeChange: enabled => {
-            seedMode = enabled;
-            applyViewMode();
-        },
-        onBranchesChange: branches => {
-            branchesPerSeed = branches;
-            plates?.setBranchesPerSeed(branches);
-        },
-        onVelocitiesChange: enabled => {
-            showVelocities = enabled;
-            applyVelocities();
-        },
-        onRunChange: enabled => {
-            running = enabled;
-        },
-        onClearFaults: () => {
-            if (!plates || !cellRenderer) return;
-            plates.clear();
-            const plateCount = reassignPlates(false);
-            cellRenderer.updateFaults(plates.cracked);
-            cellRenderer.updateSeeds(plates.seeds);
-            cellRenderer.setFaultsVisible(false);
-            ui.setPlateCount(plateCount);
-            recolour();
-            cellLabels.refresh();
-        },
-    },
+const clearFaults = (): void => {
+    if (!plates || !cellRenderer) return;
+    plates.clear();
+    const plateCount = reassignPlates(false);
+    cellRenderer.updateFaults(plates.cracked);
+    cellRenderer.updateSeeds(plates.seeds);
+    cellRenderer.setFaultsVisible(false);
+    ui.setPlateCount(plateCount);
+    recolour();
+    cellLabels.refresh();
+};
+
+const ui = createControls(document.body, settings, clearFaults);
+
+// React to setting changes. The store is the source of truth; these subscriptions
+// own the side effects each setting triggers. `running` needs none: the sim tick
+// reads it directly.
+settings.on("level", level => rebuild(level));
+settings.on("seaLevel", () => recolour());
+settings.on("autoRotate", enabled => {
+    controls.autoRotate = enabled;
+});
+settings.on("projection", () => applyProjection());
+settings.on("viewMode", () => applyViewMode());
+settings.on("seedMode", () => applyViewMode());
+settings.on("branchesPerSeed", branches =>
+    plates?.setBranchesPerSeed(branches),
 );
+settings.on("showVelocities", () => applyVelocities());
 
 rebuild(INITIAL_LEVEL);
 applyProjection();
@@ -351,7 +333,7 @@ renderer.domElement.addEventListener("pointerdown", event => {
     pointerDownY = event.clientY;
 });
 renderer.domElement.addEventListener("pointerup", event => {
-    if (!seedMode) return;
+    if (!settings.get("seedMode")) return;
     const travel = Math.hypot(
         event.clientX - pointerDownX,
         event.clientY - pointerDownY,
@@ -374,7 +356,13 @@ const copyCellData = (from: CellData, to: CellData): void => {
 };
 
 window.setInterval(() => {
-    if (!running || !plateData || !cellRenderer || !boundaries || !advection)
+    if (
+        !settings.get("running") ||
+        !plateData ||
+        !cellRenderer ||
+        !boundaries ||
+        !advection
+    )
         return;
     // Recompute density-driven motion from the previous tick's boundaries and the
     // current crust, then classify against the new omega so advection sees live
