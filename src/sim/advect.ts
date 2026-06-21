@@ -174,6 +174,21 @@ export const advect = (
   subducted.fill(0);
   let subductedThisStep = 0;
 
+  /**
+   * Melt `loser`'s crust at convergent cell `into`: accrete `ACCRETION_FRACTION`
+   * of its mass onto the crust surviving there (thickening it) and record the
+   * rest in the subduction ledger, so `liveMass + subductedTotal` stays
+   * conserved. Shared by both subduction paths (lone foreign claimant and
+   * collision loser).
+   */
+  const subduct = (loser: number, into: number): void => {
+    const loserMass = mesh.area(loser) * src.thickness[loser];
+    const accretedMass = ACCRETION_FRACTION * loserMass;
+    subductedThisStep += loserMass - accretedMass;
+    accreted[into] += accretedMass / mesh.area(into);
+    subducted[into] = 1;
+  };
+
   // Pass 0: where does each cell's crust scatter to under its plate's rotation?
   for (let i = 0; i < cellCount; i++) {
     const plate = src.plateId[i];
@@ -194,6 +209,23 @@ export const advect = (
   // noise, so the survivor simply occupies the cell and the loser is dropped.
   for (let i = 0; i < cellCount; i++) {
     const d = dest[i];
+
+    // Speckle fix: at a convergent cell, foreign crust (a different plate) that
+    // is denser-or-equal to the cell's own crust melts and is ledgered before
+    // winner resolution, even when it is the lone claimant -- so the forward
+    // scatter missing the own-plate cell can no longer leave denser foreign
+    // crust stranded on the overriding side. Foreign buoyant crust still falls
+    // through to normal resolution, preserving genuine overriding / boundary
+    // migration.
+    if (
+      boundaries.cellKind[d] === BoundaryKind.CONVERGENT &&
+      src.plateId[i] !== src.plateId[d] &&
+      src.density[i] >= src.density[d]
+    ) {
+      subduct(i, d);
+      continue;
+    }
+
     const w = winner[d];
     if (w < 0) {
       winner[d] = i;
@@ -211,11 +243,7 @@ export const advect = (
     // Only real convergence destroys crust; interior aliasing collisions must
     // not, or they would pollute the subduction ledger and erode plate interiors.
     if (boundaries.cellKind[d] === BoundaryKind.CONVERGENT) {
-      const loserMass = mesh.area(loser) * src.thickness[loser];
-      const accretedMass = ACCRETION_FRACTION * loserMass;
-      subductedThisStep += loserMass - accretedMass;
-      accreted[d] += accretedMass / mesh.area(d);
-      subducted[d] = 1;
+      subduct(loser, d);
     }
   }
 
@@ -234,6 +262,16 @@ export const advect = (
       dst.density[d] = RIFT_DENSITY;
       dst.thickness[d] = 0;
       riftCell[d] = 1;
+    } else if (boundaries.cellKind[d] === BoundaryKind.CONVERGENT) {
+      // Convergent hole: the own-plate cell missed `d` under forward scatter and
+      // every foreign claimant melted. Refill from the own-plate back-rotation
+      // only -- skipping the dominant-neighbour fallback, which would otherwise
+      // bleed the advancing subducting plate's id across the boundary (speckle).
+      // Any accretion from foreign crust melted here thickens the surviving own
+      // crust, keeping the budget honest.
+      const ownSource = gatherSource(mesh, d, src, plateData, dtMyr);
+      copyCell(src, dst, ownSource, d);
+      dst.thickness[d] += accreted[d];
     } else {
       // Hole: no crust scattered onto `d`. Decide what fills it.
       const ownSource = gatherSource(mesh, d, src, plateData, dtMyr);
