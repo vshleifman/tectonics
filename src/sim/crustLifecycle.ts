@@ -1,14 +1,10 @@
 import type { CellData } from "../data/CellData";
 import type { CellMesh } from "../mesh/CellMesh";
-import {
-  CONTINENTAL_DENSITY,
-  OCEANIC_DENSITY_YOUNG,
-  OCEANIC_THICKNESS,
-  oceanicDensityFromAge,
-} from "../plates/PlateData";
+import { oceanicDensityFromAge } from "../plates/PlateData";
 import { baselineElevation } from "./elevation";
 import type { AdvectionField } from "./massBudget";
 import { totalCrustMass } from "./massBudget";
+import { tuning } from "./tuning";
 
 /**
  * Crust type codes mirrored from {@link CellData.crustType} (0 oceanic, 1
@@ -18,19 +14,10 @@ const OCEANIC = 0;
 const CONTINENTAL = 1;
 
 /**
- * Tuning constants for the crust lifecycle (the 08 tuning sink, mirroring the
- * const blocks in `elevation.ts` and `plateForces.ts`). Reasoned starting
- * values, not empirically calibrated.
+ * The crust-lifecycle tuning constants (rift crust density/thickness and the
+ * continental differentiation threshold) now live in {@link tuning} so the UI
+ * can tweak them live; they are read inside {@link applyCrustLifecycle} below.
  */
-
-/**
- * Crust thickness (km) above which accreted oceanic crust differentiates into
- * continental crust. Convergence thickens the surviving cell via accretion (see
- * `advect.ts`); once a cell piles up past this it stops behaving as subductable
- * ocean and becomes buoyant continental crust (one-way). Set above the starting
- * {@link OCEANIC_THICKNESS} so only genuinely thickened crust converts.
- */
-const CONTINENTAL_THICKNESS_THRESHOLD = 15;
 
 /**
  * Crust creation, destruction and ageing: the lifecycle that keeps the crust
@@ -74,19 +61,23 @@ export const applyCrustLifecycle = (
       // provisionally by advect (inherits the spreading plate); keep it.
       data.crustType[i] = OCEANIC;
       data.age[i] = 0;
-      data.density[i] = OCEANIC_DENSITY_YOUNG;
-      data.thickness[i] = OCEANIC_THICKNESS;
-      data.elevation[i] = baselineElevation(OCEANIC, 0, OCEANIC_THICKNESS);
-      createdThisStep += mesh.area(i) * OCEANIC_THICKNESS;
+      data.density[i] = tuning.oceanicDensityYoung;
+      data.thickness[i] = tuning.oceanicThickness;
+      data.elevation[i] = baselineElevation(
+        OCEANIC,
+        0,
+        tuning.oceanicThickness,
+      );
+      createdThisStep += mesh.area(i) * tuning.oceanicThickness;
       continue;
     }
 
     // Age every surviving cell; recompute density / differentiate oceanic crust.
     data.age[i] += dtMyr;
     if (data.crustType[i] === OCEANIC) {
-      if (data.thickness[i] >= CONTINENTAL_THICKNESS_THRESHOLD) {
+      if (data.thickness[i] >= tuning.continentalThicknessThreshold) {
         data.crustType[i] = CONTINENTAL;
-        data.density[i] = CONTINENTAL_DENSITY;
+        data.density[i] = tuning.continentalDensity;
       } else {
         data.density[i] = oceanicDensityFromAge(data.age[i]);
       }

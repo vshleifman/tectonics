@@ -18,6 +18,7 @@ import { BoundaryField, classifyBoundaries } from "./sim/boundaries";
 import { AdvectionField, totalCrustMass } from "./sim/massBudget";
 import { updatePlateMotion } from "./sim/plateForces";
 import { step } from "./sim/step";
+import { tuning } from "./sim/tuning";
 import { createControls } from "./ui/controls";
 import { createSettingsStore, type ViewMode } from "./ui/settingsStore";
 
@@ -25,14 +26,13 @@ const INITIAL_LEVEL = 6;
 const INITIAL_SEA_LEVEL = 0;
 const INITIAL_AUTO_ROTATE = false;
 const INITIAL_PROJECTION: Projection = "sphere";
-const INITIAL_VIEW_MODE: ViewMode = "plate";
+const INITIAL_VIEW_MODE: ViewMode = "colour";
 const INITIAL_SEED_MODE = true;
 const INITIAL_BRANCHES_PER_SEED = 3;
 const INITIAL_SHOW_VELOCITIES = false;
+const INITIAL_SHOW_PLATES = true;
 const INITIAL_RUNNING = false;
 const SIM_INTERVAL_MS = 500; // tectonics ticks slowly, decoupled from render
-/** Myr of plate motion advanced per simulation tick (tunable). */
-const DT_MYR = 2;
 /** Pointer travel (px) above which a press counts as an orbit drag, not a click. */
 const CLICK_DRAG_THRESHOLD = 6;
 
@@ -134,6 +134,7 @@ const settings = createSettingsStore({
     seedMode: INITIAL_SEED_MODE,
     branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
     showVelocities: INITIAL_SHOW_VELOCITIES,
+    showPlates: INITIAL_SHOW_PLATES,
     running: INITIAL_RUNNING,
 });
 
@@ -185,6 +186,27 @@ const reassignPlates = (initCrust: boolean): number => {
 
 const applyVelocities = (): void => {
     cellRenderer?.setVelocitiesVisible(settings.get("showVelocities"));
+};
+
+/** Set the plates-overlay visibility and refresh its colours when shown. */
+const applyShowPlates = (): void => {
+    const show = settings.get("showPlates");
+    if (show) cellRenderer?.updatePlateOverlay(cellData);
+    cellRenderer?.setPlatesVisible(show);
+};
+
+/** Refresh the plates overlay colours after a plate change (if it is shown). */
+const refreshPlateOverlay = (): void => {
+    if (settings.get("showPlates")) cellRenderer?.updatePlateOverlay(cellData);
+};
+
+/**
+ * A tuning slider moved: most constants are read live by the next sim tick, but
+ * recolour now so colour-ramp / overlay edits show immediately even when paused.
+ */
+const onTuningChange = (): void => {
+    recolour();
+    refreshPlateOverlay();
 };
 
 /**
@@ -273,6 +295,7 @@ const rebuild = (level: number): void => {
     ui.setPlateCount(plateCount);
     ui.setMassReadout(initialMass, 0);
     applyViewMode();
+    applyShowPlates();
 };
 
 /** Drop a seed at the picked junction, regrow faults, and re-derive plates. */
@@ -288,6 +311,7 @@ const placeSeed = (event: PointerEvent): void => {
     cellRenderer.setFaultsVisible(true);
     ui.setPlateCount(plateCount);
     recolour();
+    refreshPlateOverlay();
     cellLabels.refresh();
 };
 
@@ -300,10 +324,16 @@ const clearFaults = (): void => {
     cellRenderer.setFaultsVisible(false);
     ui.setPlateCount(plateCount);
     recolour();
+    refreshPlateOverlay();
     cellLabels.refresh();
 };
 
-const ui = createControls(document.body, settings, clearFaults);
+const ui = createControls(
+    document.body,
+    settings,
+    clearFaults,
+    onTuningChange,
+);
 
 // React to setting changes. The store is the source of truth; these subscriptions
 // own the side effects each setting triggers. `running` needs none: the sim tick
@@ -320,6 +350,7 @@ settings.on("branchesPerSeed", branches =>
     plates?.setBranchesPerSeed(branches),
 );
 settings.on("showVelocities", () => applyVelocities());
+settings.on("showPlates", () => applyShowPlates());
 
 rebuild(INITIAL_LEVEL);
 applyProjection();
@@ -374,13 +405,14 @@ window.setInterval(() => {
         cellData,
         backBuffer,
         plateData,
-        DT_MYR,
+        tuning.dtMyr,
         boundaries,
         advection,
     );
     copyCellData(backBuffer, cellData);
     classify();
     recolour();
+    refreshPlateOverlay();
     cellRenderer.updateVelocities(plateData, cellData);
     cellLabels.refresh();
 

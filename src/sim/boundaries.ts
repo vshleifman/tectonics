@@ -2,6 +2,7 @@ import type { CellData } from "../data/CellData";
 import { dot, normalise, sub, tangent, type Vec3 } from "../math/vec3";
 import type { CellMesh } from "../mesh/CellMesh";
 import type { PlateData } from "../plates/PlateData";
+import { tuning } from "./tuning";
 
 /**
  * What kind of plate boundary an edge (or boundary cell) is, from the relative
@@ -19,10 +20,10 @@ export type BoundaryKindValue =
   (typeof BoundaryKind)[keyof typeof BoundaryKind];
 
 /**
- * Relative speed below which a boundary is treated as inactive (`NONE`). Keeps
- * near-co-moving plates from flickering between weak classifications.
+ * The relative-speed threshold below which a boundary is treated as inactive
+ * (`NONE`) now lives in {@link tuning} (as `activeSpeedEps`) so the UI can tweak
+ * it live; it is read inside {@link classifyBoundaries} below.
  */
-const ACTIVE_SPEED_EPS = 1e-5;
 
 /**
  * Boundary classification for one mesh, in two synchronised representations:
@@ -121,7 +122,7 @@ export const classifyBoundaries = (
     const speed = Math.hypot(vRel[0], vRel[1], vRel[2]);
 
     let kind: BoundaryKindValue = BoundaryKind.NONE;
-    if (speed >= ACTIVE_SPEED_EPS) {
+    if (speed >= tuning.activeSpeedEps) {
       if (Math.abs(vn) >= vt) {
         kind = vn > 0 ? BoundaryKind.CONVERGENT : BoundaryKind.DIVERGENT;
       } else {

@@ -2,16 +2,11 @@ import type { Projection } from "../render/projection";
 
 /**
  * How cells render: elevation colour ("colour"), greyscale with per-cell
- * id/elevation labels ("data"), solid per-plate colours ("plate"), crust type
- * ("crust"), density ramp ("density"), or boundary type ("boundary").
+ * id/elevation labels ("data"), crust type ("crust"), density ramp ("density"),
+ * or boundary type ("boundary"). Plates are no longer a base view mode — they
+ * are an independently-toggled overlay (see `showPlates`).
  */
-export type ViewMode =
-  | "colour"
-  | "data"
-  | "plate"
-  | "crust"
-  | "density"
-  | "boundary";
+export type ViewMode = "colour" | "data" | "crust" | "density" | "boundary";
 
 /** Every user-tunable UI setting. The store below is the sole owner of these. */
 export interface Settings {
@@ -23,6 +18,7 @@ export interface Settings {
   seedMode: boolean;
   branchesPerSeed: number;
   showVelocities: boolean;
+  showPlates: boolean;
   running: boolean;
 }
 

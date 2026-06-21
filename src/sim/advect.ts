@@ -11,18 +11,13 @@ import type { PlateData } from "../plates/PlateData";
 import { type BoundaryField, BoundaryKind } from "./boundaries";
 import type { AdvectionField } from "./massBudget";
 import { totalCrustMass } from "./massBudget";
+import { tuning } from "./tuning";
 
 /**
- * Fraction of a subducting (denser) cell's crust mass that accretes onto the
- * surviving (more buoyant) cell at a convergent claim; the remainder is consumed
- * into the mantle and recorded in the subduction ledger. 1 would make live mass
- * exactly conserved; less than 1 lets convergence destroy crust while keeping the
- * budget honest (`liveMass + subductedTotal` constant). Tunable for 06.
+ * The accretion fraction (how much of a subducting cell's mass accretes onto the
+ * survivor) and the rift placeholder density now live in {@link tuning} so the UI
+ * can tweak them live; they are read inside {@link advect} below.
  */
-const ACCRETION_FRACTION = 0.5;
-
-/** Density (g/cm3) stamped on an empty rift placeholder until 07 fills it. */
-const RIFT_DENSITY = 2.9;
 
 /**
  * Cell whose centre is closest to `target` on the unit sphere, found by a greedy
@@ -181,9 +176,9 @@ export const advect = (
    * conserved. Shared by both subduction paths (lone foreign claimant and
    * collision loser).
    */
-  const subduct = (loser: number, into: number): void => {
-    const loserMass = mesh.area(loser) * src.thickness[loser];
-    const accretedMass = ACCRETION_FRACTION * loserMass;
+    const subduct = (loser: number, into: number): void => {
+        const loserMass = mesh.area(loser) * src.thickness[loser];
+        const accretedMass = tuning.accretionFraction * loserMass;
     subductedThisStep += loserMass - accretedMass;
     accreted[into] += accretedMass / mesh.area(into);
     subducted[into] = 1;
@@ -258,9 +253,9 @@ export const advect = (
       dst.elevation[d] = 0;
       dst.plateId[d] = src.plateId[d]; // provisional ownership, finalised in 07
       dst.crustType[d] = 0; // oceanic
-      dst.age[d] = 0;
-      dst.density[d] = RIFT_DENSITY;
-      dst.thickness[d] = 0;
+            dst.age[d] = 0;
+            dst.density[d] = tuning.riftDensity;
+            dst.thickness[d] = 0;
       riftCell[d] = 1;
     } else if (boundaries.cellKind[d] === BoundaryKind.CONVERGENT) {
       // Convergent hole: the own-plate cell missed `d` under forward scatter and

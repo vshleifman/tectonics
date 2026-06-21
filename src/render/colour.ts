@@ -1,7 +1,8 @@
 import type { CellData } from "../data/CellData";
 import { clamp01, lerp } from "../math/scalar";
-import { DENSITY_MAX, DENSITY_MIN } from "../plates/PlateData";
+import { densityMax, densityMin } from "../plates/PlateData";
 import { BoundaryKind } from "../sim/boundaries";
+import { tuning } from "../sim/tuning";
 
 /** An RGB colour with each channel in [0, 1]. */
 export type Rgb = [number, number, number];
@@ -17,9 +18,6 @@ export type ColourMode =
   | "crust"
   | "density"
   | "boundary";
-
-const MIN_ELEVATION = -10;
-const MAX_ELEVATION = 10;
 
 /** Pick a cell's colour for the active mode. */
 export const colourForCell = (
@@ -70,7 +68,9 @@ const colourForCrust = (crustType: number): Rgb =>
 
 /** Light (least dense) to dark (most dense) ramp over the density range. */
 const colourForDensity = (density: number): Rgb => {
-  const t = clamp01((density - DENSITY_MIN) / (DENSITY_MAX - DENSITY_MIN));
+  const min = densityMin();
+  const max = densityMax();
+  const t = clamp01((density - min) / (max - min || 1));
   return mix([0.95, 0.93, 0.82], [0.35, 0.12, 0.18], t);
 };
 
@@ -82,12 +82,12 @@ const colourForDensity = (density: number): Rgb => {
 const colourForElevation = (elevation: number, seaLevel: number): Rgb => {
   if (elevation < seaLevel) {
     // Ocean: deep navy (deepest) to shallow cyan (near sea level).
-    const span = seaLevel - MIN_ELEVATION || 1;
-    const t = clamp01((elevation - MIN_ELEVATION) / span);
+    const span = seaLevel - tuning.elevationMin || 1;
+    const t = clamp01((elevation - tuning.elevationMin) / span);
     return mix([0.02, 0.05, 0.2], [0.1, 0.45, 0.6], t);
   }
   // Land: beach -> green -> brown -> snow, normalised above sea level.
-  const span = MAX_ELEVATION - seaLevel || 1;
+  const span = tuning.elevationMax - seaLevel || 1;
   const t = clamp01((elevation - seaLevel) / span);
   if (t < 0.15) return mix([0.78, 0.72, 0.5], [0.25, 0.5, 0.2], t / 0.15);
   if (t < 0.6)

@@ -4,6 +4,7 @@ import { clamp01 } from "../math/scalar";
 import { cross, normalise, type Vec3 } from "../math/vec3";
 import type { CellMesh } from "../mesh/CellMesh";
 import { baselineElevation } from "../sim/elevation";
+import { tuning } from "../sim/tuning";
 import type { RelabelReport } from "./PlateRegistry";
 
 /**
@@ -73,41 +74,25 @@ export class PlateData {
   }
 }
 
-/** Oceanic crust ages out to here before being treated as fully cooled (Myr). */
-export const MAX_OCEANIC_AGE = 200;
-
 /**
- * Densities (g/cm3). Crust starts oceanic and densifies as it cools; the
- * continental (buoyant) floor is reserved for crust that later differentiates
- * through accretion, and anchors the renderer's density ramp. Exported so the
- * crust lifecycle (08) seeds rift crust and differentiates continental crust
- * from the same constants the seeding uses.
+ * Density bounds, derived live from {@link tuning} so the renderer's density
+ * ramp stays in sync when the densities are tweaked. The continental (buoyant)
+ * floor is the minimum; fully cooled oceanic crust is the maximum.
  */
-export const CONTINENTAL_DENSITY = 2.7;
-export const OCEANIC_DENSITY_YOUNG = 2.9;
-export const OCEANIC_DENSITY_OLD = 3.0;
-
-/**
- * Starting oceanic crust thickness (km). Thickness is the conserved lever for
- * advection — see {@link CellData.thickness}. Exported so rift crust is minted
- * at the same thickness fresh crust is seeded with.
- */
-export const OCEANIC_THICKNESS = 7;
-
-/** Density bounds, exported so the renderer's density ramp stays in sync. */
-export const DENSITY_MIN = CONTINENTAL_DENSITY;
-export const DENSITY_MAX = OCEANIC_DENSITY_OLD;
+export const densityMin = (): number => tuning.continentalDensity;
+export const densityMax = (): number => tuning.oceanicDensityOld;
 
 /**
  * Oceanic crust density (g/cm3) for a given age: young ridge crust starts light
- * and densifies monotonically toward {@link OCEANIC_DENSITY_OLD} as it cools,
- * saturating at {@link MAX_OCEANIC_AGE}. The single density-vs-age curve shared
+ * and densifies monotonically toward `tuning.oceanicDensityOld` as it cools,
+ * saturating at `tuning.maxOceanicAge`. The single density-vs-age curve shared
  * by initial seeding and the per-step ageing in the crust lifecycle.
  */
 export const oceanicDensityFromAge = (age: number): number => {
-  const t = clamp01(age / MAX_OCEANIC_AGE);
+  const t = clamp01(age / tuning.maxOceanicAge);
   return (
-    OCEANIC_DENSITY_YOUNG + t * (OCEANIC_DENSITY_OLD - OCEANIC_DENSITY_YOUNG)
+    tuning.oceanicDensityYoung +
+    t * (tuning.oceanicDensityOld - tuning.oceanicDensityYoung)
   );
 };
 
@@ -172,15 +157,15 @@ export const initialiseCrust = (
 ): void => {
   for (let i = 0; i < mesh.cellCount; i++) {
     const rng = makeRng(`${seed}:cell:${i}`);
-    const age = rng() * MAX_OCEANIC_AGE;
+    const age = rng() * tuning.maxOceanicAge;
     data.crustType[i] = 0; // oceanic
     data.age[i] = age;
     data.density[i] = oceanicDensityFromAge(age);
-    data.thickness[i] = OCEANIC_THICKNESS;
+    data.thickness[i] = tuning.oceanicThickness;
     data.elevation[i] = baselineElevation(
       data.crustType[i],
       age,
-      OCEANIC_THICKNESS,
+      tuning.oceanicThickness,
     );
   }
 };
