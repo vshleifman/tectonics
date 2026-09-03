@@ -24,11 +24,39 @@ import type { RelabelReport } from "./PlateRegistry";
 export interface PlateProperties {
   /** Angular velocity (rad/Myr); direction = Euler pole, magnitude = spin. */
   omega: [number, number, number];
+
+  /**
+   * Displacement (radians) this plate has built up but not yet taken, so that
+   * motion can be applied in whole cells.
+   *
+   * A plate is a rigid sheet: every part of it moves together. Resampling each
+   * cell independently every tick instead lets some cells shift while their
+   * neighbours do not, which smears a plate rather than moving it. So a plate
+   * banks its motion here and, once it has earned a full cell width, shifts its
+   * whole crust one cell in a single step.
+   */
+  pending: number;
 }
+
+/**
+ * Key for an unordered pair of plate ids, so a suture is stored once however the
+ * two plates are named.
+ */
+export const sutureKey = (a: number, b: number): number =>
+  a < b ? a * 1e6 + b : b * 1e6 + a;
 
 export class PlateData {
   /** Properties per live stable plate id. */
   readonly byId = new Map<number, PlateProperties>();
+
+  /**
+   * How long (Myr) each pair of plates has been welded together at a suture,
+   * keyed by {@link sutureKey}. A continental collision that closes hard enough
+   * stops being a boundary the two plates can pull apart at: the crust is joined
+   * across it. Sutured plates are held to a common motion, and once they have
+   * moved as one for long enough they stop being two plates at all.
+   */
+  readonly sutures = new Map<number, number>();
 
   /** Number of live plates. */
   get count(): number {
@@ -127,9 +155,10 @@ export const reconcilePlateProperties = (
           parentProps.omega[1],
           parentProps.omega[2],
         ],
+        pending: 0,
       });
     } else {
-      plateData.byId.set(id, { omega: [0, 0, 0] });
+      plateData.byId.set(id, { omega: [0, 0, 0], pending: 0 });
     }
   }
 };

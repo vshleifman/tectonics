@@ -6,6 +6,7 @@ import type { BoundaryField } from "./boundaries";
 import { applyCrustLifecycle } from "./crustLifecycle";
 import { applyElevation } from "./elevation";
 import type { AdvectionField } from "./massBudget";
+import { updateSutures } from "./sutures";
 
 /**
  * One simulation tick: advance plate motion by `dtMyr`.
@@ -21,6 +22,10 @@ import type { AdvectionField } from "./massBudget";
  * then mints young crust at those rifts, ages the rest and differentiates
  * continental crust; the elevation response finally builds relief on the
  * freshly aged `dst` from those same boundaries.
+ *
+ * Suture bookkeeping runs first, on `src`, so that a collision that has welded
+ * into a single mass -- or two plates that have finally merged into one -- is
+ * already in effect when the crust moves.
  */
 export const step = (
   mesh: CellMesh,
@@ -31,6 +36,7 @@ export const step = (
   boundaries: BoundaryField,
   out: AdvectionField,
 ): void => {
+  updateSutures(mesh, src, plateData, boundaries, dtMyr);
   advect(mesh, src, dst, plateData, dtMyr, boundaries, out);
   applyCrustLifecycle(mesh, dst, dtMyr, out);
   applyElevation(mesh, dst, dtMyr, boundaries);

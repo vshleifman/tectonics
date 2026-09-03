@@ -411,6 +411,9 @@ window.setInterval(() => {
     );
     copyCellData(backBuffer, cellData);
     classify();
+    // Plates merge when a suture matures, so the count changes without any
+    // reassignment; read it back from the live plate set every tick.
+    ui.setPlateCount(plateData.count);
     recolour();
     refreshPlateOverlay();
     cellRenderer.updateVelocities(plateData, cellData);

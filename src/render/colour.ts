@@ -75,19 +75,54 @@ const colourForDensity = (density: number): Rgb => {
 };
 
 /**
- * Map an elevation value (~-10..+10) to an RGB triple in [0, 1], with `seaLevel`
- * as the ocean/land boundary. Both the ocean and land ramps are normalised
- * relative to sea level so the full gradient is used at any threshold.
+ * The highest ground the crust model can actually build: continental baseline
+ * plus the uplift a maximally thick crustal column gives, using the very
+ * constants {@link baselineElevation} works from. Deriving it rather than
+ * hard-coding a range is the point -- the ramp and the elevations it colours
+ * cannot drift apart when the tuning is changed.
+ */
+const landCeiling = (): number =>
+  tuning.continentBase +
+  Math.max(0, tuning.maxCrustThickness - tuning.continentThicknessRef) *
+    tuning.continentThicknessGain;
+
+/**
+ * Map an elevation (km) to an RGB triple in [0, 1], with `seaLevel` as the
+ * ocean/land boundary.
+ *
+ * Both ramps are anchored to the elevations the simulation actually produces,
+ * not to the `elevationMin`/`elevationMax` safety clamp. Those are +-10 km while
+ * the model spans roughly -6..+6, and within that the data is packed tighter
+ * still: sea floor piles up at the abyssal baseline and land rarely passes 3 km.
+ * Spread over the clamp, the ocean used about a third of its gradient and the
+ * land a fifth -- so the whole map came out in two or three near-identical
+ * shades and the relief was invisible.
+ *
+ * The ocean therefore breaks at the ridge crest: everything from the abyssal
+ * plain up to the crest gets a full gradient of its own (that band alone is most
+ * of the sea floor), and the shallow water above the crest gets another, so
+ * shelves still read as distinct from ridges.
  */
 const colourForElevation = (elevation: number, seaLevel: number): Rgb => {
+  const abyss = Math.min(tuning.abyssElevation, seaLevel);
+  const crest = Math.min(Math.max(tuning.ridgeElevation, abyss), seaLevel);
+  const deepest: Rgb = [0.02, 0.05, 0.2];
+  const midWater: Rgb = [0.07, 0.3, 0.5];
+  const shallow: Rgb = [0.25, 0.62, 0.72];
+
   if (elevation < seaLevel) {
-    // Ocean: deep navy (deepest) to shallow cyan (near sea level).
-    const span = seaLevel - tuning.elevationMin || 1;
-    const t = clamp01((elevation - tuning.elevationMin) / span);
-    return mix([0.02, 0.05, 0.2], [0.1, 0.45, 0.6], t);
+    if (elevation < crest) {
+      // Abyssal plain up to the ridge crest: the bulk of the sea floor.
+      const span = crest - abyss || 1;
+      return mix(deepest, midWater, clamp01((elevation - abyss) / span));
+    }
+    // Crest up to sea level: ridges, shelves, drowned margins.
+    const span = seaLevel - crest || 1;
+    return mix(midWater, shallow, clamp01((elevation - crest) / span));
   }
-  // Land: beach -> green -> brown -> snow, normalised above sea level.
-  const span = tuning.elevationMax - seaLevel || 1;
+
+  // Land: beach -> green -> brown -> snow, over the range the crust can build.
+  const span = Math.max(landCeiling() - seaLevel, 0.5);
   const t = clamp01((elevation - seaLevel) / span);
   if (t < 0.15) return mix([0.78, 0.72, 0.5], [0.25, 0.5, 0.2], t / 0.15);
   if (t < 0.6)

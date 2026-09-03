@@ -1,7 +1,7 @@
 import type { CellData } from "../data/CellData";
 import { dot, normalise, sub, tangent, type Vec3 } from "../math/vec3";
 import type { CellMesh } from "../mesh/CellMesh";
-import type { PlateData } from "../plates/PlateData";
+import { type PlateData, sutureKey } from "../plates/PlateData";
 import { tuning } from "./tuning";
 
 /**
@@ -130,8 +130,20 @@ export const classifyBoundaries = (
       }
     }
 
+    // A sutured pair is welded along this line: the crust is continuous across
+    // it, so it cannot read as a spreading centre no matter what tiny residual
+    // motion is left. Otherwise a stalled collision immediately reclassifies as
+    // divergent, ridge push takes over, and the two continents that had just met
+    // are shoved apart again -- the thing that stopped continents ever fusing.
+    if (
+      kind === BoundaryKind.DIVERGENT &&
+      plateData.sutures.has(sutureKey(plateA, plateB))
+    ) {
+      kind = BoundaryKind.NONE;
+    }
+
     arcKind[a] = kind;
-    arcClosing[a] = vn;
+    arcClosing[a] = kind === BoundaryKind.NONE ? 0 : vn;
     if (kind === BoundaryKind.NONE) continue;
 
     // The dominant boundary at a cell is the incident one with the strongest
