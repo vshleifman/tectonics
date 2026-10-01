@@ -23,6 +23,8 @@ export interface Controls {
   setCellCount: (count: number) => void;
   setPlateCount: (count: number) => void;
   setFps: (fps: number) => void;
+  /** Worker ms per tick, and main-thread ms to apply each snapshot. */
+  setTimings: (simMs: number, uiMs: number) => void;
   setMassReadout: (liveMass: number, drift: number) => void;
   setNote: (text: string) => void;
   /** Replace the plate list with the live set of plates. */
@@ -787,6 +789,14 @@ export const createControls = (
   } satisfies Partial<CSSStyleDeclaration>);
   fpsEl.textContent = "FPS: --";
 
+  const timingEl = document.createElement("div");
+  Object.assign(timingEl.style, {
+    fontVariantNumeric: "tabular-nums",
+    opacity: "0.75",
+    fontSize: "11px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  timingEl.textContent = "Sim: -- ms/tick · UI: -- ms";
+
   projectionSelect.addEventListener("change", () => {
     store.set({ projection: projectionSelect.value as Projection });
   });
@@ -821,6 +831,7 @@ export const createControls = (
     arrowLegend,
     platesDetails,
     fpsEl,
+    timingEl,
   );
 
   // Reflect store changes (including programmatic ones) back into the panels.
@@ -879,6 +890,9 @@ export const createControls = (
     },
     setFps: (fps: number) => {
       fpsEl.textContent = `FPS: ${fps.toFixed(0)}`;
+    },
+    setTimings: (simMs: number, uiMs: number) => {
+      timingEl.textContent = `Sim: ${simMs.toFixed(1)} ms/tick · UI: ${uiMs.toFixed(1)} ms`;
     },
     setMassReadout: (liveMass: number, drift: number) => {
       const driftPct = (drift * 100).toFixed(3);

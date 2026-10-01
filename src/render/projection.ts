@@ -3,7 +3,7 @@
  * labels and picker all consume these helpers so a single projection switch
  * re-places the entire scene without rebuilding any data.
  *
- * Convention (matching `IcosphereMesh`): y is up, so for a unit-sphere point
+ * Convention (matching the icosphere mesh): y is up, so for a unit-sphere point
  * `lat = asin(y)` and `lon = atan2(z, x)`. The Mercator map is a 2x2 plane on
  * z = 0: longitude maps to `[-1, 1]` and the clamped Mercator y maps to roughly
  * `[-1, 1]` as well, so the map is square in world units.

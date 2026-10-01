@@ -37,28 +37,82 @@ export interface BoundaryGraph {
 }
 
 /**
+ * Everything a mesh is, as flat arrays: what the mesh builder produces, what
+ * crosses the worker boundary, and what {@link ArrayCellMesh} wraps.
+ */
+export interface MeshArrays {
+  cellCount: number;
+  /** Cell centres on the unit sphere, flat xyz triples. */
+  centres: Float32Array;
+  /** Cell areas on the unit sphere. */
+  areas: Float32Array;
+  /** Neighbour graph in CSR form: list sliced by [offsets[i], offsets[i+1]). */
+  neighbourOffsets: Int32Array;
+  neighbourList: Int32Array;
+  /** Arc index for each neighbour-list entry (same CSR layout). */
+  neighbourArcList: Int32Array;
+  /** Polygon corners in CSR form: corner xyz triples sliced by polyOffsets. */
+  polyOffsets: Int32Array;
+  polyCorners: Float32Array;
+  junctionPos: Float32Array;
+  arcEnds: Int32Array;
+  arcCells: Int32Array;
+  junctionArcOffsets: Int32Array;
+  junctionArcs: Int32Array;
+}
+
+/**
  * The single most important abstraction in the system.
  *
- * Downstream code (data, rendering, simulation) consumes ONLY this interface
- * and never references the concrete tiling. `IcosphereMesh` implements it now;
- * a `VoronoiMesh` can implement it later and the swap is a constructor change.
+ * Downstream code (rendering, picking, the crack walk) consumes ONLY this
+ * interface and never references how the tiling was built. The tiling itself
+ * is built by the Rust simulation (`sim-rs/src/mesh.rs`) and arrives as
+ * {@link MeshArrays}.
  *
- * A "cell" is just an index `i` in the range [0, cellCount).
+ * A "cell" is just an index `i` in the range [0, cellCount). Hot loops index
+ * the flat arrays directly; the accessor methods allocate and are for cold
+ * paths only.
  */
 export interface CellMesh {
   /** Total number of cells. Indices are valid for [0, cellCount). */
   readonly cellCount: number;
 
-  /** Adjacent cell indices for cell `i`. Precomputed once at build. */
+  /** Cell centres on the unit sphere, flat xyz triples. */
+  readonly centres: Float32Array;
+
+  /** Cell areas on the unit sphere. */
+  readonly areas: Float32Array;
+
+  /** Neighbour graph in CSR form (length = cellCount + 1). */
+  readonly neighbourOffsets: Int32Array;
+  readonly neighbourList: Int32Array;
+
+  /**
+   * Arc index for each entry of {@link neighbourList}, in the SAME CSR layout.
+   * Lets plate assignment ask "is the link to this neighbour cracked?" in O(1)
+   * by indexing the cracked-arc array.
+   */
+  readonly neighbourArcList: Int32Array;
+
+  /** Normalised midpoint of each arc's cell pair, flat xyz triples. */
+  readonly arcMid: Float32Array;
+
+  /**
+   * Unit across-boundary normal of each arc, from its first cell toward its
+   * second, in the tangent plane at {@link arcMid}. Flat xyz triples.
+   */
+  readonly arcNormal: Float32Array;
+
+  /** Adjacent cell indices for cell `i`. Allocates. */
   neighbors(i: number): readonly number[];
 
-  /** Cell centre on the unit sphere. */
+  /** Cell centre on the unit sphere. Allocates. */
   position(i: number): Vec3;
 
-  /** Corner vertices of the cell face, ordered around the centre. */
+  /** Corner vertices of the cell face, ordered around the centre. Allocates. */
   polygon(i: number): readonly Vec3[];
 
-  /** Cell area on the unit sphere (for later conservation maths). */
+  /** Cell area on the unit sphere. */
   area(i: number): number;
 
   /**
@@ -67,10 +121,6 @@ export interface CellMesh {
    */
   boundaryGraph(): BoundaryGraph;
 
-  /**
-   * Arc index for each entry of the neighbour list, in the SAME CSR layout as
-   * {@link neighbors}. Lets plate assignment ask "is the link to this
-   * neighbour cracked?" in O(1) by indexing the cracked-arc array.
-   */
+  /** Arc index for each of cell `i`'s neighbours. Allocates. */
   neighbourArcs(i: number): readonly number[];
 }

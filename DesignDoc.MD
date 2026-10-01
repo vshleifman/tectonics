@@ -21,8 +21,9 @@ The player "cracks the lid" of a freshly-cooled planet to define the initial pla
 
 | Decision                | Choice                                                            | Rationale                                                                                                                                                                                               |
 | ----------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Language / platform     | **TypeScript in the browser**                                     | Dev background is web; the language is not the bottleneck for 1k–40k cells. Render path and algorithms are. Keep sim logic pure + data-oriented so it _could_ later move to WASM/GPU without a rewrite. |
-| Rendering               | **Three.js + Vite**                                               | GPU draws the cells; JS only touches data when it changes.                                                                                                                                              |
+| Language / platform     | **TypeScript UI in the browser; simulation in Rust → WASM**       | TypeScript was fine to ~40k cells, but level 8 (~655k cells) needs the per-tick passes in WASM. Ported once the TS sim was data-oriented, checked metric-for-metric against it, then the TS sim was removed. Crack propagation stays in TS: it runs only on a click. |
+| Threading               | **Simulation in a Web Worker, single-threaded WASM**              | The UI never stutters whatever the cell count. Worker and main thread speak a language-independent message protocol and ping-pong transferable snapshot buffers, so no cross-origin isolation is needed. Per-cell passes are written so rayon can be added later. |
+| Rendering               | **Three.js + Vite**                                               | GPU draws the cells; JS only touches data when it changes. Cell colours are a one-texel-per-cell RGBA8 texture looked up by a per-vertex cell index, so a recolour uploads ~2.6 MB at level 8 instead of ~55 MB of vertex colours. |
 | Cell tiling (prototype) | **Icosphere → Goldberg dual**                                     | Even cell sizes, clean neighbour graph, mostly hexagons + exactly 12 pentagons (topological necessity).                                                                                                 |
 | Fundamental cell unit   | **Hex/pentagon faces** (the dual), not triangle vertices          | Matches the visual + data model the user wants.                                                                                                                                                         |
 | Cell count              | **Adjustable via subdivision level**; start ~level 5 (~10k cells) | "As many as perform well." Each level ≈ ×4 cells. Render is not the limiter; later simulation is.                                                                                                       |
@@ -35,7 +36,7 @@ The player "cracks the lid" of a freshly-cooled planet to define the initial pla
 
 ### 3.1 The `CellMesh` interface — the single most important decision
 
-The rest of the system **never knows what shape the cells are**. It only ever sees a cell graph behind an interface. `IcosphereMesh` implements it now; `VoronoiMesh` implements it later; the swap is a constructor change.
+The rest of the system **never knows what shape the cells are**. It only ever sees a cell graph behind an interface. The icosphere is built by the Rust simulation (`sim-rs/src/mesh.rs`) and reaches TypeScript as flat `MeshArrays`, wrapped by `ArrayCellMesh`. A Voronoi builder can replace it later; the swap is a builder change.
 
 ```ts
 export interface CellMesh {
@@ -133,9 +134,9 @@ Brief notes so the prototype's interfaces don't paint us into a corner.
 - **Boundary classification.** Convergent / divergent / transform emerge from _relative velocity across a plate edge_. Elevation responds: mountains, trenches, ridges. This is the heart of the sim and the hardest tuning problem.
 - **Conservation / mass budget.** Crust created at rifts, destroyed at subduction. Track area/mass or the world inflates or vanishes over deep time. (`area(i)` on `CellMesh` exists for this.)
 - **Numerical drift.** Hundreds of millions of years = many steps; small errors compound. Watch stability.
-- **Web Worker for simulation.** Move the pure step function off the main thread so the UI never stutters. Architecture already allows this if `step.ts` stays pure over typed arrays.
+- **Web Worker for simulation.** Done: the simulation runs in `src/worker/sim.worker.ts` (see `completedTasks/11-simWebWorker.md`).
 - **Voronoi upgrade.** `VoronoiMesh implements CellMesh` (Lloyd-relaxed seed points). One-time build cost at startup; everything downstream unchanged.
-- **Performance ceiling.** If pushed to ~100k+ cells with heavy per-step physics, options are WASM for hot loops or **WebGPU compute shaders** — both reachable from the browser, so the high-performance path never forces leaving the web.
+- **Performance ceiling.** The simulation is now Rust compiled to WASM (`sim-rs/`), at ~100 ms/tick for 655k cells. Beyond that, the next steps are rayon over the independent per-cell passes, or **WebGPU compute shaders**. Both are reachable from the browser, so the high-performance path never forces leaving the web.
 
 ---
 

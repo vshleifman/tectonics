@@ -1,4 +1,4 @@
-import { makeRng } from "../data/CellData";
+import { makeRng } from "../math/rng";
 import {
   cross,
   dot,
@@ -63,8 +63,9 @@ interface Launch {
  *
  * A fault is a set of cracked arcs. Cracking an arc severs the link between the
  * cell pair it separates; plates are then the connected components of the cell
- * graph with cracked links removed. The propagation is a pure, data-oriented
- * walk over flat typed arrays so it can later move into a Web Worker / WASM.
+ * graph with cracked links removed, which the simulation derives from
+ * {@link cracked}. The walk runs in the simulation worker only when a seed is
+ * dropped, so it stays in TypeScript.
  */
 export class Plates {
   private readonly graph: BoundaryGraph;
@@ -84,7 +85,7 @@ export class Plates {
   private rng: () => number;
 
   constructor(
-    private readonly mesh: CellMesh,
+    mesh: CellMesh,
     options: PropagationOptions = DEFAULT_PROPAGATION,
   ) {
     this.options = { ...options };
@@ -201,46 +202,6 @@ export class Plates {
     this.crackedArcs.fill(0);
     this.seedJunctions.length = 0;
     this.rng = makeRng(this.options.seed);
-  }
-
-  /**
-   * Flood-fill the cell graph, never crossing a cracked arc, and write the
-   * resulting connected-component id into `out` (a raw label per cell, in
-   * [0, plateCount)). Returns the plate count. Linear in cell count.
-   *
-   * These labels are renumbered on every call and carry no identity across
-   * calls; {@link PlateRegistry.relabel} maps them onto stable ids. Keeping
-   * the fill a pure component labeller is what makes the matcher testable.
-   */
-  assignPlates(out: Int32Array): number {
-    const { cellCount } = this.mesh;
-    const plateId = out;
-    plateId.fill(-1);
-
-    const stack: number[] = [];
-    let plateCount = 0;
-    for (let s = 0; s < cellCount; s++) {
-      if (plateId[s] !== -1) continue;
-      plateId[s] = plateCount;
-      stack.length = 0;
-      stack.push(s);
-      while (stack.length > 0) {
-        const cell = stack.pop() as number;
-        const nbrs = this.mesh.neighbors(cell);
-        const arcs = this.mesh.neighbourArcs(cell);
-        for (let k = 0; k < nbrs.length; k++) {
-          const arc = arcs[k];
-          if (arc >= 0 && this.crackedArcs[arc]) continue; // severed
-          const j = nbrs[k];
-          if (plateId[j] === -1) {
-            plateId[j] = plateCount;
-            stack.push(j);
-          }
-        }
-      }
-      plateCount++;
-    }
-    return plateCount;
   }
 
   /**

@@ -1,19 +1,14 @@
 import * as THREE from "three";
-import type { CellData } from "../data/CellData";
 import { clamp } from "../math/scalar";
-import {
-  cross,
-  dot,
-  length,
-  normalise,
-  sub,
-  tangent,
-  type Vec3,
-} from "../math/vec3";
+import { cross, dot, length, normalise, sub, type Vec3 } from "../math/vec3";
 import type { CellMesh } from "../mesh/CellMesh";
-import type { PlateData } from "../plates/PlateData";
-import { type BoundaryField, BoundaryKind } from "../sim/boundaries";
-import { type ColourMode, colourForCell, type Rgb } from "./colour";
+import { BoundaryKind } from "../sim/boundaries";
+import {
+  type ColourFields,
+  type ColourMode,
+  type Rgb,
+  writeCellColours,
+} from "./colour";
 import { longitudeOf, type Projection, projectPoint } from "./projection";
 
 export type { ColourMode } from "./colour";
@@ -165,21 +160,95 @@ interface ArrowSite {
 }
 
 /**
+ * Anything that can say how fast a plate's surface moves at a point: the live
+ * plate set in the simulation, or the per-plate angular velocities a snapshot
+ * carries to the main thread.
+ */
+export interface PlateVelocities {
+  linearVelocity(id: number, pos: Vec3): Vec3;
+}
+
+/** Width of the per-cell colour textures; rows are added as cells need them. */
+const COLOUR_TEXTURE_WIDTH = 2048;
+
+/**
+ * A one-texel-per-cell RGBA8 colour table. At level 8 that is ~2.6 MB per
+ * upload, against ~55 MB for a float colour per fan vertex.
+ */
+const makeColourTexture = (cellCount: number): THREE.DataTexture => {
+  const width = Math.min(COLOUR_TEXTURE_WIDTH, Math.max(1, cellCount));
+  const height = Math.ceil(cellCount / width);
+  const texture = new THREE.DataTexture(
+    new Uint8Array(width * height * 4),
+    width,
+    height,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType,
+  );
+  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+};
+
+/**
+ * Colours each fan vertex from its cell's texel. The lookup happens per vertex
+ * so every vertex of a cell reads the same texel and faces stay flat. The
+ * ramps are authored as linear colours, exactly as the vertex-colour material
+ * treated them, so the output encoding is applied the same way.
+ */
+const makeCellMaterial = (
+  texture: THREE.DataTexture,
+  overlay: { opacity: number } | null,
+): THREE.ShaderMaterial =>
+  new THREE.ShaderMaterial({
+    uniforms: {
+      colours: { value: texture },
+      texWidth: { value: texture.image.width },
+      opacity: { value: overlay ? overlay.opacity : 1 },
+    },
+    vertexShader: /* glsl */ `
+      attribute float cellIndex;
+      uniform sampler2D colours;
+      uniform float texWidth;
+      varying vec3 vColour;
+      void main() {
+        int i = int(cellIndex + 0.5);
+        int w = int(texWidth);
+        vColour = texelFetch(colours, ivec2(i % w, i / w), 0).rgb;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform float opacity;
+      varying vec3 vColour;
+      void main() {
+        gl_FragColor = linearToOutputTexel(vec4(vColour, opacity));
+      }
+    `,
+    side: THREE.DoubleSide,
+    transparent: overlay !== null,
+    depthWrite: overlay === null,
+  });
+
+/**
  * Builds a single static Three.js mesh for the whole cell grid and exposes a
  * cheap colour-only update path.
  *
  * Each cell is a triangle fan from its centre to its ordered corners, using its
  * OWN copy of every vertex (no sharing across cells) so faces stay flat and
  * colours never bleed across cell borders. Geometry is built once; recolouring
- * only rewrites the colour buffer.
+ * only rewrites a one-texel-per-cell colour texture, which the shader looks up
+ * by each vertex's cell index.
  */
 export class CellRenderer {
   /** Group holding the filled faces, the faint wireframe, faults and seeds. */
   readonly object3D = new THREE.Group();
 
   private readonly geometry: THREE.BufferGeometry;
-  private readonly material: THREE.MeshBasicMaterial;
-  private readonly colours: Float32Array;
+  private readonly material: THREE.ShaderMaterial;
+  private readonly colourTexture: THREE.DataTexture;
 
   /** Face vertex positions precomputed for both projections; swapped on toggle. */
   private readonly spherePositions: Float32Array;
@@ -199,9 +268,11 @@ export class CellRenderer {
   /** Last overlay inputs, cached so a projection switch can re-place them. */
   private crackedCache: Uint8Array | null = null;
   private seedsCache: readonly number[] | null = null;
-  private velocityPlateData: PlateData | null = null;
-  private velocityData: CellData | null = null;
-  private velocityBoundaries: BoundaryField | null = null;
+  private velocityPlates: PlateVelocities | null = null;
+  private velocityPlateId: ArrayLike<number> | null = null;
+  private velocityArcKind: ArrayLike<number> | null = null;
+  /** True when the arrows' inputs changed while they were hidden. */
+  private velocitiesStale = false;
 
   /** Bright overlay drawing only the cracked arcs (the fault network). */
   private readonly faultGeometry: THREE.BufferGeometry;
@@ -222,16 +293,12 @@ export class CellRenderer {
   /**
    * Semi-transparent plate-coloured overlay drawn over the base faces. Toggled
    * independently of the base view so any view (elevation, density, ...) can be
-   * seen with plate regions blended on top. Shares the face geometry's vertex
-   * layout but carries its own colour buffer.
+   * seen with plate regions blended on top. Shares the face geometry outright;
+   * only its colour texture differs.
    */
-  private readonly platesGeometry: THREE.BufferGeometry;
-  private readonly platesMaterial: THREE.MeshBasicMaterial;
+  private readonly platesMaterial: THREE.ShaderMaterial;
   private readonly platesMesh: THREE.Mesh;
-  private readonly platesColours: Float32Array;
-
-  /** First vertex index for each cell (CSR-style, length cellCount + 1). */
-  private readonly cellVertexStart: Int32Array;
+  private readonly platesTexture: THREE.DataTexture;
 
   private readonly cellMesh: CellMesh;
 
@@ -240,20 +307,23 @@ export class CellRenderer {
     const { cellCount } = cellMesh;
 
     // Count vertices/triangles: per cell = 1 centre + C corners, C triangles.
-    this.cellVertexStart = new Int32Array(cellCount + 1);
+    const cellVertexStart = new Int32Array(cellCount + 1);
     let triangleCount = 0;
     let cornerTotal = 0;
     for (let i = 0; i < cellCount; i++) {
       const corners = cellMesh.polygon(i).length;
-      this.cellVertexStart[i + 1] = this.cellVertexStart[i] + corners + 1;
+      cellVertexStart[i + 1] = cellVertexStart[i] + corners + 1;
       triangleCount += corners;
       cornerTotal += corners;
     }
-    const vertexCount = this.cellVertexStart[cellCount];
+    const vertexCount = cellVertexStart[cellCount];
 
     const positions = new Float32Array(vertexCount * 3);
     const mercatorPositions = new Float32Array(vertexCount * 3);
-    this.colours = new Float32Array(vertexCount * 3);
+    const cellIndex = new Float32Array(vertexCount);
+    for (let i = 0; i < cellCount; i++) {
+      cellIndex.fill(i, cellVertexStart[i], cellVertexStart[i + 1]);
+    }
     const indices = new Uint32Array(triangleCount * 3);
 
     // Edge line segments: one per polygon side, both endpoints per segment.
@@ -275,7 +345,7 @@ export class CellRenderer {
     for (let i = 0; i < cellCount; i++) {
       const centre = cellMesh.position(i);
       const corners = cellMesh.polygon(i);
-      const base = this.cellVertexStart[i];
+      const base = cellVertexStart[i];
       // Unwrap every corner of this cell to the centre longitude so the
       // polygon stays contiguous across the antimeridian seam on the map.
       const refLon = longitudeOf(centre[0], centre[1], centre[2]);
@@ -350,18 +420,16 @@ export class CellRenderer {
       new THREE.BufferAttribute(positions.slice(), 3),
     );
     this.geometry.setAttribute(
-      "color",
-      new THREE.BufferAttribute(this.colours, 3),
+      "cellIndex",
+      new THREE.BufferAttribute(cellIndex, 1),
     );
     this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
     this.geometry.computeBoundingSphere();
 
     // Double-sided: cell winding faces outward on the sphere, which flips to
     // back-facing once flattened onto the Mercator plane under a top-down camera.
-    this.material = new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      side: THREE.DoubleSide,
-    });
+    this.colourTexture = makeColourTexture(cellCount);
+    this.material = makeCellMaterial(this.colourTexture, null);
     const mesh = new THREE.Mesh(this.geometry, this.material);
 
     this.edgeGeometry = new THREE.BufferGeometry();
@@ -433,29 +501,14 @@ export class CellRenderer {
     // Above the plates overlay (renderOrder 1) so arrows always read on top.
     this.velocityArrows.renderOrder = 2;
 
-    // Plates overlay: same triangle layout as the base faces, its own colour
-    // buffer, blended semi-transparently on top. Lifted off the faces (radial
-    // scale on the sphere, +z on the map; applied in setProjection).
-    this.platesColours = new Float32Array(vertexCount * 3);
-    this.platesGeometry = new THREE.BufferGeometry();
-    this.platesGeometry.setAttribute(
-      "position",
-      new THREE.BufferAttribute(positions.slice(), 3),
-    );
-    this.platesGeometry.setAttribute(
-      "color",
-      new THREE.BufferAttribute(this.platesColours, 3),
-    );
-    this.platesGeometry.setIndex(new THREE.BufferAttribute(indices.slice(), 1));
-    this.platesGeometry.computeBoundingSphere();
-    this.platesMaterial = new THREE.MeshBasicMaterial({
-      vertexColors: true,
-      side: THREE.DoubleSide,
-      transparent: true,
+    // Plates overlay: the base faces again, with their own colour texture,
+    // blended semi-transparently on top. Lifted off the faces (radial scale on
+    // the sphere, +z on the map; applied in setProjection).
+    this.platesTexture = makeColourTexture(cellCount);
+    this.platesMaterial = makeCellMaterial(this.platesTexture, {
       opacity: 0.7,
-      depthWrite: false,
     });
-    this.platesMesh = new THREE.Mesh(this.platesGeometry, this.platesMaterial);
+    this.platesMesh = new THREE.Mesh(this.geometry, this.platesMaterial);
     this.platesMesh.visible = false;
     this.platesMesh.frustumCulled = false;
     this.platesMesh.renderOrder = 1;
@@ -484,47 +537,36 @@ export class CellRenderer {
    *   `boundaryKind`, the per-cell classification from {@link classifyBoundaries}).
    */
   updateColours(
-    data: CellData,
+    data: ColourFields,
     mode: ColourMode = "elevation",
     seaLevel = 0,
-    boundaryKind?: Uint8Array,
+    boundaryKind?: ArrayLike<number>,
   ): void {
-    const { cellCount } = this.cellMesh;
-    for (let i = 0; i < cellCount; i++) {
-      const [r, g, b] = colourForCell(data, mode, i, seaLevel, boundaryKind);
-      const start = this.cellVertexStart[i];
-      const end = this.cellVertexStart[i + 1];
-      for (let v = start; v < end; v++) {
-        this.colours[v * 3] = r;
-        this.colours[v * 3 + 1] = g;
-        this.colours[v * 3 + 2] = b;
-      }
-    }
-    const attr = this.geometry.getAttribute("color") as THREE.BufferAttribute;
-    attr.needsUpdate = true;
+    writeCellColours(
+      this.colourTexture.image.data as Uint8Array,
+      this.cellMesh.cellCount,
+      data,
+      mode,
+      seaLevel,
+      boundaryKind,
+    );
+    this.colourTexture.needsUpdate = true;
   }
 
   /**
-   * Rewrite the plates overlay colour buffer from the per-cell plate ids, using
-   * the same stable per-plate hue as the old "plate" view. Cheap: one colour
-   * attribute upload, no geometry rebuild. Call whenever plate ids change.
+   * Rewrite the plates overlay colours from the per-cell plate ids, using the
+   * same stable per-plate hue as the old "plate" view. Cheap: one small texture
+   * upload, no geometry rebuild. Call whenever plate ids change.
    */
-  updatePlateOverlay(data: CellData): void {
-    const { cellCount } = this.cellMesh;
-    for (let i = 0; i < cellCount; i++) {
-      const [r, g, b] = colourForCell(data, "plate", i, 0);
-      const start = this.cellVertexStart[i];
-      const end = this.cellVertexStart[i + 1];
-      for (let v = start; v < end; v++) {
-        this.platesColours[v * 3] = r;
-        this.platesColours[v * 3 + 1] = g;
-        this.platesColours[v * 3 + 2] = b;
-      }
-    }
-    const attr = this.platesGeometry.getAttribute(
-      "color",
-    ) as THREE.BufferAttribute;
-    attr.needsUpdate = true;
+  updatePlateOverlay(data: ColourFields): void {
+    writeCellColours(
+      this.platesTexture.image.data as Uint8Array,
+      this.cellMesh.cellCount,
+      data,
+      "plate",
+      0,
+    );
+    this.platesTexture.needsUpdate = true;
   }
 
   /** Rebuild the bright fault overlay from the cracked-arc flags. */
@@ -606,20 +648,26 @@ export class CellRenderer {
    * kind and pushed just above the surface.
    */
   updateVelocities(
-    plateData: PlateData,
-    data: CellData,
-    boundaries: BoundaryField | null,
+    plates: PlateVelocities,
+    plateId: ArrayLike<number>,
+    arcKind: ArrayLike<number> | null,
   ): void {
-    this.velocityPlateData = plateData;
-    this.velocityData = data;
-    this.velocityBoundaries = boundaries;
+    this.velocityPlates = plates;
+    this.velocityPlateId = plateId;
+    this.velocityArcKind = arcKind;
+    // Hidden arrows are rebuilt when they are shown again, not every tick.
+    if (!this.velocityArrows.visible) {
+      this.velocitiesStale = true;
+      return;
+    }
+    this.velocitiesStale = false;
 
     const layers: ArrowLayers = { outline: [], fill: [], fillColours: [] };
 
-    if (boundaries) {
+    if (arcKind) {
       const graph = this.cellMesh.boundaryGraph();
       const { arcCells, arcCount } = graph;
-      const { arcKind } = boundaries;
+      const { arcMid, arcNormal } = this.cellMesh;
       const thinner = new SphereThinner(ARROW_SPACING);
 
       for (let a = 0; a < arcCount; a++) {
@@ -629,18 +677,16 @@ export class CellRenderer {
         const cellB = arcCells[a * 2 + 1];
         if (cellA < 0 || cellB < 0) continue;
 
-        const posA = this.cellMesh.position(cellA);
-        const posB = this.cellMesh.position(cellB);
-        const mid = normalise([
-          posA[0] + posB[0],
-          posA[1] + posB[1],
-          posA[2] + posB[2],
-        ]);
+        const mid: Vec3 = [arcMid[a * 3], arcMid[a * 3 + 1], arcMid[a * 3 + 2]];
         if (!thinner.accept(mid)) continue;
 
         // Across-boundary unit normal at the midpoint, cell A -> cell B:
         // the axis each arrow of the pair is offset along.
-        const normal = normalise(tangent(sub(posB, posA), mid));
+        const normal: Vec3 = [
+          arcNormal[a * 3],
+          arcNormal[a * 3 + 1],
+          arcNormal[a * 3 + 2],
+        ];
         const colour = arrowColour(kind);
         // Keep the whole pair on one side of the map seam.
         const refLon = longitudeOf(mid[0], mid[1], mid[2]);
@@ -653,8 +699,8 @@ export class CellRenderer {
 
         const site: ArrowSite = { mid, anchor, across, refLon, colour };
         // `across` runs cell A -> cell B, so A's own side of the line is -1.
-        this.pushArrow(layers, site, -1, data.plateId[cellA], plateData);
-        this.pushArrow(layers, site, 1, data.plateId[cellB], plateData);
+        this.pushArrow(layers, site, -1, plateId[cellA], plates);
+        this.pushArrow(layers, site, 1, plateId[cellB], plates);
       }
     }
 
@@ -734,12 +780,12 @@ export class CellRenderer {
     site: ArrowSite,
     sign: number,
     plateId: number,
-    plateData: PlateData,
+    plates: PlateVelocities,
   ): void {
     if (plateId < 0) return;
     const { mid, anchor, across, refLon, colour } = site;
 
-    const v = plateData.linearVelocity(plateId, mid);
+    const v = plates.linearVelocity(plateId, mid);
     const speed = Math.hypot(v[0], v[1], v[2]);
     if (speed < STILL_SPEED) return;
 
@@ -822,14 +868,8 @@ export class CellRenderer {
     faceAttr.needsUpdate = true;
     this.geometry.computeBoundingSphere();
 
-    // Plates overlay shares the face layout. Swap its positions too, then lift
-    // it: a radial scale on the sphere, a flat +z nudge on the map.
-    const platesAttr = this.platesGeometry.getAttribute(
-      "position",
-    ) as THREE.BufferAttribute;
-    (platesAttr.array as Float32Array).set(facePositions);
-    platesAttr.needsUpdate = true;
-    this.platesGeometry.computeBoundingSphere();
+    // The plates overlay shares the face geometry; lift it off the faces with
+    // a radial scale on the sphere and a flat +z nudge on the map.
     if (projection === "sphere") {
       this.platesMesh.scale.setScalar(1 + PLATE_LIFT);
       this.platesMesh.position.set(0, 0, 0);
@@ -850,11 +890,16 @@ export class CellRenderer {
 
     if (this.crackedCache) this.updateFaults(this.crackedCache);
     if (this.seedsCache) this.updateSeeds(this.seedsCache);
-    if (this.velocityPlateData && this.velocityData) {
+    this.refreshVelocities();
+  }
+
+  /** Rebuild the arrows from their cached inputs. */
+  private refreshVelocities(): void {
+    if (this.velocityPlates && this.velocityPlateId) {
       this.updateVelocities(
-        this.velocityPlateData,
-        this.velocityData,
-        this.velocityBoundaries,
+        this.velocityPlates,
+        this.velocityPlateId,
+        this.velocityArcKind,
       );
     }
   }
@@ -862,6 +907,7 @@ export class CellRenderer {
   /** Show or hide the plate-velocity arrows. */
   setVelocitiesVisible(visible: boolean): void {
     this.velocityArrows.visible = visible;
+    if (visible && this.velocitiesStale) this.refreshVelocities();
   }
 
   /** Show or hide the semi-transparent plates overlay. */
@@ -883,6 +929,8 @@ export class CellRenderer {
   dispose(): void {
     this.geometry.dispose();
     this.material.dispose();
+    this.colourTexture.dispose();
+    this.platesTexture.dispose();
     this.edgeGeometry.dispose();
     this.edgeMaterial.dispose();
     this.faultGeometry.dispose();
@@ -891,7 +939,6 @@ export class CellRenderer {
     this.seedMaterial.dispose();
     this.velocityGeometry.dispose();
     this.velocityMaterial.dispose();
-    this.platesGeometry.dispose();
     this.platesMaterial.dispose();
   }
 }

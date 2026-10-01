@@ -1,18 +1,17 @@
 /**
  * Central, live-editable home for every tunable simulation constant.
  *
- * These values were previously hard-coded `const`s scattered across the sim and
- * render modules (the "tuning sinks" in `elevation.ts`, `plateForces.ts`,
- * `crustLifecycle.ts`, etc.). They are gathered here into one mutable singleton
- * the simulation reads live each tick, so the UI can expose them as sliders and
- * tweaks take effect on the next step without a world rebuild. Pure
- * numerical-stability epsilons (e.g. the `EPS = 1e-9` guard in `plateForces.ts`)
- * are intentionally left in place — they are not creative knobs.
+ * The UI edits this singleton and the main thread forwards every change to the
+ * simulation worker, whose Rust world (`sim-rs/src/tuning.rs`, same field
+ * names) reads it on its next tick, so tweaks take effect without a world
+ * rebuild. It stays mirrored on the main thread because the colour ramps read
+ * it too. Pure numerical-stability epsilons are intentionally left in the
+ * simulation — they are not creative knobs.
  *
  * All elevations are in km, rates per Myr, densities in g/cm3.
  */
 export interface Tuning {
-  // --- Elevation / relief (see elevation.ts) ---
+  // --- Elevation / relief (see sim-rs/src/elevation.rs) ---
   /** Shallow mid-ocean-ridge crest: where young (age 0) oceanic crust sits. */
   ridgeElevation: number;
   /** Deep abyssal plain: where fully cooled oceanic crust sinks. */
@@ -33,11 +32,11 @@ export interface Tuning {
   ridgePull: number;
   /** Isostatic relaxation: fraction per Myr each cell drifts to its baseline. */
   relaxRate: number;
-  /** Hard clamp on elevation (km); also bounds the renderer's colour ramp. */
+  /** Hard clamp on elevation (km). */
   elevationMin: number;
   elevationMax: number;
 
-  // --- Plate forces / motion (see plateForces.ts) ---
+  // --- Plate forces / motion (see sim-rs/src/plate_forces.rs) ---
   /**
    * Pull per unit length of trench, per unit of slab negative buoyancy. The
    * dominant driving force, so this is effectively the world's overall pace.
@@ -99,7 +98,7 @@ export interface Tuning {
    */
   mergeQuietSpeed: number;
 
-  // --- Crust lifecycle & densities (see PlateData.ts, crustLifecycle.ts) ---
+  // --- Crust lifecycle & densities (see sim-rs/src/plates.rs, crust_lifecycle.rs) ---
   /** Oceanic crust ages out to here before being treated as fully cooled (Myr). */
   maxOceanicAge: number;
   /** Continental (buoyant) crust density. */
@@ -134,7 +133,7 @@ export interface Tuning {
    */
   delaminationRate: number;
 
-  // --- Advection (see advect.ts) ---
+  // --- Advection (see sim-rs/src/advect.rs) ---
   /** Fraction of a subducting cell's mass that accretes onto the survivor. */
   accretionFraction: number;
   /**
@@ -171,7 +170,7 @@ export interface Tuning {
    */
   riftThicknessFloor: number;
 
-  // --- Rifting (see rifting.ts) ---
+  // --- Rifting (see sim-rs/src/rifting.rs) ---
   /**
    * Tension a plate must be under before it tears, per unit area. A plate with
    * slabs pulling it in opposing directions is in extension; when that exceeds
@@ -195,7 +194,7 @@ export interface Tuning {
   /** Fraction of the globe below which a plate is too small to rift at all. */
   minRiftArea: number;
 
-  // --- Supercontinent insulation (optional; see rifting.ts) ---
+  // --- Supercontinent insulation (optional; see sim-rs/src/rifting.rs) ---
   /** Rate per Myr at which mantle heat builds under continental crust. */
   insulationRate: number;
   /** Rate per Myr at which mantle heat escapes under oceanic crust. */
@@ -210,7 +209,7 @@ export interface Tuning {
    */
   insulationDrive: number;
 
-  // --- Plate identity (see plateLifecycle.ts) ---
+  // --- Plate identity (see sim-rs/src/plate_lifecycle.rs) ---
   /**
    * Smallest share of the globe a fragment must cover to become a plate of its
    * own when a plate is pinched in two. Below it the fragment is absorbed into a

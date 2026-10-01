@@ -1,27 +1,16 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { CellData, seedUniformElevation } from "./data/CellData";
+import { describeBench, parseBenchSpec } from "./bench/benchScenario";
 import { Picker } from "./interaction/Picker";
-import type { CellMesh } from "./mesh/CellMesh";
-import { IcosphereMesh } from "./mesh/IcosphereMesh";
-import {
-  initialiseCrust,
-  PlateData,
-  reconcilePlateProperties,
-} from "./plates/PlateData";
-import { PlateRegistry } from "./plates/PlateRegistry";
-import { Plates } from "./plates/Plates";
+import { ArrayCellMesh } from "./mesh/ArrayCellMesh";
 import { CellLabels } from "./render/CellLabels";
 import { CellRenderer, type ColourMode } from "./render/CellRenderer";
 import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
-import { BoundaryField, classifyBoundaries } from "./sim/boundaries";
-import { AdvectionField, totalCrustMass } from "./sim/massBudget";
-import { computeMetrics } from "./sim/metrics";
-import { updatePlateMotion } from "./sim/plateForces";
-import { step } from "./sim/step";
-import { tuning } from "./sim/tuning";
+import { simOptions, tuning } from "./sim/tuning";
 import { createControls } from "./ui/controls";
 import { createSettingsStore, type ViewMode } from "./ui/settingsStore";
+import type { Snapshot } from "./worker/protocol";
+import { platesFromOmegas, SimClient } from "./worker/SimClient";
 
 const INITIAL_LEVEL = 6;
 const INITIAL_SEA_LEVEL = 0;
@@ -41,6 +30,12 @@ const INITIAL_RUNNING = false;
 const INITIAL_TICKS_PER_SECOND = 2;
 /** Pointer travel (px) above which a press counts as an orbit drag, not a click. */
 const CLICK_DRAG_THRESHOLD = 6;
+
+/**
+ * `?bench=level:8,seeds:12,ticks:200` runs the benchmark scenario in the worker
+ * and logs its timings and metric trajectory to the console.
+ */
+const BENCH = new URLSearchParams(window.location.search).get("bench");
 
 const appElement = document.getElementById("app");
 if (!appElement) throw new Error("Missing #app element");
@@ -108,29 +103,14 @@ scene.add(cellLabels.object3D);
 
 const picker = new Picker(camera, renderer.domElement);
 
-// --- Active world (rebuilt when the subdivision level changes) -------------
+// --- Active world -----------------------------------------------------------
+// The simulation lives in a worker. The main thread holds the mesh (sent once
+// per world) and the latest snapshot, and only ever reads them.
 
-let cellMesh: CellMesh;
-let cellData: CellData;
-/** Back buffer the simulation gathers into before copying back over `cellData`. */
-let backBuffer: CellData;
+let cellMesh: ArrayCellMesh | null = null;
 let cellRenderer: CellRenderer | null = null;
-let plates: Plates | null = null;
-let plateData: PlateData | null = null;
-/** Boundary classification, recomputed whenever plates or crust change. */
-let boundaries: BoundaryField | null = null;
-/** Conservative-advection scratch + rift/subduction events + mass budget. */
-let advection: AdvectionField | null = null;
-/** Total crust mass when the world was last built, for conservation drift. */
-let initialMass = 0;
-/** Simulated time since the world was built (Myr), advanced one tick at a time. */
-let elapsedMyr = 0;
-
-/** Persistent plate identity across cracks/merges; reset only on world rebuild. */
-const plateRegistry = new PlateRegistry();
-
-/** Scratch buffer for raw flood-fill labels before they are mapped to stable ids. */
-let rawLabels = new Int32Array(0);
+/** Seeds in the current fault network; faults are drawn only once there are some. */
+let seedCount = 0;
 
 /** Single source of truth for every UI setting. */
 const settings = createSettingsStore({
@@ -154,61 +134,21 @@ const colourMode = (): ColourMode => {
 };
 
 const recolour = (): void => {
-  cellRenderer?.updateColours(
-    cellData,
+  const snapshot = client.snapshot;
+  if (!snapshot || !cellRenderer) return;
+  cellRenderer.updateColours(
+    snapshot.buffers,
     colourMode(),
     settings.get("seaLevel"),
-    boundaries?.cellKind,
+    snapshot.buffers.cellKind,
   );
 };
 
-/** Re-derive boundary classification from the current plates and crust. */
-const classify = (): void => {
-  if (!plateData || !boundaries) return;
-  classifyBoundaries(cellMesh, cellData, plateData, boundaries);
-};
-
-/**
- * Re-derive plates after a topology change: flood-fill into raw labels, map them
- * onto stable ids (so identity survives splits/merges), reconcile per-plate
- * properties, and refresh the velocity arrows. Per-cell crust is seeded only on
- * `initCrust` (world build); thereafter it persists and advects with cells.
- * Returns the live plate count.
- */
-const reassignPlates = (initCrust: boolean): number => {
-  if (!plates || !plateData || !cellRenderer) return 0;
-  const plateCount = plates.assignPlates(rawLabels);
-  const report = plateRegistry.relabel(rawLabels, plateCount, cellData.plateId);
-  reconcilePlateProperties(plateData, report);
-  if (initCrust) initialiseCrust(cellMesh, cellData);
-  // Derive density-driven motion from the (possibly fresh) crust, then classify
-  // so arrows and boundaries reflect it immediately on world build / seed.
-  if (boundaries) updatePlateMotion(cellMesh, cellData, plateData, boundaries);
-  classify();
-  cellRenderer.updateVelocities(plateData, cellData, boundaries);
-  refreshPlateList();
-  return plateCount;
-};
-
-/** Push the current per-plate readout (colour, speed, heading) into the UI list. */
-const refreshPlateList = (): void => {
-  ui.setPlates(plateData ? plateData.summaries(cellMesh, cellData) : []);
-};
-
-/** Re-measure the world against Earth and push the reading into the UI. */
-const refreshMetrics = (): void => {
-  if (!plateData || !boundaries || !advection) return;
-  ui.setMetrics(
-    computeMetrics(
-      cellMesh,
-      cellData,
-      plateData,
-      boundaries,
-      advection,
-      tuning.dtMyr,
-      elapsedMyr,
-    ),
-  );
+/** Refresh the plates overlay colours (if it is shown). */
+const refreshPlateOverlay = (): void => {
+  const snapshot = client.snapshot;
+  if (!snapshot || !settings.get("showPlates")) return;
+  cellRenderer?.updatePlateOverlay(snapshot.buffers);
 };
 
 const applyVelocities = (): void => {
@@ -217,21 +157,18 @@ const applyVelocities = (): void => {
 
 /** Set the plates-overlay visibility and refresh its colours when shown. */
 const applyShowPlates = (): void => {
-  const show = settings.get("showPlates");
-  if (show) cellRenderer?.updatePlateOverlay(cellData);
-  cellRenderer?.setPlatesVisible(show);
-};
-
-/** Refresh the plates overlay colours after a plate change (if it is shown). */
-const refreshPlateOverlay = (): void => {
-  if (settings.get("showPlates")) cellRenderer?.updatePlateOverlay(cellData);
+  refreshPlateOverlay();
+  cellRenderer?.setPlatesVisible(settings.get("showPlates"));
 };
 
 /**
- * A tuning slider moved: most constants are read live by the next sim tick, but
- * recolour now so colour-ramp / overlay edits show immediately even when paused.
+ * A tuning slider moved: forward it to the worker, which reads it on its next
+ * tick, and recolour now so colour-ramp edits show immediately even when
+ * paused. Tuning stays mirrored here because the colour ramps read it too.
  */
 const onTuningChange = (): void => {
+  client.setTuning(tuning);
+  client.setSimOptions(simOptions);
   recolour();
   refreshPlateOverlay();
 };
@@ -261,7 +198,7 @@ const applyViewMode = (): void => {
   const showLabels = viewMode === "data";
   recolour();
   cellRenderer?.setEdgesVisible(viewMode === "data");
-  cellRenderer?.setFaultsVisible((plates?.seeds.length ?? 0) > 0);
+  cellRenderer?.setFaultsVisible(seedCount > 0);
   applyVelocities();
   cellLabels.setVisible(showLabels);
   if (showLabels) {
@@ -277,97 +214,88 @@ const applyViewMode = (): void => {
   }
 };
 
-const rebuild = (level: number): void => {
+/** A new world's geometry has arrived: rebuild everything drawn from it. */
+const onMesh = (arrays: ConstructorParameters<typeof ArrayCellMesh>[0]) => {
   if (cellRenderer) {
     scene.remove(cellRenderer.object3D);
     cellRenderer.dispose();
-    cellRenderer = null;
   }
-
-  cellMesh = new IcosphereMesh(level);
-  cellData = new CellData(cellMesh.cellCount);
-  backBuffer = new CellData(cellMesh.cellCount);
-  boundaries = new BoundaryField(
-    cellMesh.cellCount,
-    cellMesh.boundaryGraph().arcCount,
-  );
-  advection = new AdvectionField(cellMesh.cellCount);
-  seedUniformElevation(cellMesh, cellData);
-  rawLabels = new Int32Array(cellMesh.cellCount);
-
-  plates = new Plates(cellMesh);
-  plates.setBranchesPerSeed(settings.get("branchesPerSeed"));
-  plateRegistry.reset();
-  plateData = new PlateData();
-
+  cellMesh = new ArrayCellMesh(arrays);
   cellRenderer = new CellRenderer(cellMesh);
   scene.add(cellRenderer.object3D);
-  const plateCount = reassignPlates(true);
-  cellRenderer.updateFaults(plates.cracked);
-  cellRenderer.updateSeeds(plates.seeds);
-
-  cellLabels.build(cellMesh, cellData);
-
   cellRenderer.setProjection(settings.get("projection"));
-
-  // Baseline for conservation drift: total crust mass of the fresh world.
-  initialMass = totalCrustMass(cellMesh, cellData);
-  if (advection) {
-    advection.liveMass = initialMass;
-    advection.subductedTotal = 0;
-    advection.createdTotal = 0;
-  }
-
-  elapsedMyr = 0;
+  cellLabels.build(cellMesh);
+  seedCount = 0;
   ui.setCellCount(cellMesh.cellCount);
-  ui.setPlateCount(plateCount);
-  ui.setMassReadout(initialMass, 0);
-  refreshMetrics();
   applyViewMode();
   applyShowPlates();
 };
 
-/** Drop a seed at the picked junction, regrow faults, and re-derive plates. */
-const placeSeed = (event: PointerEvent): void => {
-  if (!plates || !cellRenderer) return;
-  const junction = picker.pickJunction(event, cellMesh.boundaryGraph());
-  if (junction === null) return;
-
-  plates.addSeed(junction);
-  const plateCount = reassignPlates(false);
-  cellRenderer.updateFaults(plates.cracked);
-  cellRenderer.updateSeeds(plates.seeds);
-  cellRenderer.setFaultsVisible(true);
-  ui.setPlateCount(plateCount);
+/** Apply the latest world state to the renderer and panels. */
+const onSnapshot = (snapshot: Snapshot): void => {
+  if (!cellRenderer) return;
+  const start = performance.now();
+  const { buffers } = snapshot;
+  if (snapshot.faults) {
+    cellRenderer.updateFaults(snapshot.faults.cracked);
+    cellRenderer.updateSeeds(snapshot.faults.seeds);
+    seedCount = snapshot.faults.seeds.length;
+    cellRenderer.setFaultsVisible(seedCount > 0);
+  }
   recolour();
   refreshPlateOverlay();
-  cellLabels.refresh();
+  cellRenderer.updateVelocities(
+    platesFromOmegas(snapshot.plateOmegas),
+    buffers.plateId,
+    buffers.arcKind,
+  );
+  cellLabels.refresh(buffers);
+  ui.setPlateCount(snapshot.plateCount);
+  ui.setMassReadout(snapshot.mass.liveMass, snapshot.mass.drift);
+  if (snapshot.metrics) ui.setMetrics(snapshot.metrics);
+  if (snapshot.summaries) ui.setPlates(snapshot.summaries);
+  ui.setTimings(snapshot.simMs, performance.now() - start);
 };
 
-const clearFaults = (): void => {
-  if (!plates || !cellRenderer) return;
-  plates.clear();
-  const plateCount = reassignPlates(false);
-  cellRenderer.updateFaults(plates.cracked);
-  cellRenderer.updateSeeds(plates.seeds);
-  cellRenderer.setFaultsVisible(false);
-  ui.setPlateCount(plateCount);
-  recolour();
-  refreshPlateOverlay();
-  cellLabels.refresh();
+const client = new SimClient({
+  onMesh,
+  onSnapshot,
+  onBench: (result) => {
+    console.log(describeBench(result));
+    console.log(JSON.stringify(result));
+    (window as unknown as { benchResult: unknown }).benchResult = result;
+    // The benchmark ran on default tuning; put the live tuning back.
+    onTuningChange();
+  },
+});
+
+const rebuild = (level: number): void => {
+  client.init(level, settings.get("branchesPerSeed"), tuning, simOptions);
+};
+
+/** Drop a seed at the picked junction; the worker regrows faults and plates. */
+const placeSeed = (event: PointerEvent): void => {
+  if (!cellMesh) return;
+  const junction = picker.pickJunction(event, cellMesh.boundaryGraph());
+  if (junction === null) return;
+  client.addSeed(junction);
+};
+
+const applyRunning = (): void => {
+  if (settings.get("running")) client.run(settings.get("ticksPerSecond"));
+  else client.pause();
 };
 
 const ui = createControls(
   document.body,
   settings,
-  clearFaults,
+  () => client.clearFaults(),
   onTuningChange,
-  () => simTick(),
+  () => client.step(),
 );
 
 // React to setting changes. The store is the source of truth; these subscriptions
-// own the side effects each setting triggers. `running` needs none: the sim tick
-// reads it directly.
+// own the side effects each setting triggers.
 settings.on("level", (level) => rebuild(level));
 settings.on("seaLevel", () => recolour());
 settings.on("autoRotate", (enabled) => {
@@ -376,14 +304,18 @@ settings.on("autoRotate", (enabled) => {
 settings.on("projection", () => applyProjection());
 settings.on("viewMode", () => applyViewMode());
 settings.on("seedMode", () => applyViewMode());
-settings.on("branchesPerSeed", (branches) =>
-  plates?.setBranchesPerSeed(branches),
-);
+settings.on("branchesPerSeed", (branches) => client.setBranches(branches));
 settings.on("showVelocities", () => applyVelocities());
 settings.on("showPlates", () => applyShowPlates());
+settings.on("running", () => applyRunning());
+settings.on("ticksPerSecond", () => {
+  if (settings.get("running")) applyRunning();
+});
 
 rebuild(INITIAL_LEVEL);
 applyProjection();
+applyRunning();
+if (BENCH !== null) client.bench(parseBenchSpec(BENCH));
 
 // --- Seed placement: a click (not an orbit drag) in seed mode --------------
 
@@ -402,75 +334,6 @@ renderer.domElement.addEventListener("pointerup", (event) => {
   if (travel > CLICK_DRAG_THRESHOLD) return; // was an orbit drag
   placeSeed(event);
 });
-
-// --- Simulation tick: decoupled from rendering -----------------------------
-// Advect crust one step into the back buffer, copy it back over the live data
-// (keeping every existing reference to `cellData` valid), then refresh visuals.
-
-const copyCellData = (from: CellData, to: CellData): void => {
-  to.elevation.set(from.elevation);
-  to.plateId.set(from.plateId);
-  to.crustType.set(from.crustType);
-  to.age.set(from.age);
-  to.density.set(from.density);
-  to.thickness.set(from.thickness);
-  to.weakness.set(from.weakness);
-  to.mantleHeat.set(from.mantleHeat);
-};
-
-/**
- * Advance the world one tick and refresh everything that reads it. Split out of
- * the interval so "Step once" can advance a paused world by exactly one tick.
- */
-const simTick = (): void => {
-  if (!plateData || !cellRenderer || !boundaries || !advection) return;
-  // Recompute density-driven motion from the previous tick's boundaries and the
-  // current crust, then classify against the new omega so advection sees live
-  // boundaries, then scatter crust conservatively into the back buffer.
-  updatePlateMotion(cellMesh, cellData, plateData, boundaries);
-  classify();
-  step(
-    cellMesh,
-    cellData,
-    backBuffer,
-    plateData,
-    tuning.dtMyr,
-    boundaries,
-    advection,
-    () => plateRegistry.allocate(),
-  );
-  copyCellData(backBuffer, cellData);
-  classify();
-  // Plates merge when a suture matures, so the count changes without any
-  // reassignment; read it back from the live plate set every tick.
-  ui.setPlateCount(plateData.count);
-  recolour();
-  refreshPlateOverlay();
-  cellRenderer.updateVelocities(plateData, cellData, boundaries);
-  refreshPlateList();
-  cellLabels.refresh();
-  elapsedMyr += tuning.dtMyr;
-  refreshMetrics();
-
-  // Conservation budget: live mass plus everything subducted, less everything
-  // created at rifts, should track the initial mass (net change = created
-  // minus destroyed); report drift as a fraction of it.
-  const tracked =
-    advection.liveMass + advection.subductedTotal - advection.createdTotal;
-  const drift = initialMass > 0 ? (tracked - initialMass) / initialMass : 0;
-  ui.setMassReadout(advection.liveMass, drift);
-};
-
-// Self-rescheduling rather than a fixed interval, so a change to the rate takes
-// effect on the next tick instead of needing the timer torn down and rebuilt.
-const scheduleTick = (): void => {
-  const rate = Math.max(0.1, settings.get("ticksPerSecond"));
-  window.setTimeout(() => {
-    if (settings.get("running")) simTick();
-    scheduleTick();
-  }, 1000 / rate);
-};
-scheduleTick();
 
 // --- Render loop: 60fps, only re-colours / redraws a static mesh -----------
 

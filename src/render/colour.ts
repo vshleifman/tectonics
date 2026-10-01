@@ -1,11 +1,9 @@
-import type { CellData } from "../data/CellData";
 import { clamp01, lerp } from "../math/scalar";
 import { densityMax, densityMin } from "../plates/PlateData";
 import { BoundaryKind } from "../sim/boundaries";
-import { tuning } from "../sim/tuning";
 
 /** An RGB colour with each channel in [0, 1]. */
-export type Rgb = [number, number, number];
+export type Rgb = readonly [number, number, number];
 
 /**
  * How cells are coloured: by elevation, flat (data view), by plate id, by crust
@@ -19,29 +17,153 @@ export type ColourMode =
   | "density"
   | "boundary";
 
-/** Pick a cell's colour for the active mode. */
-export const colourForCell = (
-  data: CellData,
+/** The per-cell fields the colour ramps read. */
+export interface ColourFields {
+  elevation: ArrayLike<number>;
+  plateId: ArrayLike<number>;
+  crustType: ArrayLike<number>;
+  density: ArrayLike<number>;
+}
+
+const WHITE: Rgb = [1, 1, 1];
+const NO_PLATE: Rgb = [0.5, 0.5, 0.5];
+const CONTINENTAL: Rgb = [0.82, 0.71, 0.48];
+const OCEANIC: Rgb = [0.13, 0.32, 0.55];
+const DENSITY_LIGHT: Rgb = [0.95, 0.93, 0.82];
+const DENSITY_DARK: Rgb = [0.35, 0.12, 0.18];
+
+/** A `0xRRGGBB` literal as an `Rgb`. */
+const hex = (v: number): Rgb => [
+  ((v >> 16) & 0xff) / 255,
+  ((v >> 8) & 0xff) / 255,
+  (v & 0xff) / 255,
+];
+
+/** A colour ramp: ascending positions (km) paired with the colour at each. */
+type Stops = readonly (readonly [number, Rgb])[];
+
+/**
+ * Hypsometric tints by height above sea level (km), after the atlas convention
+ * Wikipedia's topographic maps follow: dark green lowland through pale green,
+ * beige and tan to brown, with grey and white kept for the highest summits.
+ * Bands are narrow near the coast and widen with height because most land is
+ * low, and that is where small differences in height matter most.
+ */
+const LAND_STOPS: Stops = [
+  [0.0, hex(0xacd0a5)],
+  [0.05, hex(0x94bf8b)],
+  [0.2, hex(0xa8c68f)],
+  [0.5, hex(0xbdcc96)],
+  [0.75, hex(0xd1d7ab)],
+  [1.0, hex(0xe1e4b5)],
+  [1.25, hex(0xefebc0)],
+  [1.5, hex(0xe8e1b6)],
+  [2.0, hex(0xded6a3)],
+  [2.5, hex(0xd3ca9d)],
+  [3.0, hex(0xcab982)],
+  [3.5, hex(0xc3a76b)],
+  [4.0, hex(0xb9985a)],
+  [4.5, hex(0xaa8753)],
+  [5.0, hex(0xac9a7c)],
+  [5.5, hex(0xcac3b8)],
+  [6.0, hex(0xf5f4f2)],
+];
+
+/**
+ * Bathymetric tints by depth below sea level (km), in the GEBCO style: pale
+ * cyan shelves darkening steadily to deep navy on the abyssal plain and in the
+ * trenches, so ridges and trenches stay legible against the plain.
+ */
+const SEA_STOPS: Stops = [
+  [0.0, hex(0xd4f0fc)],
+  [0.2, hex(0xa8dcf0)],
+  [0.5, hex(0x7fc5e6)],
+  [1.0, hex(0x5aaedb)],
+  [2.0, hex(0x3d8fc9)],
+  [3.0, hex(0x2a72b3)],
+  [4.0, hex(0x1d5899)],
+  [5.0, hex(0x14427d)],
+  [6.0, hex(0x0c2d5e)],
+  [7.0, hex(0x071b40)],
+];
+
+/** Write `c` into `out` at `o` as RGBA8. */
+const put = (out: Uint8Array, o: number, c: Rgb): void => {
+  out[o] = Math.round(c[0] * 255);
+  out[o + 1] = Math.round(c[1] * 255);
+  out[o + 2] = Math.round(c[2] * 255);
+  out[o + 3] = 255;
+};
+
+/** Write the blend of `a` and `b` by `t` into `out` at `o` as RGBA8. */
+const putMix = (
+  out: Uint8Array,
+  o: number,
+  a: Rgb,
+  b: Rgb,
+  t: number,
+): void => {
+  out[o] = Math.round(lerp(a[0], b[0], t) * 255);
+  out[o + 1] = Math.round(lerp(a[1], b[1], t) * 255);
+  out[o + 2] = Math.round(lerp(a[2], b[2], t) * 255);
+  out[o + 3] = 255;
+};
+
+/**
+ * Fill `out` (RGBA8, four bytes per cell) with every cell's colour for the
+ * active mode. Allocation-free per cell: the ramps' anchors are resolved once
+ * up front, and plate hues are memoised per id.
+ */
+export const writeCellColours = (
+  out: Uint8Array,
+  cellCount: number,
+  data: ColourFields,
   mode: ColourMode,
-  i: number,
   seaLevel: number,
-  boundaryKind?: Uint8Array,
-): Rgb => {
+  boundaryKind?: ArrayLike<number>,
+): void => {
   switch (mode) {
     case "data":
-      return [1, 1, 1];
-    case "plate":
-      return colourForPlate(data.plateId[i]);
+      for (let i = 0; i < cellCount; i++) put(out, i * 4, WHITE);
+      return;
+    case "plate": {
+      const cache = new Map<number, Rgb>();
+      for (let i = 0; i < cellCount; i++) {
+        const id = data.plateId[i];
+        let c = cache.get(id);
+        if (!c) {
+          c = colourForPlate(id);
+          cache.set(id, c);
+        }
+        put(out, i * 4, c);
+      }
+      return;
+    }
     case "crust":
-      return colourForCrust(data.crustType[i]);
-    case "density":
-      return colourForDensity(data.density[i]);
+      for (let i = 0; i < cellCount; i++) {
+        put(out, i * 4, data.crustType[i] === 1 ? CONTINENTAL : OCEANIC);
+      }
+      return;
+    case "density": {
+      const min = densityMin();
+      const span = densityMax() - min || 1;
+      for (let i = 0; i < cellCount; i++) {
+        const t = clamp01((data.density[i] - min) / span);
+        putMix(out, i * 4, DENSITY_LIGHT, DENSITY_DARK, t);
+      }
+      return;
+    }
     case "boundary":
-      return colourForBoundary(
-        boundaryKind ? boundaryKind[i] : BoundaryKind.NONE,
-      );
+      for (let i = 0; i < cellCount; i++) {
+        put(
+          out,
+          i * 4,
+          colourForBoundary(boundaryKind ? boundaryKind[i] : BoundaryKind.NONE),
+        );
+      }
+      return;
     default:
-      return colourForElevation(data.elevation[i], seaLevel);
+      writeElevationColours(out, cellCount, data.elevation, seaLevel);
   }
 };
 
@@ -49,90 +171,66 @@ export const colourForCell = (
  * Debug palette for the boundary view: interiors and inactive boundaries read
  * neutral grey, convergent red, divergent blue, transform yellow.
  */
+const BOUNDARY_CONVERGENT: Rgb = [0.86, 0.21, 0.18];
+const BOUNDARY_DIVERGENT: Rgb = [0.18, 0.45, 0.86];
+const BOUNDARY_TRANSFORM: Rgb = [0.92, 0.82, 0.22];
+const BOUNDARY_NONE: Rgb = [0.22, 0.24, 0.28];
+
 export const colourForBoundary = (kind: number): Rgb => {
   switch (kind) {
     case BoundaryKind.CONVERGENT:
-      return [0.86, 0.21, 0.18];
+      return BOUNDARY_CONVERGENT;
     case BoundaryKind.DIVERGENT:
-      return [0.18, 0.45, 0.86];
+      return BOUNDARY_DIVERGENT;
     case BoundaryKind.TRANSFORM:
-      return [0.92, 0.82, 0.22];
+      return BOUNDARY_TRANSFORM;
     default:
-      return [0.22, 0.24, 0.28];
+      return BOUNDARY_NONE;
   }
 };
 
-/** Oceanic crust reads cool blue; continental crust reads warm tan. */
-const colourForCrust = (crustType: number): Rgb =>
-  crustType === 1 ? [0.82, 0.71, 0.48] : [0.13, 0.32, 0.55];
-
-/** Light (least dense) to dark (most dense) ramp over the density range. */
-const colourForDensity = (density: number): Rgb => {
-  const min = densityMin();
-  const max = densityMax();
-  const t = clamp01((density - min) / (max - min || 1));
-  return mix([0.95, 0.93, 0.82], [0.35, 0.12, 0.18], t);
-};
-
 /**
- * The highest ground the crust model can actually build: continental baseline
- * plus the uplift a maximally thick crustal column gives, using the very
- * constants {@link baselineElevation} works from. Deriving it rather than
- * hard-coding a range is the point -- the ramp and the elevations it colours
- * cannot drift apart when the tuning is changed.
+ * Write the colour at `x` along `stops` into `out` at `o`, interpolating
+ * between neighbouring stops and holding the end colours beyond either end.
  */
-const landCeiling = (): number =>
-  tuning.continentBase +
-  Math.max(0, tuning.maxCrustThickness - tuning.continentThicknessRef) *
-    tuning.continentThicknessGain;
-
-/**
- * Map an elevation (km) to an RGB triple in [0, 1], with `seaLevel` as the
- * ocean/land boundary.
- *
- * Both ramps are anchored to the elevations the simulation actually produces,
- * not to the `elevationMin`/`elevationMax` safety clamp. Those are +-10 km while
- * the model spans roughly -6..+6, and within that the data is packed tighter
- * still: sea floor piles up at the abyssal baseline and land rarely passes 3 km.
- * Spread over the clamp, the ocean used about a third of its gradient and the
- * land a fifth -- so the whole map came out in two or three near-identical
- * shades and the relief was invisible.
- *
- * The ocean therefore breaks at the ridge crest: everything from the abyssal
- * plain up to the crest gets a full gradient of its own (that band alone is most
- * of the sea floor), and the shallow water above the crest gets another, so
- * shelves still read as distinct from ridges.
- */
-const colourForElevation = (elevation: number, seaLevel: number): Rgb => {
-  const abyss = Math.min(tuning.abyssElevation, seaLevel);
-  const crest = Math.min(Math.max(tuning.ridgeElevation, abyss), seaLevel);
-  const deepest: Rgb = [0.02, 0.05, 0.2];
-  const midWater: Rgb = [0.07, 0.3, 0.5];
-  const shallow: Rgb = [0.25, 0.62, 0.72];
-
-  if (elevation < seaLevel) {
-    if (elevation < crest) {
-      // Abyssal plain up to the ridge crest: the bulk of the sea floor.
-      const span = crest - abyss || 1;
-      return mix(deepest, midWater, clamp01((elevation - abyss) / span));
+const putRamp = (out: Uint8Array, o: number, stops: Stops, x: number): void => {
+  if (x <= stops[0][0]) {
+    put(out, o, stops[0][1]);
+    return;
+  }
+  for (let s = 1; s < stops.length; s++) {
+    const [hi, c1] = stops[s];
+    if (x < hi) {
+      const [lo, c0] = stops[s - 1];
+      putMix(out, o, c0, c1, (x - lo) / (hi - lo));
+      return;
     }
-    // Crest up to sea level: ridges, shelves, drowned margins.
-    const span = seaLevel - crest || 1;
-    return mix(midWater, shallow, clamp01((elevation - crest) / span));
   }
+  put(out, o, stops[stops.length - 1][1]);
+};
 
-  // Land: beach -> green -> brown -> snow, over the range the crust can build.
-  const span = Math.max(landCeiling() - seaLevel, 0.5);
-  const t = clamp01((elevation - seaLevel) / span);
-  if (t < 0.15) return mix([0.78, 0.72, 0.5], [0.25, 0.5, 0.2], t / 0.15);
-  if (t < 0.6)
-    return mix([0.25, 0.5, 0.2], [0.45, 0.35, 0.22], (t - 0.15) / 0.45);
-  return mix([0.45, 0.35, 0.22], [0.95, 0.95, 0.98], (t - 0.6) / 0.4);
+/**
+ * Map elevations (km) to colours with fixed hypsometric and bathymetric tints,
+ * measured from `seaLevel` so that raising the sea floods lowland blue. The
+ * tints are absolute, as on a printed map: a given height above sea level is
+ * always the same colour, whatever the rest of the world looks like.
+ */
+const writeElevationColours = (
+  out: Uint8Array,
+  cellCount: number,
+  elevation: ArrayLike<number>,
+  seaLevel: number,
+): void => {
+  for (let i = 0; i < cellCount; i++) {
+    const h = elevation[i] - seaLevel;
+    if (h < 0) putRamp(out, i * 4, SEA_STOPS, -h);
+    else putRamp(out, i * 4, LAND_STOPS, h);
+  }
 };
 
 /** Golden-ratio hue stepping gives every plate a distinct, stable colour. */
 export const colourForPlate = (plateId: number): Rgb => {
-  if (plateId < 0) return [0.5, 0.5, 0.5];
+  if (plateId < 0) return NO_PLATE;
   const hue = (plateId * 0.6180339887498949) % 1;
   return hslToRgb(hue, 0.55, 0.55);
 };
@@ -157,10 +255,3 @@ const hslToRgb = (h: number, s: number, l: number): Rgb => {
 /** An `Rgb` as a CSS colour, for DOM swatches that must match the 3D scene. */
 export const toCssRgb = ([r, g, b]: Rgb): string =>
   `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
-
-/** Per-channel linear interpolation between two colours. */
-const mix = (a: Rgb, b: Rgb, t: number): Rgb => [
-  lerp(a[0], b[0], t),
-  lerp(a[1], b[1], t),
-  lerp(a[2], b[2], t),
-];
