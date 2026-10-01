@@ -38,36 +38,47 @@ export interface Tuning {
   elevationMax: number;
 
   // --- Plate forces / motion (see plateForces.ts) ---
-  /** Reference crust density; only denser crust contributes a drive. */
-  densityRef: number;
-  /** Relative weight of the intrinsic density-distribution drive (bootstrap). */
-  intrinsicWeight: number;
-  /** Relative weight of slab pull at convergent boundaries. */
+  /**
+   * Pull per unit length of trench, per unit of slab negative buoyancy. The
+   * dominant driving force, so this is effectively the world's overall pace.
+   */
   slabWeight: number;
-  /** Relative weight of ridge push at divergent boundaries (0 disables). */
+  /**
+   * Age (Myr) at which cooling oceanic lithosphere becomes denser than the
+   * mantle and starts to pull. Below it a slab has no weight to give.
+   */
+  slabPullOnsetAge: number;
+  /**
+   * Age (Myr) by which the plate has cooled through and its slab stops getting
+   * heavier. Beyond this, older crust pulls no harder.
+   */
+  slabPullSaturationAge: number;
+  /** Push per unit length of ridge, per km of flank relief (0 disables). */
   ridgeWeight: number;
   /**
-   * How much of a plate's motion into a locked margin is cancelled each step,
-   * from 0 (no reaction at all -- plates plough through each other undiminished)
-   * to 1 (the margin holds completely). Only the convergent component is
-   * removed, so a blocked plate keeps whatever motion runs along the collision:
-   * it slows and it turns, but it is never thrown backwards.
+   * Resistance of the mantle under a plate, per unit area. With slab pull this
+   * sets the whole scale of plate speeds: a plate moves at the rate that makes
+   * its drag match its pull. There is no speed cap -- this is what replaces one.
    */
-  collisionWeight: number;
+  mantleDrag: number;
+  /**
+   * How much harder continental crust drags than oceanic, standing for the deep
+   * lithospheric keel under a craton. This is why the continent-heavy plates are
+   * the slow ones.
+   */
+  continentalDrag: number;
+  /**
+   * Resistance per unit length of convergent margin, acting only across the
+   * boundary. A trench gets a fraction of this ({@link collisionLockGain}); a
+   * continent-continent margin gets all of it.
+   */
+  collisionDrag: number;
   /**
    * How much stiffer a continent-continent collision is than an ocean-ocean
    * subduction zone, where the slab simply sinks out of the way. A margin with
    * continent on one side only sits between the two.
    */
   collisionLockGain: number;
-  /**
-   * Closing rate, as a fraction of {@link maxSpeed}, above which a
-   * continent-continent margin welds into a suture instead of merely resisting.
-   * A gentle touch leaves two plates that can drift apart again; crust driven
-   * together this hard is joined. Set it to 0 and every continental contact
-   * welds; set it above 1 and none ever does.
-   */
-  sutureClosingFraction: number;
   /**
    * How strongly a suture pulls the two plates onto a common angular velocity,
    * per Myr. Welded crust cannot move two ways at once, so this is what stops
@@ -77,25 +88,16 @@ export interface Tuning {
   /** Myr a suture must hold before the two plates become a single plate. */
   sutureMergeTime: number;
   /**
-   * Largest share of the globe a merged plate may cover. A plate's drive comes
-   * from the density asymmetry of the crust it carries, and that asymmetry
-   * cancels out as a plate approaches covering everything -- merge without a
-   * limit and the world ends up a few vast plates with no net torque, frozen
-   * solid. Beyond this size two continents stay welded and travel together, but
-   * remain separate plates.
+   * Myr a boundary must stay quiet -- no appreciable relative motion across it,
+   * welded or not -- before the two plates are recognised as one. The other way
+   * a plate stops existing, and the only one that needs no collision at all.
    */
-  sutureMaxMergedArea: number;
+  boundaryDeathTime: number;
   /**
-   * How close two sutured plates' angular velocities must be, as a fraction of
-   * {@link maxSpeed}, before they count as moving as one and are merged.
+   * Angular speed (rad/Myr) below which two plates' motions count as the same
+   * motion, so that a pair welded for long enough can be merged into one plate.
    */
-  sutureSyncTolerance: number;
-  /** Maps net torque magnitude to angular speed (rad/Myr per unit torque). */
-  speedGain: number;
-  /** Hard cap on a plate's angular speed (rad/Myr). */
-  maxSpeed: number;
-  /** Per-step relaxation factor: how far omega moves toward its force target. */
-  motionRelax: number;
+  mergeQuietSpeed: number;
 
   // --- Crust lifecycle & densities (see PlateData.ts, crustLifecycle.ts) ---
   /** Oceanic crust ages out to here before being treated as fully cooled (Myr). */
@@ -169,6 +171,55 @@ export interface Tuning {
    */
   riftThicknessFloor: number;
 
+  // --- Rifting (see rifting.ts) ---
+  /**
+   * Tension a plate must be under before it tears, per unit area. A plate with
+   * slabs pulling it in opposing directions is in extension; when that exceeds
+   * the strength of the weakest line across it, it rifts and becomes two plates.
+   * This is the counterweight to merging: without it a world only ever loses
+   * plates, and ends up as two hemispheres with nowhere left to make new crust.
+   */
+  riftStrength: number;
+  /** Weakness stamped on the seam where two continents weld into a suture. */
+  sutureWeakness: number;
+  /** Weakness stamped on a margin left behind where a plate rifted apart. */
+  riftMarginWeakness: number;
+  /**
+   * Myr over which lithospheric weakness decays back toward intact. Long: old
+   * sutures stay the preferred place to break for billions of years, which is
+   * what makes an ocean reopen roughly where the last one closed.
+   */
+  weaknessDecayTime: number;
+  /** How much of a plate's strength the weakest line across it can remove. */
+  weaknessRelief: number;
+  /** Fraction of the globe below which a plate is too small to rift at all. */
+  minRiftArea: number;
+
+  // --- Supercontinent insulation (optional; see rifting.ts) ---
+  /** Rate per Myr at which mantle heat builds under continental crust. */
+  insulationRate: number;
+  /** Rate per Myr at which mantle heat escapes under oceanic crust. */
+  insulationCooling: number;
+  /** How much of a plate's strength fully-built-up mantle heat removes. */
+  insulationWeakening: number;
+  /**
+   * Extension that trapped mantle heat drives on its own, with no slab pulling.
+   * A dome over an upwelling stretches the lithosphere above it, which is how a
+   * supercontinent with no opposed subduction margins still tears itself apart --
+   * the case Pangaea was, and the reason this term exists at all.
+   */
+  insulationDrive: number;
+
+  // --- Plate identity (see plateLifecycle.ts) ---
+  /**
+   * Smallest share of the globe a fragment must cover to become a plate of its
+   * own when a plate is pinched in two. Below it the fragment is absorbed into a
+   * neighbour: a handful of cells is an artefact of the grid, not a microplate,
+   * and handing every one an Euler pole fills the world with noise. Earth's
+   * smallest recognised plates are a few hundredths of a percent of the surface.
+   */
+  minPlateArea: number;
+
   // --- Boundaries / timing ---
   /** Relative speed below which a boundary is treated as inactive (NONE). */
   activeSpeedEps: number;
@@ -191,20 +242,18 @@ export const defaultTuning: Tuning = {
   elevationMin: -10,
   elevationMax: 10,
 
-  densityRef: 2.7,
-  intrinsicWeight: 1.0,
-  slabWeight: 0.5,
-  ridgeWeight: 0.1,
-  collisionWeight: 0.5,
+  slabWeight: 1,
+  slabPullOnsetAge: 25,
+  slabPullSaturationAge: 80,
+  ridgeWeight: 0.05,
+  mantleDrag: 30,
+  continentalDrag: 3,
+  collisionDrag: 400,
   collisionLockGain: 10,
-  sutureClosingFraction: 0.15,
   sutureCoupling: 0.05,
   sutureMergeTime: 80,
-  sutureMaxMergedArea: 0.9,
-  sutureSyncTolerance: 0.1,
-  speedGain: 0.03,
-  maxSpeed: 0.02,
-  motionRelax: 0.2,
+  boundaryDeathTime: 120,
+  mergeQuietSpeed: 0.002,
 
   maxOceanicAge: 200,
   continentalDensity: 2.7,
@@ -223,8 +272,48 @@ export const defaultTuning: Tuning = {
   riftDensity: 2.9,
   riftThicknessFloor: 2,
 
+  riftStrength: 1.1,
+  sutureWeakness: 1,
+  riftMarginWeakness: 0.6,
+  weaknessDecayTime: 2000,
+  weaknessRelief: 0.7,
+  minRiftArea: 0.03,
+
+  insulationRate: 0.004,
+  insulationCooling: 0.01,
+  insulationWeakening: 0.6,
+  insulationDrive: 1.2,
+
+  minPlateArea: 0.0005,
+
   activeSpeedEps: 1e-5,
   dtMyr: 2,
+};
+
+/**
+ * Modelling choices that are on/off rather than a number to dial, kept beside
+ * {@link tuning} and read the same way.
+ */
+export interface SimOptions {
+  /**
+   * Whether mantle heat builds under continental crust and weakens the plate
+   * above it. On, supercontinents assemble and then tear themselves apart, which
+   * is what Earth does; off, rifting is driven by inherited weakness and slab
+   * tension alone and the per-cell heat field is never touched.
+   */
+  supercontinentInsulation: boolean;
+}
+
+export const defaultSimOptions: SimOptions = {
+  supercontinentInsulation: true,
+};
+
+/** Live, mutable modelling options the simulation reads each tick. */
+export const simOptions: SimOptions = { ...defaultSimOptions };
+
+/** Apply a partial patch to the live modelling options (used by the UI). */
+export const setSimOptions = (patch: Partial<SimOptions>): void => {
+  Object.assign(simOptions, patch);
 };
 
 /** Live, mutable tuning the simulation reads each tick. */

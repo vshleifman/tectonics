@@ -5,9 +5,9 @@ import { Picker } from "./interaction/Picker";
 import type { CellMesh } from "./mesh/CellMesh";
 import { IcosphereMesh } from "./mesh/IcosphereMesh";
 import {
-    initialiseCrust,
-    PlateData,
-    reconcilePlateProperties,
+  initialiseCrust,
+  PlateData,
+  reconcilePlateProperties,
 } from "./plates/PlateData";
 import { PlateRegistry } from "./plates/PlateRegistry";
 import { Plates } from "./plates/Plates";
@@ -16,6 +16,7 @@ import { CellRenderer, type ColourMode } from "./render/CellRenderer";
 import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
 import { BoundaryField, classifyBoundaries } from "./sim/boundaries";
 import { AdvectionField, totalCrustMass } from "./sim/massBudget";
+import { computeMetrics } from "./sim/metrics";
 import { updatePlateMotion } from "./sim/plateForces";
 import { step } from "./sim/step";
 import { tuning } from "./sim/tuning";
@@ -32,7 +33,12 @@ const INITIAL_BRANCHES_PER_SEED = 3;
 const INITIAL_SHOW_VELOCITIES = false;
 const INITIAL_SHOW_PLATES = true;
 const INITIAL_RUNNING = false;
-const SIM_INTERVAL_MS = 500; // tectonics ticks slowly, decoupled from render
+/**
+ * Default simulation rate. Tectonics is decoupled from rendering and ticks
+ * slowly, but the rate is adjustable: judging the world against Earth means
+ * running it for hundreds of Myr, and Earth's own steady state took billions.
+ */
+const INITIAL_TICKS_PER_SECOND = 2;
 /** Pointer travel (px) above which a press counts as an orbit drag, not a click. */
 const CLICK_DRAG_THRESHOLD = 6;
 
@@ -43,10 +49,10 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x05070d);
 
 const camera = new THREE.PerspectiveCamera(
-    45,
-    window.innerWidth / window.innerHeight,
-    0.01,
-    100,
+  45,
+  window.innerWidth / window.innerHeight,
+  0.01,
+  100,
 );
 camera.position.set(0, 1.4, 2.6);
 
@@ -58,13 +64,13 @@ const mapCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
 mapCamera.position.set(0, 0, 5);
 
 const setMapFrustum = (aspect: number): void => {
-    const halfH = MAP_HALF_EXTENT * MAP_MARGIN;
-    const halfW = halfH * aspect;
-    mapCamera.left = -halfW;
-    mapCamera.right = halfW;
-    mapCamera.top = halfH;
-    mapCamera.bottom = -halfH;
-    mapCamera.updateProjectionMatrix();
+  const halfH = MAP_HALF_EXTENT * MAP_MARGIN;
+  const halfW = halfH * aspect;
+  mapCamera.left = -halfW;
+  mapCamera.right = halfW;
+  mapCamera.top = halfH;
+  mapCamera.bottom = -halfH;
+  mapCamera.updateProjectionMatrix();
 };
 setMapFrustum(window.innerWidth / window.innerHeight);
 
@@ -87,9 +93,9 @@ mapControls.enableDamping = true;
 mapControls.enableRotate = false;
 mapControls.screenSpacePanning = true;
 mapControls.mouseButtons = {
-    LEFT: THREE.MOUSE.PAN,
-    MIDDLE: THREE.MOUSE.DOLLY,
-    RIGHT: THREE.MOUSE.PAN,
+  LEFT: THREE.MOUSE.PAN,
+  MIDDLE: THREE.MOUSE.DOLLY,
+  RIGHT: THREE.MOUSE.PAN,
 };
 mapControls.enabled = false;
 
@@ -117,6 +123,8 @@ let boundaries: BoundaryField | null = null;
 let advection: AdvectionField | null = null;
 /** Total crust mass when the world was last built, for conservation drift. */
 let initialMass = 0;
+/** Simulated time since the world was built (Myr), advanced one tick at a time. */
+let elapsedMyr = 0;
 
 /** Persistent plate identity across cracks/merges; reset only on world rebuild. */
 const plateRegistry = new PlateRegistry();
@@ -126,37 +134,38 @@ let rawLabels = new Int32Array(0);
 
 /** Single source of truth for every UI setting. */
 const settings = createSettingsStore({
-    level: INITIAL_LEVEL,
-    seaLevel: INITIAL_SEA_LEVEL,
-    autoRotate: INITIAL_AUTO_ROTATE,
-    projection: INITIAL_PROJECTION,
-    viewMode: INITIAL_VIEW_MODE,
-    seedMode: INITIAL_SEED_MODE,
-    branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
-    showVelocities: INITIAL_SHOW_VELOCITIES,
-    showPlates: INITIAL_SHOW_PLATES,
-    running: INITIAL_RUNNING,
+  level: INITIAL_LEVEL,
+  seaLevel: INITIAL_SEA_LEVEL,
+  autoRotate: INITIAL_AUTO_ROTATE,
+  projection: INITIAL_PROJECTION,
+  viewMode: INITIAL_VIEW_MODE,
+  seedMode: INITIAL_SEED_MODE,
+  branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
+  showVelocities: INITIAL_SHOW_VELOCITIES,
+  showPlates: INITIAL_SHOW_PLATES,
+  running: INITIAL_RUNNING,
+  ticksPerSecond: INITIAL_TICKS_PER_SECOND,
 });
 
 /** Map the UI view mode onto the renderer's colour mode. */
 const colourMode = (): ColourMode => {
-    const viewMode = settings.get("viewMode");
-    return viewMode === "colour" ? "elevation" : viewMode;
+  const viewMode = settings.get("viewMode");
+  return viewMode === "colour" ? "elevation" : viewMode;
 };
 
 const recolour = (): void => {
-    cellRenderer?.updateColours(
-        cellData,
-        colourMode(),
-        settings.get("seaLevel"),
-        boundaries?.cellKind,
-    );
+  cellRenderer?.updateColours(
+    cellData,
+    colourMode(),
+    settings.get("seaLevel"),
+    boundaries?.cellKind,
+  );
 };
 
 /** Re-derive boundary classification from the current plates and crust. */
 const classify = (): void => {
-    if (!plateData || !boundaries) return;
-    classifyBoundaries(cellMesh, cellData, plateData, boundaries);
+  if (!plateData || !boundaries) return;
+  classifyBoundaries(cellMesh, cellData, plateData, boundaries);
 };
 
 /**
@@ -167,37 +176,55 @@ const classify = (): void => {
  * Returns the live plate count.
  */
 const reassignPlates = (initCrust: boolean): number => {
-    if (!plates || !plateData || !cellRenderer) return 0;
-    const plateCount = plates.assignPlates(rawLabels);
-    const report = plateRegistry.relabel(
-        rawLabels,
-        plateCount,
-        cellData.plateId,
-    );
-    reconcilePlateProperties(plateData, report);
-    if (initCrust) initialiseCrust(cellMesh, cellData);
-    // Derive density-driven motion from the (possibly fresh) crust, then classify
-    // so arrows and boundaries reflect it immediately on world build / seed.
-    if (boundaries) updatePlateMotion(cellMesh, cellData, plateData, boundaries);
-    classify();
-    cellRenderer.updateVelocities(plateData, cellData);
-    return plateCount;
+  if (!plates || !plateData || !cellRenderer) return 0;
+  const plateCount = plates.assignPlates(rawLabels);
+  const report = plateRegistry.relabel(rawLabels, plateCount, cellData.plateId);
+  reconcilePlateProperties(plateData, report);
+  if (initCrust) initialiseCrust(cellMesh, cellData);
+  // Derive density-driven motion from the (possibly fresh) crust, then classify
+  // so arrows and boundaries reflect it immediately on world build / seed.
+  if (boundaries) updatePlateMotion(cellMesh, cellData, plateData, boundaries);
+  classify();
+  cellRenderer.updateVelocities(plateData, cellData, boundaries);
+  refreshPlateList();
+  return plateCount;
+};
+
+/** Push the current per-plate readout (colour, speed, heading) into the UI list. */
+const refreshPlateList = (): void => {
+  ui.setPlates(plateData ? plateData.summaries(cellMesh, cellData) : []);
+};
+
+/** Re-measure the world against Earth and push the reading into the UI. */
+const refreshMetrics = (): void => {
+  if (!plateData || !boundaries || !advection) return;
+  ui.setMetrics(
+    computeMetrics(
+      cellMesh,
+      cellData,
+      plateData,
+      boundaries,
+      advection,
+      tuning.dtMyr,
+      elapsedMyr,
+    ),
+  );
 };
 
 const applyVelocities = (): void => {
-    cellRenderer?.setVelocitiesVisible(settings.get("showVelocities"));
+  cellRenderer?.setVelocitiesVisible(settings.get("showVelocities"));
 };
 
 /** Set the plates-overlay visibility and refresh its colours when shown. */
 const applyShowPlates = (): void => {
-    const show = settings.get("showPlates");
-    if (show) cellRenderer?.updatePlateOverlay(cellData);
-    cellRenderer?.setPlatesVisible(show);
+  const show = settings.get("showPlates");
+  if (show) cellRenderer?.updatePlateOverlay(cellData);
+  cellRenderer?.setPlatesVisible(show);
 };
 
 /** Refresh the plates overlay colours after a plate change (if it is shown). */
 const refreshPlateOverlay = (): void => {
-    if (settings.get("showPlates")) cellRenderer?.updatePlateOverlay(cellData);
+  if (settings.get("showPlates")) cellRenderer?.updatePlateOverlay(cellData);
 };
 
 /**
@@ -205,8 +232,8 @@ const refreshPlateOverlay = (): void => {
  * recolour now so colour-ramp / overlay edits show immediately even when paused.
  */
 const onTuningChange = (): void => {
-    recolour();
-    refreshPlateOverlay();
+  recolour();
+  refreshPlateOverlay();
 };
 
 /**
@@ -215,139 +242,142 @@ const onTuningChange = (): void => {
  * new camera so seed placement keeps working.
  */
 const applyProjection = (): void => {
-    const projection = settings.get("projection");
-    const onMap = projection === "mercator";
-    cellRenderer?.setProjection(projection);
-    cellLabels.setProjection(projection);
+  const projection = settings.get("projection");
+  const onMap = projection === "mercator";
+  cellRenderer?.setProjection(projection);
+  cellLabels.setProjection(projection);
 
-    activeCamera = onMap ? mapCamera : camera;
-    activeControls = onMap ? mapControls : controls;
-    controls.enabled = !onMap;
-    mapControls.enabled = onMap;
-    activeControls.update();
+  activeCamera = onMap ? mapCamera : camera;
+  activeControls = onMap ? mapControls : controls;
+  controls.enabled = !onMap;
+  mapControls.enabled = onMap;
+  activeControls.update();
 
-    picker.setProjection(projection, activeCamera);
+  picker.setProjection(projection, activeCamera);
 };
 
 const applyViewMode = (): void => {
-    const viewMode = settings.get("viewMode");
-    const showLabels = viewMode === "data";
-    recolour();
-    cellRenderer?.setEdgesVisible(viewMode === "data");
-    cellRenderer?.setFaultsVisible((plates?.seeds.length ?? 0) > 0);
-    applyVelocities();
-    cellLabels.setVisible(showLabels);
-    if (showLabels) {
-        ui.setNote(
-            cellLabels.isSuppressed
-                ? "Labels hidden: too many cells. Lower subdivision level."
-                : "Showing all per-cell properties.",
-        );
-    } else if (settings.get("seedMode")) {
-        ui.setNote("Click the globe to drop plate seeds; drag to orbit.");
-    } else {
-        ui.setNote("");
-    }
+  const viewMode = settings.get("viewMode");
+  const showLabels = viewMode === "data";
+  recolour();
+  cellRenderer?.setEdgesVisible(viewMode === "data");
+  cellRenderer?.setFaultsVisible((plates?.seeds.length ?? 0) > 0);
+  applyVelocities();
+  cellLabels.setVisible(showLabels);
+  if (showLabels) {
+    ui.setNote(
+      cellLabels.isSuppressed
+        ? "Labels hidden: too many cells. Lower subdivision level."
+        : "Showing all per-cell properties.",
+    );
+  } else if (settings.get("seedMode")) {
+    ui.setNote("Click the globe to drop plate seeds; drag to orbit.");
+  } else {
+    ui.setNote("");
+  }
 };
 
 const rebuild = (level: number): void => {
-    if (cellRenderer) {
-        scene.remove(cellRenderer.object3D);
-        cellRenderer.dispose();
-        cellRenderer = null;
-    }
+  if (cellRenderer) {
+    scene.remove(cellRenderer.object3D);
+    cellRenderer.dispose();
+    cellRenderer = null;
+  }
 
-    cellMesh = new IcosphereMesh(level);
-    cellData = new CellData(cellMesh.cellCount);
-    backBuffer = new CellData(cellMesh.cellCount);
-    boundaries = new BoundaryField(
-        cellMesh.cellCount,
-        cellMesh.boundaryGraph().arcCount,
-    );
-    advection = new AdvectionField(cellMesh.cellCount);
-    seedUniformElevation(cellMesh, cellData);
-    rawLabels = new Int32Array(cellMesh.cellCount);
+  cellMesh = new IcosphereMesh(level);
+  cellData = new CellData(cellMesh.cellCount);
+  backBuffer = new CellData(cellMesh.cellCount);
+  boundaries = new BoundaryField(
+    cellMesh.cellCount,
+    cellMesh.boundaryGraph().arcCount,
+  );
+  advection = new AdvectionField(cellMesh.cellCount);
+  seedUniformElevation(cellMesh, cellData);
+  rawLabels = new Int32Array(cellMesh.cellCount);
 
-    plates = new Plates(cellMesh);
-    plates.setBranchesPerSeed(settings.get("branchesPerSeed"));
-    plateRegistry.reset();
-    plateData = new PlateData();
+  plates = new Plates(cellMesh);
+  plates.setBranchesPerSeed(settings.get("branchesPerSeed"));
+  plateRegistry.reset();
+  plateData = new PlateData();
 
-    cellRenderer = new CellRenderer(cellMesh);
-    scene.add(cellRenderer.object3D);
-    const plateCount = reassignPlates(true);
-    cellRenderer.updateFaults(plates.cracked);
-    cellRenderer.updateSeeds(plates.seeds);
+  cellRenderer = new CellRenderer(cellMesh);
+  scene.add(cellRenderer.object3D);
+  const plateCount = reassignPlates(true);
+  cellRenderer.updateFaults(plates.cracked);
+  cellRenderer.updateSeeds(plates.seeds);
 
-    cellLabels.build(cellMesh, cellData);
+  cellLabels.build(cellMesh, cellData);
 
-    cellRenderer.setProjection(settings.get("projection"));
+  cellRenderer.setProjection(settings.get("projection"));
 
-    // Baseline for conservation drift: total crust mass of the fresh world.
-    initialMass = totalCrustMass(cellMesh, cellData);
-    if (advection) {
-        advection.liveMass = initialMass;
-        advection.subductedTotal = 0;
-        advection.createdTotal = 0;
-    }
+  // Baseline for conservation drift: total crust mass of the fresh world.
+  initialMass = totalCrustMass(cellMesh, cellData);
+  if (advection) {
+    advection.liveMass = initialMass;
+    advection.subductedTotal = 0;
+    advection.createdTotal = 0;
+  }
 
-    ui.setCellCount(cellMesh.cellCount);
-    ui.setPlateCount(plateCount);
-    ui.setMassReadout(initialMass, 0);
-    applyViewMode();
-    applyShowPlates();
+  elapsedMyr = 0;
+  ui.setCellCount(cellMesh.cellCount);
+  ui.setPlateCount(plateCount);
+  ui.setMassReadout(initialMass, 0);
+  refreshMetrics();
+  applyViewMode();
+  applyShowPlates();
 };
 
 /** Drop a seed at the picked junction, regrow faults, and re-derive plates. */
 const placeSeed = (event: PointerEvent): void => {
-    if (!plates || !cellRenderer) return;
-    const junction = picker.pickJunction(event, cellMesh.boundaryGraph());
-    if (junction === null) return;
+  if (!plates || !cellRenderer) return;
+  const junction = picker.pickJunction(event, cellMesh.boundaryGraph());
+  if (junction === null) return;
 
-    plates.addSeed(junction);
-    const plateCount = reassignPlates(false);
-    cellRenderer.updateFaults(plates.cracked);
-    cellRenderer.updateSeeds(plates.seeds);
-    cellRenderer.setFaultsVisible(true);
-    ui.setPlateCount(plateCount);
-    recolour();
-    refreshPlateOverlay();
-    cellLabels.refresh();
+  plates.addSeed(junction);
+  const plateCount = reassignPlates(false);
+  cellRenderer.updateFaults(plates.cracked);
+  cellRenderer.updateSeeds(plates.seeds);
+  cellRenderer.setFaultsVisible(true);
+  ui.setPlateCount(plateCount);
+  recolour();
+  refreshPlateOverlay();
+  cellLabels.refresh();
 };
 
 const clearFaults = (): void => {
-    if (!plates || !cellRenderer) return;
-    plates.clear();
-    const plateCount = reassignPlates(false);
-    cellRenderer.updateFaults(plates.cracked);
-    cellRenderer.updateSeeds(plates.seeds);
-    cellRenderer.setFaultsVisible(false);
-    ui.setPlateCount(plateCount);
-    recolour();
-    refreshPlateOverlay();
-    cellLabels.refresh();
+  if (!plates || !cellRenderer) return;
+  plates.clear();
+  const plateCount = reassignPlates(false);
+  cellRenderer.updateFaults(plates.cracked);
+  cellRenderer.updateSeeds(plates.seeds);
+  cellRenderer.setFaultsVisible(false);
+  ui.setPlateCount(plateCount);
+  recolour();
+  refreshPlateOverlay();
+  cellLabels.refresh();
 };
 
 const ui = createControls(
-    document.body,
-    settings,
-    clearFaults,
-    onTuningChange,
+  document.body,
+  settings,
+  clearFaults,
+  onTuningChange,
+  () => simTick(),
 );
 
 // React to setting changes. The store is the source of truth; these subscriptions
 // own the side effects each setting triggers. `running` needs none: the sim tick
 // reads it directly.
-settings.on("level", level => rebuild(level));
+settings.on("level", (level) => rebuild(level));
 settings.on("seaLevel", () => recolour());
-settings.on("autoRotate", enabled => {
-    controls.autoRotate = enabled;
+settings.on("autoRotate", (enabled) => {
+  controls.autoRotate = enabled;
 });
 settings.on("projection", () => applyProjection());
 settings.on("viewMode", () => applyViewMode());
 settings.on("seedMode", () => applyViewMode());
-settings.on("branchesPerSeed", branches =>
-    plates?.setBranchesPerSeed(branches),
+settings.on("branchesPerSeed", (branches) =>
+  plates?.setBranchesPerSeed(branches),
 );
 settings.on("showVelocities", () => applyVelocities());
 settings.on("showPlates", () => applyShowPlates());
@@ -359,18 +389,18 @@ applyProjection();
 
 let pointerDownX = 0;
 let pointerDownY = 0;
-renderer.domElement.addEventListener("pointerdown", event => {
-    pointerDownX = event.clientX;
-    pointerDownY = event.clientY;
+renderer.domElement.addEventListener("pointerdown", (event) => {
+  pointerDownX = event.clientX;
+  pointerDownY = event.clientY;
 });
-renderer.domElement.addEventListener("pointerup", event => {
-    if (!settings.get("seedMode")) return;
-    const travel = Math.hypot(
-        event.clientX - pointerDownX,
-        event.clientY - pointerDownY,
-    );
-    if (travel > CLICK_DRAG_THRESHOLD) return; // was an orbit drag
-    placeSeed(event);
+renderer.domElement.addEventListener("pointerup", (event) => {
+  if (!settings.get("seedMode")) return;
+  const travel = Math.hypot(
+    event.clientX - pointerDownX,
+    event.clientY - pointerDownY,
+  );
+  if (travel > CLICK_DRAG_THRESHOLD) return; // was an orbit drag
+  placeSeed(event);
 });
 
 // --- Simulation tick: decoupled from rendering -----------------------------
@@ -378,57 +408,69 @@ renderer.domElement.addEventListener("pointerup", event => {
 // (keeping every existing reference to `cellData` valid), then refresh visuals.
 
 const copyCellData = (from: CellData, to: CellData): void => {
-    to.elevation.set(from.elevation);
-    to.plateId.set(from.plateId);
-    to.crustType.set(from.crustType);
-    to.age.set(from.age);
-    to.density.set(from.density);
-    to.thickness.set(from.thickness);
+  to.elevation.set(from.elevation);
+  to.plateId.set(from.plateId);
+  to.crustType.set(from.crustType);
+  to.age.set(from.age);
+  to.density.set(from.density);
+  to.thickness.set(from.thickness);
+  to.weakness.set(from.weakness);
+  to.mantleHeat.set(from.mantleHeat);
 };
 
-window.setInterval(() => {
-    if (
-        !settings.get("running") ||
-        !plateData ||
-        !cellRenderer ||
-        !boundaries ||
-        !advection
-    )
-        return;
-    // Recompute density-driven motion from the previous tick's boundaries and the
-    // current crust, then classify against the new omega so advection sees live
-    // boundaries, then scatter crust conservatively into the back buffer.
-    updatePlateMotion(cellMesh, cellData, plateData, boundaries);
-    classify();
-    step(
-        cellMesh,
-        cellData,
-        backBuffer,
-        plateData,
-        tuning.dtMyr,
-        boundaries,
-        advection,
-    );
-    copyCellData(backBuffer, cellData);
-    classify();
-    // Plates merge when a suture matures, so the count changes without any
-    // reassignment; read it back from the live plate set every tick.
-    ui.setPlateCount(plateData.count);
-    recolour();
-    refreshPlateOverlay();
-    cellRenderer.updateVelocities(plateData, cellData);
-    cellLabels.refresh();
+/**
+ * Advance the world one tick and refresh everything that reads it. Split out of
+ * the interval so "Step once" can advance a paused world by exactly one tick.
+ */
+const simTick = (): void => {
+  if (!plateData || !cellRenderer || !boundaries || !advection) return;
+  // Recompute density-driven motion from the previous tick's boundaries and the
+  // current crust, then classify against the new omega so advection sees live
+  // boundaries, then scatter crust conservatively into the back buffer.
+  updatePlateMotion(cellMesh, cellData, plateData, boundaries);
+  classify();
+  step(
+    cellMesh,
+    cellData,
+    backBuffer,
+    plateData,
+    tuning.dtMyr,
+    boundaries,
+    advection,
+    () => plateRegistry.allocate(),
+  );
+  copyCellData(backBuffer, cellData);
+  classify();
+  // Plates merge when a suture matures, so the count changes without any
+  // reassignment; read it back from the live plate set every tick.
+  ui.setPlateCount(plateData.count);
+  recolour();
+  refreshPlateOverlay();
+  cellRenderer.updateVelocities(plateData, cellData, boundaries);
+  refreshPlateList();
+  cellLabels.refresh();
+  elapsedMyr += tuning.dtMyr;
+  refreshMetrics();
 
-    // Conservation budget: live mass plus everything subducted, less everything
-    // created at rifts, should track the initial mass (net change = created
-    // minus destroyed); report drift as a fraction of it.
-    const tracked =
-        advection.liveMass +
-        advection.subductedTotal -
-        advection.createdTotal;
-    const drift = initialMass > 0 ? (tracked - initialMass) / initialMass : 0;
-    ui.setMassReadout(advection.liveMass, drift);
-}, SIM_INTERVAL_MS);
+  // Conservation budget: live mass plus everything subducted, less everything
+  // created at rifts, should track the initial mass (net change = created
+  // minus destroyed); report drift as a fraction of it.
+  const tracked =
+    advection.liveMass + advection.subductedTotal - advection.createdTotal;
+  const drift = initialMass > 0 ? (tracked - initialMass) / initialMass : 0;
+  ui.setMassReadout(advection.liveMass, drift);
+};
+
+// Self-rescheduling rather than a fixed interval, so a change to the rate takes
+// effect on the next tick instead of needing the timer torn down and rebuilt.
+const scheduleTick = (): void => {
+  const rate = Math.max(0.1, settings.get("ticksPerSecond"));
+  window.setTimeout(() => {
+    if (settings.get("running")) simTick();
+    scheduleTick();
+  }, 1000 / rate);
+};
+scheduleTick();
 
 // --- Render loop: 60fps, only re-colours / redraws a static mesh -----------
 
@@ -436,29 +478,29 @@ let fpsEma = 60;
 let lastTime = performance.now();
 
 const animate = (): void => {
-    requestAnimationFrame(animate);
+  requestAnimationFrame(animate);
 
-    const now = performance.now();
-    const delta = now - lastTime;
-    lastTime = now;
-    if (delta > 0) {
-        const instantaneous = 1000 / delta;
-        fpsEma += (instantaneous - fpsEma) * 0.1;
-        ui.setFps(fpsEma);
-    }
+  const now = performance.now();
+  const delta = now - lastTime;
+  lastTime = now;
+  if (delta > 0) {
+    const instantaneous = 1000 / delta;
+    fpsEma += (instantaneous - fpsEma) * 0.1;
+    ui.setFps(fpsEma);
+  }
 
-    activeControls.update();
-    renderer.render(scene, activeCamera);
-    cellLabels.update(activeCamera);
-    cellLabels.render(scene, activeCamera);
+  activeControls.update();
+  renderer.render(scene, activeCamera);
+  cellLabels.update(activeCamera);
+  cellLabels.render(scene, activeCamera);
 };
 animate();
 
 window.addEventListener("resize", () => {
-    const aspect = window.innerWidth / window.innerHeight;
-    camera.aspect = aspect;
-    camera.updateProjectionMatrix();
-    setMapFrustum(aspect);
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    cellLabels.resize();
+  const aspect = window.innerWidth / window.innerHeight;
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
+  setMapFrustum(aspect);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  cellLabels.resize();
 });

@@ -1,6 +1,21 @@
 import { clamp } from "../math/scalar";
+import { CM_PER_YR_PER_RAD_MYR, type PlateSummary } from "../plates/PlateData";
+import { colourForPlate, toCssRgb } from "../render/colour";
 import type { Projection } from "../render/projection";
-import { resetTuning, setTuning, type Tuning, tuning } from "../sim/tuning";
+import {
+  AGE_BIN_MYR,
+  AGE_BINS,
+  EARTH,
+  type WorldMetrics,
+} from "../sim/metrics";
+import {
+  resetTuning,
+  setSimOptions,
+  setTuning,
+  simOptions,
+  type Tuning,
+  tuning,
+} from "../sim/tuning";
 import type { SettingsStore, ViewMode } from "./settingsStore";
 
 /** Imperative handle for pushing live sim readouts back into the panels. */
@@ -10,7 +25,28 @@ export interface Controls {
   setFps: (fps: number) => void;
   setMassReadout: (liveMass: number, drift: number) => void;
   setNote: (text: string) => void;
+  /** Replace the plate list with the live set of plates. */
+  setPlates: (plates: readonly PlateSummary[]) => void;
+  /** Update the diagnostics panel with a fresh reading of the world. */
+  setMetrics: (metrics: WorldMetrics) => void;
 }
+
+/**
+ * The one data hue used in the diagnostics chart — the panel accent, which
+ * clears the lightness band, chroma floor and 3:1 contrast against the panel
+ * surface. Earth's reference distribution is drawn as a dashed line rather than
+ * a second hue: as a categorical pair the two would fail the normal-vision
+ * separation floor, and a target is an annotation anyway, not a series.
+ */
+const CHART_INK = "#4f8ff0";
+const CHART_REFERENCE_INK = "rgba(230, 236, 245, 0.45)";
+
+/** Legend for the boundary velocity arrows, matching the renderer's tints. */
+const ARROW_LEGEND: ReadonlyArray<{ colour: string; label: string }> = [
+  { colour: "rgb(255, 107, 87)", label: "Convergent" },
+  { colour: "rgb(107, 184, 255)", label: "Divergent" },
+  { colour: "rgb(255, 219, 92)", label: "Transform" },
+];
 
 const MIN_LEVEL = 2;
 const MAX_LEVEL = 8;
@@ -18,6 +54,8 @@ const MIN_SEA_LEVEL = -8;
 const MAX_SEA_LEVEL = 8;
 const MIN_BRANCHES = 1;
 const MAX_BRANCHES = 5;
+const MIN_TICK_RATE = 1;
+const MAX_TICK_RATE = 30;
 
 /** One tunable simulation constant exposed as a slider. */
 interface TuningSliderSpec {
@@ -120,28 +158,42 @@ const TUNING_GROUPS: TuningGroupSpec[] = [
   {
     title: "Plate forces / motion",
     sliders: [
-      {
-        key: "densityRef",
-        label: "Density reference",
-        min: 2.5,
-        max: 3.2,
-        step: 0.01,
-      },
-      {
-        key: "intrinsicWeight",
-        label: "Intrinsic drive",
-        min: 0,
-        max: 5,
-        step: 0.1,
-      },
       { key: "slabWeight", label: "Slab pull", min: 0, max: 5, step: 0.1 },
-      { key: "ridgeWeight", label: "Ridge push", min: 0, max: 5, step: 0.1 },
       {
-        key: "collisionWeight",
+        key: "slabPullOnsetAge",
+        label: "Slab pull onset age",
+        min: 0,
+        max: 100,
+        step: 5,
+      },
+      {
+        key: "slabPullSaturationAge",
+        label: "Slab pull saturation age",
+        min: 20,
+        max: 300,
+        step: 5,
+      },
+      {
+        key: "ridgeWeight",
+        label: "Ridge push",
+        min: 0,
+        max: 0.5,
+        step: 0.005,
+      },
+      { key: "mantleDrag", label: "Mantle drag", min: 20, max: 2000, step: 20 },
+      {
+        key: "continentalDrag",
+        label: "Continental keel drag",
+        min: 1,
+        max: 12,
+        step: 0.5,
+      },
+      {
+        key: "collisionDrag",
         label: "Collision resistance",
         min: 0,
-        max: 1,
-        step: 0.05,
+        max: 2000,
+        step: 20,
       },
       {
         key: "collisionLockGain",
@@ -149,13 +201,6 @@ const TUNING_GROUPS: TuningGroupSpec[] = [
         min: 1,
         max: 40,
         step: 1,
-      },
-      {
-        key: "sutureClosingFraction",
-        label: "Suture closing threshold",
-        min: 0,
-        max: 1,
-        step: 0.01,
       },
       {
         key: "sutureCoupling",
@@ -172,15 +217,94 @@ const TUNING_GROUPS: TuningGroupSpec[] = [
         step: 10,
       },
       {
-        key: "sutureMaxMergedArea",
-        label: "Max merged plate area",
-        min: 0.05,
+        key: "mergeQuietSpeed",
+        label: "Merge quiet speed",
+        min: 0,
+        max: 0.02,
+        step: 0.0005,
+      },
+    ],
+  },
+  {
+    title: "Rifting",
+    sliders: [
+      {
+        key: "riftStrength",
+        label: "Plate strength",
+        min: 0,
+        max: 3,
+        step: 0.05,
+      },
+      {
+        key: "minRiftArea",
+        label: "Min riftable area",
+        min: 0.005,
+        max: 0.2,
+        step: 0.005,
+      },
+      {
+        key: "weaknessRelief",
+        label: "Weakness relief",
+        min: 0,
         max: 1,
         step: 0.05,
       },
-      { key: "speedGain", label: "Speed gain", min: 0, max: 0.2, step: 0.005 },
-      { key: "maxSpeed", label: "Max speed", min: 0, max: 0.1, step: 0.001 },
-      { key: "motionRelax", label: "Motion relax", min: 0, max: 1, step: 0.01 },
+      {
+        key: "sutureWeakness",
+        label: "Suture weakness",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "riftMarginWeakness",
+        label: "Rift margin weakness",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "weaknessDecayTime",
+        label: "Weakness memory (Myr)",
+        min: 100,
+        max: 5000,
+        step: 100,
+      },
+      {
+        key: "insulationRate",
+        label: "Insulation heating /Myr",
+        min: 0,
+        max: 0.05,
+        step: 0.001,
+      },
+      {
+        key: "insulationCooling",
+        label: "Insulation cooling /Myr",
+        min: 0,
+        max: 0.05,
+        step: 0.001,
+      },
+      {
+        key: "insulationWeakening",
+        label: "Heat weakening",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "insulationDrive",
+        label: "Heat-driven extension",
+        min: 0,
+        max: 5,
+        step: 0.1,
+      },
+      {
+        key: "minPlateArea",
+        label: "Min fragment area",
+        min: 0,
+        max: 0.01,
+        step: 0.0005,
+      },
     ],
   },
   {
@@ -327,6 +451,7 @@ export const createControls = (
   store: SettingsStore,
   onClearFaults: () => void,
   onTuningChange: () => void,
+  onStepOnce: () => void,
 ): Controls => {
   const initial = store.getAll();
 
@@ -349,7 +474,34 @@ export const createControls = (
     initial.seedMode,
   );
   const runToggle = makeToggle("Run simulation", initial.running);
+  const rateLabel = makeLabel();
+  const rateSlider = makeSlider(
+    MIN_TICK_RATE,
+    MAX_TICK_RATE,
+    1,
+    initial.ticksPerSecond,
+  );
+  const renderRateLabel = (): void => {
+    const rate = store.get("ticksPerSecond");
+    rateLabel.textContent = `Sim rate: ${rate} ticks/s (${(
+      rate * tuning.dtMyr
+    ).toFixed(0)} Myr/s)`;
+  };
+  const stepButton = makeButton("Step once");
   const clearButton = makeButton("Clear faults");
+  // A modelling choice rather than a dial: with it off, rifting is driven by
+  // inherited weakness and slab tension alone and the mantle-heat field is
+  // never touched, which is one fewer pass over every cell each tick.
+  const insulationToggle = makeToggle(
+    "Supercontinent insulation",
+    simOptions.supercontinentInsulation,
+  );
+  insulationToggle.input.addEventListener("change", () => {
+    setSimOptions({
+      supercontinentInsulation: insulationToggle.input.checked,
+    });
+    onTuningChange();
+  });
 
   const readout = document.createElement("div");
   Object.assign(readout.style, {
@@ -431,6 +583,7 @@ export const createControls = (
         const value = clamp(Number(slider.value), spec.min, spec.max);
         setTuning({ [spec.key]: value } as Partial<Tuning>);
         render();
+        if (spec.key === "dtMyr") renderRateLabel();
         onTuningChange();
       });
       sliderRefs.push({ spec, slider, render });
@@ -451,6 +604,8 @@ export const createControls = (
     onTuningChange();
   });
 
+  const diagnostics = makeDiagnostics();
+
   const renderLevelLabel = (): void => {
     levelLabel.textContent = `Subdivision level: ${store.get("level")}`;
   };
@@ -461,6 +616,7 @@ export const createControls = (
   };
   renderLevelLabel();
   renderBranchesLabel();
+  renderRateLabel();
   cellEl.textContent = "Cells: --";
   plateEl.textContent = "Plates: --";
   massEl.textContent = "Mass: --";
@@ -485,6 +641,18 @@ export const createControls = (
   runToggle.input.addEventListener("change", () => {
     store.set({ running: runToggle.input.checked });
   });
+  rateSlider.addEventListener("input", () => {
+    store.set({
+      ticksPerSecond: clamp(
+        Math.round(Number(rateSlider.value)),
+        MIN_TICK_RATE,
+        MAX_TICK_RATE,
+      ),
+    });
+  });
+  stepButton.addEventListener("click", () => {
+    onStepOnce();
+  });
   clearButton.addEventListener("click", () => {
     onClearFaults();
   });
@@ -496,10 +664,15 @@ export const createControls = (
     branchesSlider,
     seedToggle.row,
     runToggle.row,
+    rateLabel,
+    rateSlider,
+    stepButton,
     clearButton,
+    insulationToggle.row,
     readout,
     massEl,
     note,
+    diagnostics.details,
     tuningHeading,
     ...tuningGroups,
     resetButton,
@@ -550,6 +723,62 @@ export const createControls = (
     initial.showVelocities,
   );
 
+  // Colour key for the boundary arrows; only meaningful while they are drawn,
+  // so it follows the velocity toggle.
+  const arrowLegend = document.createElement("div");
+  Object.assign(arrowLegend.style, {
+    display: initial.showVelocities ? "flex" : "none",
+    gap: "10px",
+    flexWrap: "wrap",
+    margin: "-2px 0 8px",
+    fontSize: "11px",
+    opacity: "0.8",
+  } satisfies Partial<CSSStyleDeclaration>);
+  for (const entry of ARROW_LEGEND) {
+    const item = document.createElement("span");
+    Object.assign(item.style, {
+      display: "flex",
+      alignItems: "center",
+      gap: "4px",
+    } satisfies Partial<CSSStyleDeclaration>);
+    const dash = document.createElement("span");
+    Object.assign(dash.style, {
+      width: "12px",
+      height: "2px",
+      borderRadius: "1px",
+      background: entry.colour,
+    } satisfies Partial<CSSStyleDeclaration>);
+    const text = document.createElement("span");
+    text.textContent = entry.label;
+    item.append(dash, text);
+    arrowLegend.append(item);
+  }
+
+  // Collapsible roster of every live plate: its overlay colour, how fast it is
+  // moving and which way. Rebuilt wholesale on each update (there are tens of
+  // plates at most, and the <details> wrapper keeps its open/closed state).
+  const platesDetails = document.createElement("details");
+  platesDetails.open = true;
+  Object.assign(platesDetails.style, {
+    marginBottom: "8px",
+    borderTop: "1px solid rgba(120, 140, 180, 0.18)",
+    paddingTop: "6px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  const platesSummary = document.createElement("summary");
+  platesSummary.textContent = "Plates";
+  Object.assign(platesSummary.style, {
+    cursor: "pointer",
+    opacity: "0.9",
+    marginBottom: "6px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  const platesList = document.createElement("div");
+  Object.assign(platesList.style, {
+    maxHeight: "240px",
+    overflowY: "auto",
+    paddingRight: "2px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  platesDetails.append(platesSummary, platesList);
+
   const fpsEl = document.createElement("div");
   Object.assign(fpsEl.style, {
     marginTop: "6px",
@@ -589,6 +818,8 @@ export const createControls = (
     rotateToggle.row,
     platesToggle.row,
     velocityToggle.row,
+    arrowLegend,
+    platesDetails,
     fpsEl,
   );
 
@@ -619,6 +850,7 @@ export const createControls = (
     }
     if (changed.has("showVelocities")) {
       velocityToggle.input.checked = state.showVelocities;
+      arrowLegend.style.display = state.showVelocities ? "flex" : "none";
     }
     if (changed.has("showPlates")) {
       platesToggle.input.checked = state.showPlates;
@@ -629,6 +861,10 @@ export const createControls = (
     }
     if (changed.has("running")) {
       runToggle.input.checked = state.running;
+    }
+    if (changed.has("ticksPerSecond")) {
+      rateSlider.value = String(state.ticksPerSecond);
+      renderRateLabel();
     }
   });
 
@@ -652,7 +888,350 @@ export const createControls = (
     setNote: (text: string) => {
       note.textContent = text;
     },
+    setMetrics: diagnostics.update,
+    setPlates: (plates: readonly PlateSummary[]) => {
+      platesSummary.textContent = `Plates (${plates.length})`;
+      platesList.replaceChildren(
+        ...(plates.length > 0
+          ? plates.map(makePlateRow)
+          : [makeEmptyPlateNote()]),
+      );
+    },
   };
+};
+
+/** The diagnostics section: a set of readings, and the age-area chart. */
+interface Diagnostics {
+  details: HTMLDetailsElement;
+  update: (metrics: WorldMetrics) => void;
+}
+
+/**
+ * Earth's sea-floor age-area distribution, as a share per 20 Myr bin.
+ *
+ * Ocean floor is created at ridges at a roughly steady rate and consumed at
+ * trenches at a rate proportional to how much of it there is, which gives an
+ * age-area distribution that falls off linearly to zero at the oldest surviving
+ * crust (~180 Myr). Derived here from that straight line rather than typed in,
+ * so it stays tied to {@link EARTH.maxOceanAge}.
+ */
+const earthAgeHistogram = (bins: number): number[] => {
+  const weights: number[] = [];
+  let total = 0;
+  for (let i = 0; i < bins; i++) {
+    const centre = (i + 0.5) * AGE_BIN_MYR;
+    const w = Math.max(0, 1 - centre / EARTH.maxOceanAge);
+    weights.push(w);
+    total += w;
+  }
+  return weights.map((w) => (total > 0 ? w / total : 0));
+};
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const CHART_HEIGHT = 52;
+const CHART_WIDTH = 240;
+/** Gap (in chart units) between neighbouring bars, so fills never touch. */
+const BAR_GAP = 2;
+
+/**
+ * The diagnostics section: how Earth-like the world currently is.
+ *
+ * Every reading is shown beside the real Earth value it is trying to reach, so
+ * a change to the physics can be judged instead of admired. The chart is the
+ * sharpest of them: sea-floor age-area, against the straight line Earth's falls
+ * along. A world that subducts too little grows an old tail; one that subducts
+ * everything young collapses toward the first bin.
+ */
+const makeDiagnostics = (): Diagnostics => {
+  const details = document.createElement("details");
+  details.open = true;
+  Object.assign(details.style, {
+    marginTop: "10px",
+    marginBottom: "6px",
+    borderTop: "1px solid rgba(120, 140, 180, 0.18)",
+    paddingTop: "6px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const summary = document.createElement("summary");
+  summary.textContent = "Diagnostics";
+  Object.assign(summary.style, {
+    cursor: "pointer",
+    opacity: "0.9",
+    marginBottom: "8px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  // Readings: label, this world, Earth. Three columns so the comparison reads
+  // across rather than needing the numbers held in mind.
+  const grid = document.createElement("div");
+  Object.assign(grid.style, {
+    display: "grid",
+    gridTemplateColumns: "1fr auto auto",
+    columnGap: "10px",
+    rowGap: "3px",
+    fontVariantNumeric: "tabular-nums",
+    marginBottom: "10px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const heading = (text: string, align: string): HTMLDivElement => {
+    const el = document.createElement("div");
+    el.textContent = text;
+    Object.assign(el.style, {
+      opacity: "0.5",
+      fontSize: "11px",
+      textAlign: align,
+    } satisfies Partial<CSSStyleDeclaration>);
+    return el;
+  };
+  grid.append(
+    heading("", "left"),
+    heading("world", "right"),
+    heading("Earth", "right"),
+  );
+
+  const addRow = (label: string, earth: string): HTMLDivElement => {
+    const name = document.createElement("div");
+    name.textContent = label;
+    name.style.opacity = "0.8";
+    const value = document.createElement("div");
+    value.style.textAlign = "right";
+    value.textContent = "--";
+    const target = document.createElement("div");
+    target.textContent = earth;
+    Object.assign(target.style, {
+      textAlign: "right",
+      opacity: "0.45",
+    } satisfies Partial<CSSStyleDeclaration>);
+    grid.append(name, value, target);
+    return value;
+  };
+
+  const elapsedValue = addRow("Elapsed", "--");
+  const plateValue = addRow(
+    "Plates (major)",
+    `${EARTH.totalPlates} (${EARTH.majorPlates})`,
+  );
+  const continentValue = addRow(
+    "Continental",
+    `${Math.round(EARTH.continentalArea * 100)}%`,
+  );
+  const ageValue = addRow(
+    "Ocean age mean/max",
+    `${EARTH.meanOceanAge}/${EARTH.maxOceanAge}`,
+  );
+  const recycleValue = addRow(
+    "Ocean recycling",
+    `${EARTH.oceanRecyclingMyr} Myr`,
+  );
+  const boundaryValue = addRow("Conv/div/trans %", "");
+  const driveValue = addRow(
+    "Speed vs trench",
+    `+${EARTH.speedTrenchCorrelation.toFixed(1)}`,
+  );
+
+  // --- Sea-floor age-area chart -------------------------------------------
+  const chartTitle = document.createElement("div");
+  chartTitle.textContent = "Sea floor by age (share of ocean)";
+  Object.assign(chartTitle.style, {
+    opacity: "0.6",
+    fontSize: "11px",
+    marginBottom: "4px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  Object.assign(svg.style, {
+    display: "block",
+    width: "100%",
+    height: `${CHART_HEIGHT}px`,
+    overflow: "visible",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const reference = earthAgeHistogram(AGE_BINS);
+  const barWidth = CHART_WIDTH / AGE_BINS;
+
+  const bars: SVGRectElement[] = [];
+  const labels: SVGTitleElement[] = [];
+  for (let i = 0; i < AGE_BINS; i++) {
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("x", String(i * barWidth + BAR_GAP / 2));
+    rect.setAttribute("width", String(Math.max(1, barWidth - BAR_GAP)));
+    rect.setAttribute("rx", "2");
+    rect.setAttribute("fill", CHART_INK);
+    const title = document.createElementNS(SVG_NS, "title");
+    rect.append(title);
+    svg.append(rect);
+    bars.push(rect);
+    labels.push(title);
+  }
+
+  // Earth's distribution, over the bars: an annotation, so it is dashed and in
+  // muted ink rather than competing as a second series.
+  const referenceLine = document.createElementNS(SVG_NS, "polyline");
+  referenceLine.setAttribute("fill", "none");
+  referenceLine.setAttribute("stroke", CHART_REFERENCE_INK);
+  referenceLine.setAttribute("stroke-width", "1.5");
+  referenceLine.setAttribute("stroke-dasharray", "4 3");
+  referenceLine.setAttribute("vector-effect", "non-scaling-stroke");
+  const referenceTitle = document.createElementNS(SVG_NS, "title");
+  referenceTitle.textContent = "Earth: linear falloff to ~180 Myr";
+  referenceLine.append(referenceTitle);
+  svg.append(referenceLine);
+
+  const axis = document.createElement("div");
+  Object.assign(axis.style, {
+    display: "flex",
+    justifyContent: "space-between",
+    opacity: "0.45",
+    fontSize: "10px",
+    marginTop: "2px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  const youngEnd = document.createElement("span");
+  youngEnd.textContent = "0";
+  const oldEnd = document.createElement("span");
+  oldEnd.textContent = `${AGE_BIN_MYR * AGE_BINS}+ Myr`;
+  const key = document.createElement("span");
+  key.textContent = "- - Earth";
+  key.style.opacity = "0.8";
+  axis.append(youngEnd, key, oldEnd);
+
+  details.append(summary, grid, chartTitle, svg, axis);
+
+  const update = (metrics: WorldMetrics): void => {
+    elapsedValue.textContent = `${Math.round(metrics.elapsedMyr)} Myr`;
+    plateValue.textContent = `${metrics.plateCount} (${metrics.majorPlateCount})`;
+    continentValue.textContent = `${(metrics.continentalArea * 100).toFixed(1)}%`;
+    ageValue.textContent = `${Math.round(metrics.meanOceanAge)}/${Math.round(
+      metrics.maxOceanAge,
+    )}`;
+    recycleValue.textContent =
+      metrics.oceanRecyclingMyr === null
+        ? "never"
+        : `${Math.round(metrics.oceanRecyclingMyr)} Myr`;
+    const [conv, div, trans] = metrics.boundaryShare;
+    boundaryValue.textContent = `${Math.round(conv * 100)}/${Math.round(
+      div * 100,
+    )}/${Math.round(trans * 100)}`;
+    driveValue.textContent =
+      metrics.speedTrenchCorrelation === null
+        ? "--"
+        : formatSigned(metrics.speedTrenchCorrelation);
+
+    // One scale for both, so the bars can be read against the reference; a
+    // little headroom keeps the tallest bar off the top edge.
+    const peak = Math.max(...metrics.ageHistogram, ...reference, 0.01);
+    const scale = CHART_HEIGHT / (peak * 1.1);
+
+    for (let i = 0; i < AGE_BINS; i++) {
+      const share = metrics.ageHistogram[i] ?? 0;
+      const height = share * scale;
+      bars[i].setAttribute("y", String(CHART_HEIGHT - height));
+      bars[i].setAttribute("height", String(Math.max(0, height)));
+      const from = i * AGE_BIN_MYR;
+      const to = from + AGE_BIN_MYR;
+      labels[i].textContent = `${from}-${to} Myr: ${(share * 100).toFixed(
+        1,
+      )}% of ocean floor`;
+    }
+    referenceLine.setAttribute(
+      "points",
+      reference
+        .map(
+          (share, i) =>
+            `${i * barWidth + barWidth / 2},${CHART_HEIGHT - share * scale}`,
+        )
+        .join(" "),
+    );
+  };
+
+  return { details, update };
+};
+
+/** A correlation with its sign always shown, so -0.1 and +0.1 do not read alike. */
+const formatSigned = (value: number): string =>
+  `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+
+/** Placeholder shown while the world has no plates to list. */
+const makeEmptyPlateNote = (): HTMLDivElement => {
+  const empty = document.createElement("div");
+  empty.textContent = "No plates yet.";
+  Object.assign(empty.style, {
+    opacity: "0.6",
+    fontSize: "11px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  return empty;
+};
+
+/**
+ * One plate row: a swatch in the plate's overlay colour, its stable id (the same
+ * id the data view labels cells with), an arrow glyph rotated to its heading,
+ * and its speed, bearing and share of the globe underneath.
+ *
+ * Speed is converted out of the simulation's rad/Myr into the cm/yr plate
+ * motions are normally quoted in, so the numbers can be sanity-checked against
+ * the real Earth (a few cm/yr).
+ */
+const makePlateRow = (plate: PlateSummary): HTMLDivElement => {
+  const row = document.createElement("div");
+  Object.assign(row.style, {
+    padding: "4px 0",
+    borderBottom: "1px solid rgba(120, 140, 180, 0.12)",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const head = document.createElement("div");
+  Object.assign(head.style, {
+    display: "flex",
+    alignItems: "center",
+    gap: "7px",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const swatch = document.createElement("span");
+  Object.assign(swatch.style, {
+    width: "11px",
+    height: "11px",
+    borderRadius: "3px",
+    flex: "0 0 auto",
+    background: toCssRgb(colourForPlate(plate.id)),
+    border: "1px solid rgba(0, 0, 0, 0.35)",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const name = document.createElement("span");
+  name.textContent = `Plate ${plate.id}`;
+  Object.assign(name.style, {
+    flex: "1 1 auto",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  // The glyph points north at 0 deg and rotates clockwise, which is exactly how
+  // the bearing is measured -- so the rotation is the bearing, unmodified.
+  const heading = document.createElement("span");
+  heading.textContent = plate.heading === null ? "·" : "↑";
+  Object.assign(heading.style, {
+    flex: "0 0 auto",
+    opacity: plate.heading === null ? "0.4" : "0.95",
+    transform:
+      plate.heading === null
+        ? "none"
+        : `rotate(${plate.heading.toFixed(1)}deg)`,
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  head.append(swatch, name, heading);
+
+  const detail = document.createElement("div");
+  const share = `${(plate.areaShare * 100).toFixed(1)}% of globe`;
+  detail.textContent =
+    plate.heading === null
+      ? `still · ${share}`
+      : `${(plate.speed * CM_PER_YR_PER_RAD_MYR).toFixed(1)} cm/yr · ` +
+        `${plate.heading.toFixed(0).padStart(3, "0")}° · ${share}`;
+  Object.assign(detail.style, {
+    marginLeft: "18px",
+    fontSize: "11px",
+    opacity: "0.65",
+    fontVariantNumeric: "tabular-nums",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  row.append(head, detail);
+  return row;
 };
 
 interface Panel {

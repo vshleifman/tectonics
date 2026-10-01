@@ -26,16 +26,16 @@ const CONTINENTAL = 1;
  * relaxation pass pulls toward.
  */
 export const baselineElevation = (
-    crustType: number,
-    age: number,
-    thickness: number,
+  crustType: number,
+  age: number,
+  thickness: number,
 ): number => {
-    if (crustType === CONTINENTAL) {
-        const extra = Math.max(0, thickness - tuning.continentThicknessRef);
-        return tuning.continentBase + extra * tuning.continentThicknessGain;
-    }
-    const t = clamp01(age / tuning.maxOceanicAge);
-    return lerp(tuning.ridgeElevation, tuning.abyssElevation, t);
+  if (crustType === CONTINENTAL) {
+    const extra = Math.max(0, thickness - tuning.continentThicknessRef);
+    return tuning.continentBase + extra * tuning.continentThicknessGain;
+  }
+  const t = clamp01(age / tuning.maxOceanicAge);
+  return lerp(tuning.ridgeElevation, tuning.abyssElevation, t);
 };
 
 /**
@@ -62,66 +62,66 @@ export const baselineElevation = (
  * interface and flat typed arrays, so it can move into a Worker / WASM.
  */
 export const applyElevation = (
-    mesh: CellMesh,
-    data: CellData,
-    dtMyr: number,
-    boundaries: BoundaryField,
+  mesh: CellMesh,
+  data: CellData,
+  dtMyr: number,
+  boundaries: BoundaryField,
 ): void => {
-    const { arcKind, arcClosing } = boundaries;
-    const { arcCells, arcCount } = mesh.boundaryGraph();
+  const { arcKind, arcClosing } = boundaries;
+  const { arcCells, arcCount } = mesh.boundaryGraph();
 
-    // Pass A: boundary forces.
-    for (let a = 0; a < arcCount; a++) {
-        const kind = arcKind[a];
-        if (kind === BoundaryKind.NONE) continue;
+  // Pass A: boundary forces.
+  for (let a = 0; a < arcCount; a++) {
+    const kind = arcKind[a];
+    if (kind === BoundaryKind.NONE) continue;
 
-        const cellA = arcCells[a * 2];
-        const cellB = arcCells[a * 2 + 1];
-        if (cellA < 0 || cellB < 0) continue;
+    const cellA = arcCells[a * 2];
+    const cellB = arcCells[a * 2 + 1];
+    if (cellA < 0 || cellB < 0) continue;
 
-        // `arcClosing` is the signed normal speed (+ closing); its magnitude is the
-        // interaction intensity that scales the per-tick relief increment.
-        const drive = Math.abs(arcClosing[a]) * dtMyr;
+    // `arcClosing` is the signed normal speed (+ closing); its magnitude is the
+    // interaction intensity that scales the per-tick relief increment.
+    const drive = Math.abs(arcClosing[a]) * dtMyr;
 
-        if (kind === BoundaryKind.CONVERGENT) {
-            const bothContinental =
-                data.crustType[cellA] === CONTINENTAL &&
-                data.crustType[cellB] === CONTINENTAL;
-            if (bothContinental) {
-                // Collision range: neither subducts, so both sides pile up.
-                const up = tuning.collisionUplift * drive;
-                data.elevation[cellA] += up;
-                data.elevation[cellB] += up;
-            } else {
-                // Subduction: the denser cell sinks into a trench (matching advect's
-                // density-driven rule), the buoyant one rises into a volcanic arc.
-                const aDenser = data.density[cellA] >= data.density[cellB];
-                const trenchCell = aDenser ? cellA : cellB;
-                const arcCell = aDenser ? cellB : cellA;
-                data.elevation[trenchCell] -= tuning.trenchDeepen * drive;
-                data.elevation[arcCell] += tuning.arcUplift * drive;
-            }
-        } else if (kind === BoundaryKind.DIVERGENT) {
-            // Mid-ocean ridge: shoal both sides toward the crest height.
-            const pull = tuning.ridgePull * dtMyr;
-            data.elevation[cellA] +=
-                (tuning.ridgeElevation - data.elevation[cellA]) * pull;
-            data.elevation[cellB] +=
-                (tuning.ridgeElevation - data.elevation[cellB]) * pull;
-        }
-        // Transform: minimal vertical change, so no force is applied.
+    if (kind === BoundaryKind.CONVERGENT) {
+      const bothContinental =
+        data.crustType[cellA] === CONTINENTAL &&
+        data.crustType[cellB] === CONTINENTAL;
+      if (bothContinental) {
+        // Collision range: neither subducts, so both sides pile up.
+        const up = tuning.collisionUplift * drive;
+        data.elevation[cellA] += up;
+        data.elevation[cellB] += up;
+      } else {
+        // Subduction: the denser cell sinks into a trench (matching advect's
+        // density-driven rule), the buoyant one rises into a volcanic arc.
+        const aDenser = data.density[cellA] >= data.density[cellB];
+        const trenchCell = aDenser ? cellA : cellB;
+        const arcCell = aDenser ? cellB : cellA;
+        data.elevation[trenchCell] -= tuning.trenchDeepen * drive;
+        data.elevation[arcCell] += tuning.arcUplift * drive;
+      }
+    } else if (kind === BoundaryKind.DIVERGENT) {
+      // Mid-ocean ridge: shoal both sides toward the crest height.
+      const pull = tuning.ridgePull * dtMyr;
+      data.elevation[cellA] +=
+        (tuning.ridgeElevation - data.elevation[cellA]) * pull;
+      data.elevation[cellB] +=
+        (tuning.ridgeElevation - data.elevation[cellB]) * pull;
     }
+    // Transform: minimal vertical change, so no force is applied.
+  }
 
-    // Pass B: isostatic relaxation toward each cell's crust baseline.
-    const relax = clamp01(tuning.relaxRate * dtMyr);
-    for (let i = 0; i < mesh.cellCount; i++) {
-        const base = baselineElevation(
-            data.crustType[i],
-            data.age[i],
-            data.thickness[i],
-        );
-        let e = data.elevation[i] + (base - data.elevation[i]) * relax;
-        e = clamp(e, tuning.elevationMin, tuning.elevationMax);
-        data.elevation[i] = e;
-    }
+  // Pass B: isostatic relaxation toward each cell's crust baseline.
+  const relax = clamp01(tuning.relaxRate * dtMyr);
+  for (let i = 0; i < mesh.cellCount; i++) {
+    const base = baselineElevation(
+      data.crustType[i],
+      data.age[i],
+      data.thickness[i],
+    );
+    let e = data.elevation[i] + (base - data.elevation[i]) * relax;
+    e = clamp(e, tuning.elevationMin, tuning.elevationMax);
+    data.elevation[i] = e;
+  }
 };

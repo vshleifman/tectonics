@@ -6,6 +6,8 @@ import type { BoundaryField } from "./boundaries";
 import { applyCrustLifecycle } from "./crustLifecycle";
 import { applyElevation } from "./elevation";
 import type { AdvectionField } from "./massBudget";
+import { updatePlateIdentity } from "./plateLifecycle";
+import { updateRifting } from "./rifting";
 import { updateSutures } from "./sutures";
 
 /**
@@ -25,7 +27,11 @@ import { updateSutures } from "./sutures";
  *
  * Suture bookkeeping runs first, on `src`, so that a collision that has welded
  * into a single mass -- or two plates that have finally merged into one -- is
- * already in effect when the crust moves.
+ * already in effect when the crust moves. Plate identity is reconciled straight
+ * after the crust moves, since that is what consumes plates and pinches them
+ * apart; `allocatePlateId` mints the stable id a fragment needs. Rifting runs
+ * last, the one step that *creates* plates, so that the tension it reads is the
+ * tension of the plates as they now stand.
  */
 export const step = (
   mesh: CellMesh,
@@ -35,9 +41,12 @@ export const step = (
   dtMyr: number,
   boundaries: BoundaryField,
   out: AdvectionField,
+  allocatePlateId: () => number,
 ): void => {
   updateSutures(mesh, src, plateData, boundaries, dtMyr);
   advect(mesh, src, dst, plateData, dtMyr, boundaries, out);
+  updatePlateIdentity(mesh, dst, plateData, allocatePlateId);
+  updateRifting(mesh, dst, plateData, dtMyr, allocatePlateId);
   applyCrustLifecycle(mesh, dst, dtMyr, out);
   applyElevation(mesh, dst, dtMyr, boundaries);
 };

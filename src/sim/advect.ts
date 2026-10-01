@@ -55,6 +55,11 @@ const copyCell = (
   dst.crustType[dest] = src.crustType[source];
   dst.age[dest] = src.age[source];
   dst.density[dest] = src.density[source];
+  // Weakness is a property of the lithosphere itself, so it travels with the
+  // crust: a suture carried halfway round the world is still the line the next
+  // rift will follow. Mantle heat is a property of the mantle *below*, which
+  // does not travel with the plate, so it is deliberately not carried here.
+  dst.weakness[dest] = src.weakness[source];
   dst.thickness[dest] =
     source === dest
       ? src.thickness[source]
@@ -213,9 +218,7 @@ export const advect = (
     const aCont = src.crustType[a] === CONTINENTAL;
     const bCont = src.crustType[b] === CONTINENTAL;
     if (aCont !== bCont) return aCont;
-    if (src.density[a] !== src.density[b]) {
-      return src.density[a] < src.density[b];
-    }
+    if (src.age[a] !== src.age[b]) return src.age[a] < src.age[b];
     return a < b;
   };
 
@@ -244,9 +247,24 @@ export const advect = (
   const claimant = new Int32Array(cellCount).fill(-1);
   const eaten = new Uint8Array(cellCount);
 
-  /** Lower rides higher: continental crust outranks any oceanic density. */
+  /**
+   * How readily a cell goes down at a trench: lower rides higher.
+   *
+   * Ranked by *age*, not density. Oceanic crust cools toward a fixed density and
+   * stops changing once it passes {@link Tuning.maxOceanicAge}, so ranking by
+   * density made every piece of old sea floor identical -- and a margin whose
+   * two sides tie is a margin where nothing subducts. A world left running long
+   * enough aged all of its ocean past that point and then simply stopped
+   * recycling: nothing sank, so nothing was young, so nothing sank. Age keeps
+   * separating crust however old it gets, and it is the physical variable
+   * anyway. The older plate is the colder, thicker one, and that is the one that
+   * sinks -- the Pacific under the Philippine Sea, not the other way round.
+   *
+   * Continental crust is scored a full age-scale below the youngest ocean: it is
+   * not merely the more buoyant option, it is the one that cannot go down.
+   */
   const buoyancy = (c: number): number =>
-    src.crustType[c] === CONTINENTAL ? -1 : src.density[c];
+    src.crustType[c] === CONTINENTAL ? -tuning.maxOceanicAge : src.age[c];
 
   // Every place this step drives one plate's crust onto another's, and the
   // per-margin tally of which side is the buoyant one.
@@ -853,79 +871,12 @@ export const advect = (
     }
   }
 
-  // --- Pass 5: contiguity safety net ---------------------------------------
-  // Pass 1 cannot create a detached fragment -- a cell only ever passes to a
-  // plate already holding half its ring -- but consuming a narrow neck can still
-  // pinch a plate in two. Keep each plate's largest component and hand the rest
-  // to the plate that surrounds them, which is a relabel and never destroys
-  // crust.
-  const component = new Int32Array(cellCount).fill(-1);
-  const compPlate: number[] = [];
-  const compArea: number[] = [];
-  const bfs: number[] = [];
-  for (let i = 0; i < cellCount; i++) {
-    if (component[i] >= 0 || dst.plateId[i] < 0) continue;
-    const plate = dst.plateId[i];
-    const comp = compPlate.length;
-    compPlate.push(plate);
-    let areaSum = 0;
-    bfs.length = 0;
-    bfs.push(i);
-    component[i] = comp;
-    for (let head = 0; head < bfs.length; head++) {
-      const c = bfs[head];
-      areaSum += mesh.area(c);
-      const nbrs = mesh.neighbors(c);
-      for (let k = 0; k < nbrs.length; k++) {
-        const n = nbrs[k];
-        if (component[n] < 0 && dst.plateId[n] === plate) {
-          component[n] = comp;
-          bfs.push(n);
-        }
-      }
-    }
-    compArea.push(areaSum);
-  }
-
-  const keptComp = new Map<number, number>();
-  for (let c = 0; c < compPlate.length; c++) {
-    const best = keptComp.get(compPlate[c]);
-    if (best === undefined || compArea[c] > compArea[best]) {
-      keptComp.set(compPlate[c], c);
-    }
-  }
-  const dissolving = (c: number): boolean =>
-    c >= 0 && keptComp.get(compPlate[c]) !== c;
-
-  const erode: number[] = [];
-  for (let i = 0; i < cellCount; i++) {
-    if (!dissolving(component[i])) continue;
-    const nbrs = mesh.neighbors(i);
-    for (let k = 0; k < nbrs.length; k++) {
-      if (!dissolving(component[nbrs[k]])) {
-        erode.push(i);
-        break;
-      }
-    }
-  }
-  for (let head = 0; head < erode.length; head++) {
-    const d = erode[head];
-    if (!dissolving(component[d])) continue; // already converted
-    const nbrs = mesh.neighbors(d);
-    let taker = -1;
-    for (let k = 0; k < nbrs.length; k++) {
-      if (!dissolving(component[nbrs[k]])) {
-        taker = nbrs[k];
-        break;
-      }
-    }
-    if (taker < 0) continue;
-    dst.plateId[d] = dst.plateId[taker];
-    component[d] = component[taker];
-    for (let k = 0; k < nbrs.length; k++) {
-      if (dissolving(component[nbrs[k]])) erode.push(nbrs[k]);
-    }
-  }
+  // Contiguity is deliberately NOT enforced here. Consuming a narrow neck can
+  // pinch a plate in two, and two disconnected pieces are two plates: nothing
+  // holds them to a common motion any more. Forcing them back together was what
+  // made plate fragmentation -- the Farallon's fate -- impossible. The split is
+  // resolved by `updatePlateIdentity`, which promotes a genuine fragment to a
+  // plate of its own and absorbs anything too small to be one.
 
   out.subductedThisStep = subductedThisStep;
   out.subductedTotal += subductedThisStep;

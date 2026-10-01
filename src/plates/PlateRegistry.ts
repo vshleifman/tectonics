@@ -36,6 +36,16 @@ export class PlateRegistry {
   /** Stable ids currently carrying cells, to compute retirements. */
   private liveIds = new Set<number>();
 
+  /**
+   * Take the next stable id. Used when the simulation itself creates a plate —
+   * a fragment pinched off an existing one, or a rift splitting a plate in two —
+   * so that sim-born and fill-born plates draw from the same monotonic sequence
+   * and can never collide.
+   */
+  allocate(): number {
+    return this.nextId++;
+  }
+
   /** Forget all identity (call when the world is rebuilt from scratch). */
   reset(): void {
     this.nextId = 0;

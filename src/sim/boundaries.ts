@@ -1,5 +1,13 @@
 import type { CellData } from "../data/CellData";
-import { dot, normalise, sub, tangent, type Vec3 } from "../math/vec3";
+import { clamp } from "../math/scalar";
+import {
+  dot,
+  normalise,
+  readVec3,
+  sub,
+  tangent,
+  type Vec3,
+} from "../math/vec3";
 import type { CellMesh } from "../mesh/CellMesh";
 import { type PlateData, sutureKey } from "../plates/PlateData";
 import { tuning } from "./tuning";
@@ -24,6 +32,22 @@ export type BoundaryKindValue =
  * (`NONE`) now lives in {@link tuning} (as `activeSpeedEps`) so the UI can tweak
  * it live; it is read inside {@link classifyBoundaries} below.
  */
+
+/**
+ * Length of boundary arc `a` on the unit sphere: the great-circle angle between
+ * its two junctions.
+ *
+ * Every per-arc force and tally is weighted by this, so that summing over a
+ * boundary is a line integral along it rather than a count of however many arcs
+ * the current subdivision happens to have cut it into — the same boundary then
+ * pulls equally hard at every resolution.
+ */
+export const arcLength = (mesh: CellMesh, a: number): number => {
+  const { arcEnds, junctionPos } = mesh.boundaryGraph();
+  const j0 = readVec3(junctionPos, arcEnds[a * 2]);
+  const j1 = readVec3(junctionPos, arcEnds[a * 2 + 1]);
+  return Math.acos(clamp(dot(j0, j1), -1, 1));
+};
 
 /**
  * Boundary classification for one mesh, in two synchronised representations:

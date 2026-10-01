@@ -30,6 +30,35 @@ export class CellData {
    */
   readonly thickness: Float32Array;
 
+  /**
+   * How much weaker than intact lithosphere this cell is, in [0, 1].
+   *
+   * Lithosphere remembers where it has been broken. A suture -- the seam where
+   * two continents were welded together -- and the rifted margin left behind
+   * when a continent split are both permanently weaker than the crust around
+   * them, and both stay weak for billions of years. So the next rift does not
+   * open somewhere new: it reopens an old line. The Atlantic tore Pangaea apart
+   * along very nearly the suture where the Appalachians and Caledonides had been
+   * built when the previous ocean closed. This field is what carries that memory
+   * from one Wilson cycle to the next.
+   */
+  readonly weakness: Float32Array;
+
+  /**
+   * Heat accumulated in the mantle beneath this cell, in [0, 1].
+   *
+   * Continental crust is a blanket: it conducts heat poorly, so mantle under a
+   * large continent cannot shed its heat and warms until the lithosphere above
+   * is weak enough to tear. This is the leading explanation for why
+   * supercontinents do not last -- Pangaea assembled and then broke up, and so
+   * did Rodinia and Columbia before it. Oceanic crust is thin and lets heat out,
+   * so the field cools wherever the continent is gone.
+   *
+   * Only maintained while {@link SimOptions.supercontinentInsulation} is on;
+   * with it off the field stays zero and costs nothing.
+   */
+  readonly mantleHeat: Float32Array;
+
   constructor(cellCount: number) {
     this.elevation = new Float32Array(cellCount);
     this.plateId = new Int32Array(cellCount);
@@ -37,6 +66,8 @@ export class CellData {
     this.age = new Float32Array(cellCount);
     this.density = new Float32Array(cellCount);
     this.thickness = new Float32Array(cellCount);
+    this.weakness = new Float32Array(cellCount);
+    this.mantleHeat = new Float32Array(cellCount);
   }
 }
 

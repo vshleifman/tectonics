@@ -49,7 +49,7 @@ export const colourForCell = (
  * Debug palette for the boundary view: interiors and inactive boundaries read
  * neutral grey, convergent red, divergent blue, transform yellow.
  */
-const colourForBoundary = (kind: number): Rgb => {
+export const colourForBoundary = (kind: number): Rgb => {
   switch (kind) {
     case BoundaryKind.CONVERGENT:
       return [0.86, 0.21, 0.18];
@@ -131,7 +131,7 @@ const colourForElevation = (elevation: number, seaLevel: number): Rgb => {
 };
 
 /** Golden-ratio hue stepping gives every plate a distinct, stable colour. */
-const colourForPlate = (plateId: number): Rgb => {
+export const colourForPlate = (plateId: number): Rgb => {
   if (plateId < 0) return [0.5, 0.5, 0.5];
   const hue = (plateId * 0.6180339887498949) % 1;
   return hslToRgb(hue, 0.55, 0.55);
@@ -153,6 +153,10 @@ const hslToRgb = (h: number, s: number, l: number): Rgb => {
   const m = l - c / 2;
   return [r + m, g + m, b + m];
 };
+
+/** An `Rgb` as a CSS colour, for DOM swatches that must match the 3D scene. */
+export const toCssRgb = ([r, g, b]: Rgb): string =>
+  `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
 
 /** Per-channel linear interpolation between two colours. */
 const mix = (a: Rgb, b: Rgb, t: number): Rgb => [

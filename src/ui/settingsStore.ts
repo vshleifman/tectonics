@@ -20,6 +20,8 @@ export interface Settings {
   showVelocities: boolean;
   showPlates: boolean;
   running: boolean;
+  /** Simulation ticks attempted per second of wall clock. */
+  ticksPerSecond: number;
 }
 
 /** Listener fired after a `set`, told which keys actually changed. */

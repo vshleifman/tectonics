@@ -1,7 +1,14 @@
 import type { CellData } from "../data/CellData";
 import { makeRng } from "../data/CellData";
 import { clamp01 } from "../math/scalar";
-import { cross, normalise, type Vec3 } from "../math/vec3";
+import {
+  cross,
+  dot,
+  length,
+  normalise,
+  tangent,
+  type Vec3,
+} from "../math/vec3";
 import type { CellMesh } from "../mesh/CellMesh";
 import { baselineElevation } from "../sim/elevation";
 import { tuning } from "../sim/tuning";
@@ -58,6 +65,27 @@ export class PlateData {
    */
   readonly sutures = new Map<number, number>();
 
+  /**
+   * How long (Myr) each pair of neighbouring plates has been moving as one
+   * without being welded, keyed by {@link sutureKey}.
+   *
+   * A plate boundary does not need a collision to stop being a boundary. Let the
+   * relative motion across it fall to nothing and the two plates are simply one
+   * plate with a line drawn on it. Spreading in the Labrador Sea stopped about
+   * 33 million years ago; Greenland has moved with North America ever since, and
+   * is no longer a plate of its own. Nothing collided and nothing welded — the
+   * boundary just went quiet.
+   */
+  readonly quietContacts = new Map<number, number>();
+
+  /**
+   * How hard each plate is being pulled apart, refreshed every time the motion
+   * is solved (see `updatePlateMotion`). Derived, not owned: it lives here only
+   * so that rifting can read what the force balance already worked out instead
+   * of walking every boundary a second time.
+   */
+  readonly stress = new Map<number, PlateStress>();
+
   /** Number of live plates. */
   get count(): number {
     return this.byId.size;
@@ -100,7 +128,133 @@ export class PlateData {
     for (const [id, sum] of acc) centroids.set(id, normalise(sum));
     return centroids;
   }
+
+  /**
+   * One {@link PlateSummary} per live plate, ordered by stable id, for the plate
+   * list in the UI. Walks the cells once to gather each plate's centroid, cell
+   * count and area, then samples its motion at that centroid.
+   *
+   * A plate with no cells left (possible for a moment between a topology change
+   * and the next relabel) is omitted: there is nowhere to sample it.
+   */
+  summaries(mesh: CellMesh, data: CellData): PlateSummary[] {
+    interface Accumulator {
+      sum: [number, number, number];
+      cellCount: number;
+      area: number;
+    }
+    const acc = new Map<number, Accumulator>();
+    let totalArea = 0;
+
+    for (let i = 0; i < mesh.cellCount; i++) {
+      const area = mesh.area(i);
+      totalArea += area;
+      const id = data.plateId[i];
+      if (id < 0) continue;
+      const pos = mesh.position(i);
+      const entry = acc.get(id);
+      if (entry) {
+        entry.sum[0] += pos[0];
+        entry.sum[1] += pos[1];
+        entry.sum[2] += pos[2];
+        entry.cellCount++;
+        entry.area += area;
+      } else {
+        acc.set(id, {
+          sum: [pos[0], pos[1], pos[2]],
+          cellCount: 1,
+          area,
+        });
+      }
+    }
+
+    const summaries: PlateSummary[] = [];
+    for (const [id, entry] of acc) {
+      const centroid = normalise(entry.sum);
+      const velocity = this.linearVelocity(id, centroid);
+      const speed = length(velocity);
+      summaries.push({
+        id,
+        cellCount: entry.cellCount,
+        areaShare: totalArea > 0 ? entry.area / totalArea : 0,
+        centroid,
+        speed,
+        heading: speed > 1e-9 ? bearingAt(centroid, velocity) : null,
+      });
+    }
+    summaries.sort((a, b) => a.id - b.id);
+    return summaries;
+  }
 }
+
+/**
+ * The extensional state of one plate: how hard it is being pulled apart, and
+ * along which line.
+ *
+ * A plate with a single slab hanging off one edge is simply towed along. A plate
+ * with slabs pulling from opposite edges is being *stretched*, and stretched
+ * lithosphere eventually tears — this is what breaks a large plate up, and it is
+ * why the plates that break are the big ones with several subducting margins.
+ */
+export interface PlateStress {
+  /**
+   * Tension per unit area: how much of the pull on this plate is opposed pull
+   * that cancels in the total rather than moving the plate. Zero for a plate
+   * towed in one direction, whatever its speed.
+   */
+  tension: number;
+  /** Unit axis along which the plate is being stretched. */
+  axis: Vec3;
+}
+
+/**
+ * A plate boiled down to what a reader needs to identify it and see where it is
+ * going: how much of the world it covers and how fast, and in which compass
+ * direction, its surface is moving at its centroid. Derived on demand from the
+ * live crust; nothing here is stored.
+ */
+export interface PlateSummary {
+  /** Stable plate id — the same id the per-cell data view labels cells with. */
+  id: number;
+  /** Cells currently belonging to this plate. */
+  cellCount: number;
+  /** Share of the globe's surface this plate covers, in [0, 1]. */
+  areaShare: number;
+  /** Unit-sphere centroid, where the speed and heading below are sampled. */
+  centroid: Vec3;
+  /** Surface speed at the centroid (rad/Myr). */
+  speed: number;
+  /**
+   * Compass bearing of the motion at the centroid: degrees clockwise from north,
+   * in [0, 360). `null` when the plate is effectively still (no direction to
+   * report) or sits exactly on a pole, where "north" is undefined.
+   */
+  heading: number | null;
+}
+
+/**
+ * Earth's radius (km). The simulation works in radians of arc per Myr, which is
+ * scale-free; this is the one place a real planet size enters, so that speeds
+ * can be shown in the cm/yr geologists actually quote.
+ */
+export const EARTH_RADIUS_KM = 6371;
+
+/** One rad/Myr of surface motion at Earth's radius, expressed in cm/yr. */
+export const CM_PER_YR_PER_RAD_MYR = (EARTH_RADIUS_KM * 1e5) / 1e6;
+
+/**
+ * Compass bearing (degrees clockwise from north, in [0, 360)) of a tangent
+ * vector `v` at unit-sphere point `p`, or `null` at the poles where north is
+ * undefined. `y` is the polar axis (see `projection.ts`).
+ */
+const bearingAt = (p: Vec3, v: Vec3): number | null => {
+  const north = tangent([0, 1, 0], p);
+  if (length(north) < 1e-6) return null; // on a pole: no meaningful bearing
+  const n = normalise(north);
+  const east = normalise(cross(p, [0, 1, 0]));
+  const degrees = (Math.atan2(dot(v, east), dot(v, n)) * 180) / Math.PI;
+  return (degrees + 360) % 360;
+};
 
 /**
  * Density bounds, derived live from {@link tuning} so the renderer's density
