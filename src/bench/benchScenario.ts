@@ -38,6 +38,15 @@ export interface TrajectoryPoint {
   plateCount: number;
   majorPlateCount: number;
   continentalArea: number;
+  continentalMassShare: number;
+  meanContinentalThickness: number;
+  thinContinentalArea: number;
+  continentalisedByAccretion: number;
+  continentalisedBySpreading: number;
+  continentalEroded: number;
+  delaminated: number;
+  foundered: number;
+  decontinentalised: number;
   meanOceanAge: number;
   maxOceanAge: number;
   oceanRecyclingMyr: number | null;
@@ -104,6 +113,15 @@ export const runBench = (
       plateCount: m.plateCount,
       majorPlateCount: m.majorPlateCount,
       continentalArea: m.continentalArea,
+      continentalMassShare: m.continentalMassShare,
+      meanContinentalThickness: m.meanContinentalThickness,
+      thinContinentalArea: m.thinContinentalArea,
+      continentalisedByAccretion: m.continentalisedByAccretion,
+      continentalisedBySpreading: m.continentalisedBySpreading,
+      continentalEroded: m.continentalEroded,
+      delaminated: m.delaminated,
+      foundered: m.foundered,
+      decontinentalised: m.decontinentalised,
       meanOceanAge: m.meanOceanAge,
       maxOceanAge: m.maxOceanAge,
       oceanRecyclingMyr: m.oceanRecyclingMyr,
@@ -129,6 +147,32 @@ export const runBench = (
   };
 };
 
+const percent = (x: number, digits: number): string =>
+  `${(x * 100).toFixed(digits)}%`;
+
+/**
+ * Where continental area came from and where continental mass went, averaged
+ * over the second half of the run so a single quiet or busy tick cannot skew
+ * it.
+ */
+const describeContinentalBudget = (r: BenchResult): string => {
+  const points = r.trajectory.slice(Math.floor(r.trajectory.length / 2));
+  if (points.length === 0) return "";
+  const mean = (key: keyof TrajectoryPoint): number =>
+    points.reduce((sum, p) => sum + Number(p[key] ?? 0), 0) / points.length;
+  const last = points[points.length - 1];
+  return (
+    ` | continents: area ${percent(last.continentalArea, 1)}, mass ${percent(last.continentalMassShare, 1)}, ` +
+    `mean ${last.meanContinentalThickness.toFixed(1)} km, thin ${percent(last.thinContinentalArea, 2)}; ` +
+    `gain/Myr accretion ${percent(mean("continentalisedByAccretion"), 4)} ` +
+    `spreading ${percent(mean("continentalisedBySpreading"), 4)}; ` +
+    `loss/Myr erosion ${percent(mean("continentalEroded"), 4)} ` +
+    `delamination ${percent(mean("delaminated"), 4)} ` +
+    `founder ${percent(mean("foundered"), 4)}; ` +
+    `revert/Myr ${percent(mean("decontinentalised"), 4)}`
+  );
+};
+
 /** One-line human summary of a run, for the console. */
 export const describeBench = (r: BenchResult): string => {
   const last = r.trajectory[r.trajectory.length - 1];
@@ -142,7 +186,8 @@ export const describeBench = (r: BenchResult): string => {
     `(${passes})` +
     (last
       ? ` | final: plates ${last.plateCount}, cont ${(last.continentalArea * 100).toFixed(1)}%, ` +
-        `ocean age ${last.meanOceanAge.toFixed(1)}, drift ${(last.drift * 100).toFixed(3)}%`
+        `ocean age ${last.meanOceanAge.toFixed(1)}, drift ${(last.drift * 100).toFixed(3)}%` +
+        describeContinentalBudget(r)
       : "")
   );
 };

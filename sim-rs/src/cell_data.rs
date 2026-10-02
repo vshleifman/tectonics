@@ -17,7 +17,17 @@ pub struct CellData {
     pub weakness: Vec<f32>,
     /// Heat in the mantle beneath each cell; stays put by position.
     pub mantle_heat: Vec<f32>,
+    /// Length (radians) of slab descending beneath this cell from the plate
+    /// across the margin. Non-zero marks the cell as the overriding side of a
+    /// trench; travels with the crust.
+    pub slab: Vec<f32>,
+    /// Which side of a rift that is still stretching the cell lies on:
+    /// 0 for none, otherwise [`RIFT_NEAR`] or [`RIFT_FAR`]. Travels with crust.
+    pub rift_side: Vec<u8>,
 }
+
+pub const RIFT_NEAR: u8 = 1;
+pub const RIFT_FAR: u8 = 2;
 
 impl CellData {
     pub fn new(n: usize) -> CellData {
@@ -30,6 +40,8 @@ impl CellData {
             thickness: vec![0.0; n],
             weakness: vec![0.0; n],
             mantle_heat: vec![0.0; n],
+            slab: vec![0.0; n],
+            rift_side: vec![0; n],
         }
     }
 }

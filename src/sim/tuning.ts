@@ -52,6 +52,32 @@ export interface Tuning {
    * heavier. Beyond this, older crust pulls no harder.
    */
   slabPullSaturationAge: number;
+  /**
+   * Length of slab (radians of arc subducted) a trench needs before it pulls at
+   * full strength. A slab only exists where crust has actually gone down, so a
+   * new subduction zone has to converge this far before it can drive a plate,
+   * and a boundary that merely touches pulls nothing.
+   */
+  slabFullLength: number;
+  /**
+   * Myr over which a slab sinks away once its trench stops converging. Until
+   * then it keeps pulling, and it keeps its polarity: the side that was
+   * overriding stays overriding rather than the two plates trading places.
+   */
+  slabDecayTime: number;
+  /**
+   * Myr for old, fully cooled ocean at a margin that is not spreading to
+   * founder into a full slab of its own, with no convergence to push it down.
+   * This is how new subduction zones start; without it the trenches a world
+   * begins with are the only ones it ever gets.
+   */
+  slabInitiationTime: number;
+  /**
+   * Myr a plate takes to settle onto the motion its forces call for. Slabs and
+   * keels do not change direction overnight; at 0 a plate jumps straight to the
+   * new balance each tick, which lets it reverse in a single step.
+   */
+  motionResponseTime: number;
   /** Push per unit length of ridge, per km of flank relief (0 disables). */
   ridgeWeight: number;
   /**
@@ -112,6 +138,13 @@ export interface Tuning {
   /** Thickness (km) above which accreted oceanic crust becomes continental. */
   continentalThicknessThreshold: number;
   /**
+   * Thickness (km) below which continental crust reverts to oceanic. Kept below
+   * {@link continentalThicknessThreshold} so a cell on the cusp cannot flicker
+   * between types. Stretched or eroded continent thinned this far is no longer
+   * counted as continental area.
+   */
+  continentalRevertThickness: number;
+  /**
    * Thickness (km) a crustal root can carry before it starts to founder. This is
    * the headroom a continent-continent collision has to pile into: set it near
    * the continental threshold and colliding continents cannot thicken, so their
@@ -146,8 +179,10 @@ export interface Tuning {
   /**
    * Thickness (km) above which crust starts to spread sideways under its own
    * weight. A crustal root has no strength to hold an arbitrary pile up: real
-   * orogens collapse and flow outwards, which is how a thickened arc turns into
-   * a wide continent instead of a one-cell wall that is destroyed at the cap.
+   * orogens collapse and flow outwards, which is how a collision widens into a
+   * plateau rather than a one-cell wall that is destroyed at the cap. Spreading
+   * only fills neighbouring continental cells, so it cannot flood the ocean and
+   * mint new continent.
    */
   crustSpreadStart: number;
   /** Fraction per Myr of the excess above {@link crustSpreadStart} that flows out. */
@@ -162,6 +197,13 @@ export interface Tuning {
    * area, and at a high value continents stop growing.
    */
   subductionErosion: number;
+  /**
+   * Fraction of a subducting oceanic cell's mass stripped from the continental
+   * margin it dives under. Intra-oceanic arcs are untouched. Combined with
+   * {@link accretionFraction}, the net on an Andean margin is
+   * accretion minus this; when this is larger the margin shrinks.
+   */
+  marginErosion: number;
   /** Density stamped on an empty rift placeholder until the lifecycle fills it. */
   riftDensity: number;
   /**
@@ -172,13 +214,43 @@ export interface Tuning {
 
   // --- Rifting (see sim-rs/src/rifting.rs) ---
   /**
-   * Tension a plate must be under before it tears, per unit area. A plate with
-   * slabs pulling it in opposing directions is in extension; when that exceeds
-   * the strength of the weakest line across it, it rifts and becomes two plates.
-   * This is the counterweight to merging: without it a world only ever loses
-   * plates, and ends up as two hemispheres with nowhere left to make new crust.
+   * Tension intact continental lithosphere must be under before it tears;
+   * oceanic lithosphere is scaled from it by age (see
+   * {@link oceanicStrengthYoung}, {@link oceanicStrengthOld}). A plate with
+   * slabs pulling it in opposing directions is in extension: the pull that
+   * cancels, spread over the plate's mean width across it, so a large plate is
+   * stressed as much as a small one pulled as hard per unit of margin. When that
+   * exceeds the strength of the line it would tear along, it rifts and becomes
+   * two plates. This is the counterweight to merging: without it a world only
+   * ever loses plates, and ends up as two hemispheres with nowhere left to make
+   * new crust.
    */
   riftStrength: number;
+  /**
+   * Strength of oceanic lithosphere fresh from a ridge, as a multiple of
+   * continental. Young, hot, thin lithosphere is the weakest there is, which is
+   * why oceanic plates break up near ridges if they break at all.
+   */
+  oceanicStrengthYoung: number;
+  /**
+   * Strength of fully cooled oceanic lithosphere, as a multiple of continental.
+   * Lithosphere thickens as the square root of its age, so old ocean is the
+   * strongest there is and almost never tears.
+   */
+  oceanicStrengthOld: number;
+  /**
+   * Myr a continental rift stretches before the plate breaks in two. Over that
+   * time the crust along it thins into a basin between raised shoulders, and if
+   * the tension behind it dies away first it stalls as a failed rift: thinned,
+   * left weak, but whole. A rift through ocean takes this times the share of
+   * continent along it, so a purely oceanic one opens at once.
+   */
+  riftDuration: number;
+  /**
+   * How many times over the crust along a rift is thinned by the time it breaks
+   * (the stretching factor). The crust it loses is piled onto the shoulders.
+   */
+  riftStretch: number;
   /** Weakness stamped on the seam where two continents weld into a suture. */
   sutureWeakness: number;
   /** Weakness stamped on a margin left behind where a plate rifted apart. */
@@ -191,12 +263,31 @@ export interface Tuning {
   weaknessDecayTime: number;
   /** How much of a plate's strength the weakest line across it can remove. */
   weaknessRelief: number;
-  /** Fraction of the globe below which a plate is too small to rift at all. */
+  /**
+   * Fraction of the globe each piece must cover when a rift starts, so a plate
+   * smaller than twice this cannot rift at all. Once it has stretched, a rift
+   * breaks as long as both pieces are still big enough to be plates
+   * ({@link minPlateArea}), even if one has since lost crust down a trench.
+   */
   minRiftArea: number;
+  /**
+   * Longest a piece left by a rift may be, as a multiple of its width. A rift
+   * that would leave a longer sliver is not taken (unless the plate was already
+   * more elongated than that), so a plate breaks across its length instead of
+   * being sliced into ever narrower strips.
+   */
+  maxRiftAspect: number;
 
   // --- Supercontinent insulation (optional; see sim-rs/src/rifting.rs) ---
-  /** Rate per Myr at which mantle heat builds under continental crust. */
+  /** Rate per Myr at which mantle heat builds deep under continental crust. */
   insulationRate: number;
+  /**
+   * Distance inland (radians) at which a continent insulates the mantle at the
+   * full {@link insulationRate}; nearer the coast heat escapes sideways and it
+   * builds proportionally slower. So it is large continents, not every
+   * continent, that trap heat and tear themselves apart.
+   */
+  insulationReach: number;
   /** Rate per Myr at which mantle heat escapes under oceanic crust. */
   insulationCooling: number;
   /** How much of a plate's strength fully-built-up mantle heat removes. */
@@ -208,6 +299,20 @@ export interface Tuning {
    * the case Pangaea was, and the reason this term exists at all.
    */
   insulationDrive: number;
+  /**
+   * Push per unit length of plate margin, per unit of mantle heat beneath it
+   * (see sim-rs/src/plate_forces.rs). Lithosphere raised over a hot dome slides
+   * off it, so the two halves of a plate that rifted over heat move apart even
+   * with no slab to pull them. Welded margins are exempt.
+   */
+  domePush: number;
+  /**
+   * Share of the mantle heat under a plate that is vented when it rifts, as
+   * the melting of breakup does. Too little and the pieces, still sitting on
+   * hot mantle, break again within a few ticks, so a supercontinent shatters
+   * at once instead of coming apart in stages.
+   */
+  riftHeatRelease: number;
 
   // --- Plate identity (see sim-rs/src/plate_lifecycle.rs) ---
   /**
@@ -244,6 +349,10 @@ export const defaultTuning: Tuning = {
   slabWeight: 1,
   slabPullOnsetAge: 25,
   slabPullSaturationAge: 80,
+  slabFullLength: 0.1,
+  slabDecayTime: 30,
+  slabInitiationTime: 20,
+  motionResponseTime: 15,
   ridgeWeight: 0.05,
   mantleDrag: 30,
   continentalDrag: 3,
@@ -260,28 +369,38 @@ export const defaultTuning: Tuning = {
   oceanicDensityOld: 3.0,
   oceanicThickness: 7,
   continentalThicknessThreshold: 15,
+  continentalRevertThickness: 10,
   maxCrustThickness: 60,
   delaminationRate: 0.3,
 
-  accretionFraction: 0.2,
+  accretionFraction: 0.35,
   maxThickeningPerMyr: 0.5,
   subductionErosion: 0.05,
-  crustSpreadStart: 16,
+  marginErosion: 0.12,
+  crustSpreadStart: 35,
   crustSpreadRate: 0.05,
   riftDensity: 2.9,
   riftThicknessFloor: 2,
 
-  riftStrength: 1.1,
+  riftStrength: 0.65,
+  oceanicStrengthYoung: 0.6,
+  oceanicStrengthOld: 1.5,
+  riftDuration: 20,
+  riftStretch: 3,
   sutureWeakness: 1,
   riftMarginWeakness: 0.6,
   weaknessDecayTime: 2000,
   weaknessRelief: 0.7,
-  minRiftArea: 0.03,
+  minRiftArea: 0.015,
+  maxRiftAspect: 3,
 
   insulationRate: 0.004,
+  insulationReach: 0.1,
   insulationCooling: 0.01,
   insulationWeakening: 0.6,
   insulationDrive: 1.2,
+  domePush: 0.5,
+  riftHeatRelease: 0.5,
 
   minPlateArea: 0.0005,
 

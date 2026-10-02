@@ -23,7 +23,21 @@ pub struct PlateProps {
 
 #[derive(Clone, Debug)]
 pub struct PlateStress {
-    pub tension: f64,
+    /// Slab pull that cancels out across the plate: a force, which becomes a
+    /// stress once spread over the width of the plate it has to cross.
+    pub opposed_pull: f64,
+    pub axis: Vec3,
+}
+
+/// A rift laid out across a plate that has not yet broken it.
+#[derive(Clone, Debug)]
+pub struct OpeningRift {
+    /// Myr it has been stretching.
+    pub elapsed: f64,
+    /// Myr it must stretch before the plate breaks.
+    pub duration: f64,
+    /// The direction the plate is being pulled apart in, turned with the plate
+    /// as it moves.
     pub axis: Vec3,
 }
 
@@ -36,6 +50,12 @@ pub struct PlateData {
     pub quiet: IndexMap<i64, f64>,
     /// Extensional state from the last force balance.
     pub stress: HashMap<i32, PlateStress>,
+    /// Plates with a rift still stretching.
+    pub opening: IndexMap<i32, OpeningRift>,
+    /// Rifts that broke a plate in two since the world was built.
+    pub rifts: u64,
+    /// Rifts that began to stretch but stalled and healed.
+    pub failed_rifts: u64,
 }
 
 /// Key for an unordered pair of plate ids.
@@ -103,5 +123,6 @@ pub fn initialise_crust(t: &Tuning, data: &mut CellData, seed: &str) {
         data.density[i] = oceanic_density_from_age(t, age) as f32;
         data.thickness[i] = t.oceanic_thickness as f32;
         data.elevation[i] = baseline_elevation(t, OCEANIC, age, t.oceanic_thickness) as f32;
+        data.slab[i] = 0.0;
     }
 }

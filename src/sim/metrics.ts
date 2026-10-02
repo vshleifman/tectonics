@@ -80,6 +80,36 @@ export interface WorldMetrics {
   majorPlateCount: number;
   /** Share of the surface carrying continental crust, in [0, 1]. */
   continentalArea: number;
+  /** Share of all crust mass that is continental, in [0, 1]. */
+  continentalMassShare: number;
+  /** Area-weighted mean thickness of continental crust (km). */
+  meanContinentalThickness: number;
+  /**
+   * Share of the surface flagged continental but thinner than the threshold
+   * that made it so: crust stretched thin that still counts towards
+   * {@link continentalArea}.
+   */
+  thinContinentalArea: number;
+  /**
+   * Share of the surface turned continental per Myr this tick, split by
+   * whether arc accretion or lateral spreading carried it past the threshold.
+   */
+  continentalisedByAccretion: number;
+  continentalisedBySpreading: number;
+  /** Share of the continental mass lost per Myr to subduction erosion. */
+  continentalEroded: number;
+  /** Share of the continental mass shed per Myr by over-thick roots. */
+  delaminated: number;
+  /**
+   * Share of the continental mass per Myr of accreted crust that could not be
+   * taken up at the thickening cap and foundered instead of spilling.
+   */
+  foundered: number;
+  /**
+   * Share of the surface per Myr of continental crust that thinned below the
+   * revert threshold and was reclassified as oceanic.
+   */
+  decontinentalised: number;
   /** Area-weighted mean age of oceanic crust (Myr). */
   meanOceanAge: number;
   /** Age of the oldest surviving oceanic crust (Myr). */

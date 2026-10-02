@@ -128,12 +128,17 @@ fn merge_plates(data: &mut CellData, plates: &mut PlateData, a: i32, b: i32) {
     }
     let keep = if count_a >= count_b { a } else { b };
     let gone = if keep == a { b } else { a };
-    for p in data.plate_id.iter_mut() {
+    // A rift opening across the plate that keeps its identity carries on across
+    // the merged one, its sides spreading onto the crust folded in; one across
+    // the plate folded in is abandoned.
+    for (p, side) in data.plate_id.iter_mut().zip(data.rift_side.iter_mut()) {
         if *p == gone {
             *p = keep;
+            *side = 0;
         }
     }
     plates.by_id.shift_remove(&gone);
+    plates.opening.shift_remove(&gone);
     rehome(&mut plates.sutures, gone, keep);
     rehome(&mut plates.quiet, gone, keep);
 }

@@ -8,6 +8,7 @@ use crate::cell_data::{CONTINENTAL, CellData};
 use crate::math::{Vec3, cross, dot, len3, normalise};
 use crate::mesh::Mesh;
 use crate::plates::PlateData;
+use crate::tuning::Tuning;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -34,6 +35,15 @@ pub struct WorldMetrics {
     pub plate_count: usize,
     pub major_plate_count: usize,
     pub continental_area: f64,
+    pub continental_mass_share: f64,
+    pub mean_continental_thickness: f64,
+    pub thin_continental_area: f64,
+    pub continentalised_by_accretion: f64,
+    pub continentalised_by_spreading: f64,
+    pub continental_eroded: f64,
+    pub delaminated: f64,
+    pub foundered: f64,
+    pub decontinentalised: f64,
     pub mean_ocean_age: f64,
     pub max_ocean_age: f64,
     pub ocean_recycling_myr: Option<f64>,
@@ -61,11 +71,14 @@ pub fn compute_metrics(
     plates: &PlateData,
     boundaries: &BoundaryField,
     advection: &AdvectionField,
-    dt_myr: f64,
+    t: &Tuning,
     elapsed_myr: f64,
 ) -> WorldMetrics {
+    let dt_myr = t.dt_myr;
     let mut total_area = 0.0;
     let mut continental_area = 0.0;
+    let mut continental_mass = 0.0;
+    let mut thin_continental_area = 0.0;
     let mut ocean_area = 0.0;
     let mut ocean_age_area = 0.0;
     let mut max_ocean_age = 0.0f64;
@@ -83,6 +96,10 @@ pub fn compute_metrics(
         total_area += area;
         if data.crust_type[i] == CONTINENTAL {
             continental_area += area;
+            continental_mass += area * data.thickness[i] as f64;
+            if (data.thickness[i] as f64) < t.continental_thickness_threshold {
+                thin_continental_area += area;
+            }
         } else {
             let age = data.age[i] as f64;
             ocean_area += area;
@@ -179,7 +196,22 @@ pub fn compute_metrics(
     }
     drives.sort_by(|a, b| b.area_share.total_cmp(&a.area_share));
 
-    let per_myr = advection.subducted_this_step / dt_myr.max(1e-9);
+    let dt = dt_myr.max(1e-9);
+    let per_myr = advection.subducted_this_step / dt;
+    let globe_share_per_myr = |a: f64| {
+        if total_area > 0.0 {
+            a / total_area / dt
+        } else {
+            0.0
+        }
+    };
+    let continental_share_per_myr = |m: f64| {
+        if continental_mass > 0.0 {
+            m / continental_mass / dt
+        } else {
+            0.0
+        }
+    };
     let correlated: Vec<PlateDrive> = drives
         .iter()
         .filter(|d| d.area_share >= MIN_CORRELATION_AREA)
@@ -198,6 +230,27 @@ pub fn compute_metrics(
         } else {
             0.0
         },
+        continental_mass_share: if continental_mass + ocean_mass > 0.0 {
+            continental_mass / (continental_mass + ocean_mass)
+        } else {
+            0.0
+        },
+        mean_continental_thickness: if continental_area > 0.0 {
+            continental_mass / continental_area
+        } else {
+            0.0
+        },
+        thin_continental_area: if total_area > 0.0 {
+            thin_continental_area / total_area
+        } else {
+            0.0
+        },
+        continentalised_by_accretion: globe_share_per_myr(advection.continentalised_by_accretion),
+        continentalised_by_spreading: globe_share_per_myr(advection.continentalised_by_spreading),
+        continental_eroded: continental_share_per_myr(advection.eroded_this_step),
+        delaminated: continental_share_per_myr(advection.delaminated_this_step),
+        foundered: continental_share_per_myr(advection.foundered_this_step),
+        decontinentalised: globe_share_per_myr(advection.decontinentalised),
         mean_ocean_age: if ocean_area > 0.0 {
             ocean_age_area / ocean_area
         } else {

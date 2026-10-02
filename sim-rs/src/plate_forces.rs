@@ -1,21 +1,17 @@
 //! Each plate's angular velocity from a force balance, mirroring
 //! `plateForces.ts`: slab pull and ridge push drive, mantle drag and collision
-//! resistance resist, and the balance `M omega = torque` is solved directly.
+//! resistance resist, and the balance `M omega = torque` gives the motion each
+//! plate is heading for. Plates settle onto it over `motion_response_time`
+//! rather than jumping straight there.
 
 use crate::boundaries::{BoundaryField, CONVERGENT, DIVERGENT};
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::math::{Sym3, clamp01, dominant_axis, len3, solve_sym3};
 use crate::mesh::Mesh;
-use crate::plates::{PlateData, PlateStress, split_key};
+use crate::plates::{PlateData, PlateStress, split_key, suture_key};
 use crate::scratch::Scratch;
+use crate::slabs::{slab_pull, subduction};
 use crate::tuning::Tuning;
-
-/// Pull per unit length of trench from crust of the given age, in [0, 1].
-fn slab_pull(t: &Tuning, age: f64) -> f64 {
-    let onset = t.slab_pull_onset_age;
-    let span = (t.slab_pull_saturation_age - onset).max(1e-6);
-    clamp01((age - onset) / span)
-}
 
 pub fn update_plate_motion(
     mesh: &Mesh,
@@ -106,6 +102,18 @@ pub fn update_plate_motion(
         let cont_a = data.crust_type[cell_a] == CONTINENTAL;
         let cont_b = data.crust_type[cell_b] == CONTINENTAL;
 
+        // Dome push: lithosphere raised over trapped mantle heat slides off
+        // it, so a margin over a hot dome pushes both sides apart. This is what
+        // separates the halves of a plate that rifted over heat alone, with no
+        // slab to pull them. A weld holds against it. The dome has to straddle
+        // the margin, so the cooler side sets the push.
+        let heat = data.mantle_heat[cell_a].min(data.mantle_heat[cell_b]) as f64;
+        if heat > 0.0 && !plates.sutures.contains_key(&suture_key(plate_a, plate_b)) {
+            let push = t.dome_push * heat * arc_len;
+            add_torque(&mut torque, plate_a, a, -1.0, push);
+            add_torque(&mut torque, plate_b, a, 1.0, push);
+        }
+
         if kind == DIVERGENT {
             // Ridge push: each side slides off the ridge, away from the other,
             // driven by how far it has subsided below the crest.
@@ -129,19 +137,18 @@ pub fn update_plate_motion(
                     t.ridge_weight * relief_b * arc_len,
                 );
             }
-            continue;
         }
 
         // Slab pull, not gated on the boundary converging right now: a slab's
-        // weight is there whether or not the plates happen to be moving.
-        if !(cont_a && cont_b) {
-            let b_down = cont_a || (!cont_b && data.density[cell_b] > data.density[cell_a]);
-            let (down_cell, down_plate, sign) = if b_down {
+        // weight is there whether or not the plates happen to be moving. But it
+        // takes a slab, so only where crust has actually gone down.
+        if let Some(sub) = subduction(mesh, data, cell_a, cell_b, t) {
+            let (down_cell, down_plate, sign) = if sub.down == cell_b {
                 (cell_b, plate_b, -1.0)
             } else {
                 (cell_a, plate_a, 1.0)
             };
-            let pull = slab_pull(t, data.age[down_cell] as f64);
+            let pull = slab_pull(t, data.age[down_cell] as f64) * sub.strength;
             if pull > 0.0 && live(down_plate) {
                 let force = t.slab_weight * pull * arc_len;
                 add_torque(&mut torque, down_plate, a, sign, force);
@@ -221,46 +228,51 @@ pub fn update_plate_motion(
         plates.stress.insert(
             id,
             PlateStress {
-                tension: opposed / area[p],
+                opposed_pull: opposed,
                 axis: dominant_axis(&sym(&pull_spread, p), [1.0, 0.0, 0.0]),
             },
         );
     }
 
-    // Solve the balance.
-    for (&id, props) in plates.by_id.iter_mut() {
+    // Solve the balance for the motion each plate is heading for.
+    let mut target = vec![0.0f64; bound * 3];
+    for &id in &ids {
         let p = id as usize;
-        props.omega = solve_sym3(
+        let w = solve_sym3(
             &sym(&drag, p),
             [torque[p * 3], torque[p * 3 + 1], torque[p * 3 + 2]],
         );
+        target[p * 3..p * 3 + 3].copy_from_slice(&w);
     }
 
-    // Suture coupling: welded plates converge onto a common motion.
+    // Suture coupling: welded plates head for a common motion. It acts on the
+    // targets, not the motion itself, so it does not compound tick on tick.
     let blend = clamp01(t.suture_coupling * dt_myr);
     if blend > 0.0 {
-        let keys: Vec<i64> = plates.sutures.keys().copied().collect();
-        for key in keys {
+        for &key in plates.sutures.keys() {
             let (ia, ib) = split_key(key);
-            let (Some(a), Some(b)) = (
-                plates.by_id.get(&ia).map(|p| p.omega),
-                plates.by_id.get(&ib).map(|p| p.omega),
-            ) else {
+            if !plates.by_id.contains_key(&ia) || !plates.by_id.contains_key(&ib) {
                 continue;
-            };
-            let mut na = a;
-            let mut nb = b;
+            }
+            let (a, b) = (ia as usize * 3, ib as usize * 3);
             for k in 0..3 {
-                let mean = 0.5 * (a[k] + b[k]);
-                na[k] += blend * (mean - a[k]);
-                nb[k] += blend * (mean - b[k]);
+                let mean = 0.5 * (target[a + k] + target[b + k]);
+                target[a + k] += blend * (mean - target[a + k]);
+                target[b + k] += blend * (mean - target[b + k]);
             }
-            if let Some(p) = plates.by_id.get_mut(&ia) {
-                p.omega = na;
-            }
-            if let Some(p) = plates.by_id.get_mut(&ib) {
-                p.omega = nb;
-            }
+        }
+    }
+
+    // Plates settle onto their targets rather than jumping there.
+    let response = if t.motion_response_time > 0.0 {
+        1.0 - (-dt_myr / t.motion_response_time).exp()
+    } else {
+        1.0
+    };
+    for (&id, props) in plates.by_id.iter_mut() {
+        let p = id as usize * 3;
+        for k in 0..3 {
+            props.omega[k] += response * (target[p + k] - props.omega[k]);
         }
     }
 }

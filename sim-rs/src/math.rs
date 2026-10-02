@@ -49,6 +49,25 @@ pub fn normalise(v: Vec3) -> Vec3 {
     [v[0] / l, v[1] / l, v[2] / l]
 }
 
+/// `v` turned by the rotation `omega` (rad/Myr, about its own axis) carries
+/// a point through in `dt` Myr.
+pub fn rotate(v: Vec3, omega: Vec3, dt: f64) -> Vec3 {
+    let rate = len3(omega[0], omega[1], omega[2]);
+    let angle = rate * dt;
+    if angle < 1e-12 {
+        return v;
+    }
+    let k = scale(omega, 1.0 / rate);
+    let (sin, cos) = angle.sin_cos();
+    let kv = cross(k, v);
+    let along = dot(k, v) * (1.0 - cos);
+    [
+        v[0] * cos + kv[0] * sin + k[0] * along,
+        v[1] * cos + kv[1] * sin + k[1] * along,
+        v[2] * cos + kv[2] * sin + k[2] * along,
+    ]
+}
+
 #[inline]
 pub fn clamp01(x: f64) -> f64 {
     x.clamp(0.0, 1.0)

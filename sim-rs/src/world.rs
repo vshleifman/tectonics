@@ -16,6 +16,7 @@ use crate::registry::{Registry, assign_plates};
 use crate::rifting::update_rifting;
 use crate::rng::Rng;
 use crate::scratch::Scratch;
+use crate::slabs::{seed_slabs, update_slabs};
 use crate::sutures::update_sutures;
 use crate::timer::now_ms;
 use crate::tuning::{SimOptions, Tuning};
@@ -79,6 +80,7 @@ impl Sim {
             self.advection.created_total = 0.0;
             self.elapsed = 0.0;
         }
+        seed_slabs(&self.mesh, &mut self.front, &self.boundaries, &self.tuning);
         let dt = self.tuning.dt_myr;
         update_plate_motion(
             &self.mesh,
@@ -123,6 +125,7 @@ impl Sim {
             mark = now;
         };
 
+        update_slabs(mesh, front, boundaries, scratch, t, dt);
         update_plate_motion(mesh, front, plates, boundaries, scratch, t, dt);
         lap(0);
         classify(mesh, front, plates, boundaries, scratch, t);
@@ -172,6 +175,14 @@ impl Sim {
         self.plates.by_id.len()
     }
 
+    pub fn rift_count(&self) -> u64 {
+        self.plates.rifts
+    }
+
+    pub fn failed_rift_count(&self) -> u64 {
+        self.plates.failed_rifts
+    }
+
     pub fn plate_omegas(&self) -> Vec<f64> {
         let mut out = Vec::with_capacity(self.plates.by_id.len() * 4);
         for (&id, p) in &self.plates.by_id {
@@ -202,7 +213,7 @@ impl Sim {
             &self.plates,
             &self.boundaries,
             &self.advection,
-            self.tuning.dt_myr,
+            &self.tuning,
             self.elapsed,
         )
     }
@@ -269,5 +280,157 @@ mod tests {
         let m = sim.metrics();
         assert!(m.elapsed_myr > 0.0);
         assert!(m.boundary_share[0] > 0.0, "no convergence at all");
+    }
+
+    /// A hemisphere of continent at rest over mantle heat just past what it
+    /// takes to tear intact continent, beside ocean too young to pull: the only
+    /// thing that can break it is the heat.
+    fn hot_continent(tune: impl FnOnce(&mut Tuning)) -> Sim {
+        let mut sim = Sim::new(4);
+        tune(&mut sim.tuning);
+        sim.crack_great_circles(1, "dome");
+        let continent = sim.front.plate_id[0];
+        let t = &sim.tuning;
+        let threshold =
+            t.rift_strength / (t.insulation_drive + t.rift_strength * t.insulation_weakening);
+        let heat = (threshold + 0.05) as f32;
+        let d = &mut sim.front;
+        for i in 0..sim.mesh.cell_count {
+            d.slab[i] = 0.0;
+            d.age[i] = 0.0;
+            if d.plate_id[i] == continent {
+                d.crust_type[i] = crate::cell_data::CONTINENTAL;
+                d.thickness[i] = 35.0;
+                d.density[i] = t.continental_density as f32;
+                d.elevation[i] = t.continent_base as f32;
+                d.mantle_heat[i] = heat;
+            }
+        }
+        for p in sim.plates.by_id.values_mut() {
+            p.omega = [0.0; 3];
+        }
+        sim
+    }
+
+    /// Ticks until the first breakup, then `after` more; the relative angular
+    /// speed of the continent's two pieces, and the breakups in all.
+    fn after_first_rift(sim: &mut Sim, after: usize) -> (f64, u64) {
+        let stretching = (sim.tuning.rift_duration / sim.tuning.dt_myr).ceil() as usize;
+        for _ in 0..stretching + 5 {
+            sim.tick();
+            if sim.rift_count() > 0 {
+                break;
+            }
+        }
+        assert_eq!(sim.rift_count(), 1, "the hot continent never rifted");
+        for _ in 0..after {
+            sim.tick();
+        }
+        let mut pieces: Vec<i32> = (0..sim.mesh.cell_count)
+            .filter(|&i| sim.front.crust_type[i] == crate::cell_data::CONTINENTAL)
+            .map(|i| sim.front.plate_id[i])
+            .collect();
+        pieces.sort_unstable();
+        pieces.dedup();
+        assert!(pieces.len() >= 2, "continent is one plate again");
+        let w = |id: i32| sim.plates.by_id[&id].omega;
+        let (a, b) = (w(pieces[0]), w(pieces[1]));
+        let d = crate::math::sub(a, b);
+        (crate::math::len3(d[0], d[1], d[2]), sim.rift_count())
+    }
+
+    #[test]
+    fn heat_alone_rifts_a_continent_and_pushes_it_apart() {
+        // Hemmed in by ocean that cannot subduct, the pieces cannot get far,
+        // but the dome push is the only thing that moves them at all.
+        let (apart, _) = after_first_rift(&mut hot_continent(|_| {}), 10);
+        let (still, _) = after_first_rift(&mut hot_continent(|t| t.dome_push = 0.0), 10);
+        assert!(still < 1e-6, "pieces separated with no dome push: {still}");
+        assert!(apart > 5e-5, "pieces barely moving apart: {apart}");
+    }
+
+    /// Ticks until a rift has begun to stretch on the hot continent.
+    fn until_stretching(sim: &mut Sim) {
+        for _ in 0..5 {
+            sim.tick();
+            if !sim.plates.opening.is_empty() {
+                return;
+            }
+        }
+        panic!("the hot continent never began to rift");
+    }
+
+    #[test]
+    fn a_stretching_rift_sinks_between_raised_shoulders_and_loses_no_crust() {
+        let mut sim = hot_continent(|_| {});
+        until_stretching(&mut sim);
+        // Building the continent by hand put crust outside the ledger, so it
+        // is the drift while stretching that has to stay at zero.
+        let drift = sim.mass_drift();
+        let ticks = (0.6 * sim.tuning.rift_duration / sim.tuning.dt_myr) as usize;
+        for _ in 0..ticks {
+            sim.tick();
+        }
+        assert_eq!(sim.rift_count(), 0, "broke up before it had stretched");
+        let d = &sim.front;
+        let zone: Vec<usize> = (0..sim.mesh.cell_count)
+            .filter(|&i| {
+                d.rift_side[i] != 0
+                    && sim.mesh.nbrs(i).any(|k| {
+                        let m = sim.mesh.nbr[k] as usize;
+                        d.rift_side[m] != 0 && d.rift_side[m] != d.rift_side[i]
+                    })
+            })
+            .collect();
+        assert!(!zone.is_empty());
+        let mean = zone.iter().map(|&i| d.thickness[i] as f64).sum::<f64>() / zone.len() as f64;
+        assert!(mean < 30.0, "zone barely thinned: {mean:.1} km");
+        let thickest = d.thickness.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            thickest > 36.0,
+            "no shoulders: thickest crust {thickest:.1} km"
+        );
+        let change = sim.mass_drift() - drift;
+        assert!(
+            change.abs() < 1e-4,
+            "crust lost or gained while stretching: {change}"
+        );
+    }
+
+    #[test]
+    fn a_rift_that_loses_its_drive_fails_and_stays_weak() {
+        let mut sim = hot_continent(|_| {});
+        until_stretching(&mut sim);
+        sim.tick();
+        let zone: Vec<usize> = (0..sim.mesh.cell_count)
+            .filter(|&i| sim.front.rift_side[i] != 0 && sim.front.weakness[i] > 0.0)
+            .collect();
+        assert!(!zone.is_empty(), "stretching left no mark");
+        sim.front.mantle_heat.fill(0.0);
+        sim.tick();
+        assert_eq!(sim.failed_rift_count(), 1);
+        assert!(sim.plates.opening.is_empty());
+        assert!(
+            sim.front.rift_side.iter().all(|&s| s == 0),
+            "marks left behind"
+        );
+        let margin = sim.tuning.rift_margin_weakness as f32;
+        let scarred = zone
+            .iter()
+            .filter(|&&i| sim.front.weakness[i] >= 0.99 * margin)
+            .count();
+        assert!(scarred > 0, "failed rift left no weak scar");
+        for _ in 0..30 {
+            sim.tick();
+        }
+        assert_eq!(sim.rift_count(), 0, "a failed rift still broke the plate");
+    }
+
+    #[test]
+    fn breakup_vents_heat_so_a_continent_does_not_shatter() {
+        let (_, rifts) = after_first_rift(&mut hot_continent(|_| {}), 20);
+        assert_eq!(rifts, 1, "broke up again within 40 Myr");
+        let (_, unvented) = after_first_rift(&mut hot_continent(|t| t.rift_heat_release = 0.0), 20);
+        assert!(unvented > 1, "no cascade even without venting: {unvented}");
     }
 }

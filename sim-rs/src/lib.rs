@@ -22,6 +22,8 @@ pub mod registry;
 pub mod rifting;
 pub mod rng;
 pub mod scratch;
+pub mod shape;
+pub mod slabs;
 pub mod sutures;
 pub mod timer;
 pub mod tuning;

@@ -23,11 +23,31 @@ pub struct AdvectionField {
     pub welded: Vec<f32>,
     pub rift_cell: Vec<u8>,
     pub subducted: Vec<u8>,
+    /// Thickness each cell took in this step from lateral spreading, net of
+    /// what it gave away.
+    pub spread_in: Vec<f32>,
+    /// Thickness to strip from a continental overriding cell this step, from
+    /// ocean subducting under it.
+    pub margin_eroded: Vec<f32>,
     pub live_mass: f64,
     pub subducted_this_step: f64,
     pub subducted_total: f64,
     pub created_this_step: f64,
     pub created_total: f64,
+    /// Continental mass lost this step to subduction erosion of eaten margins
+    /// and to ocean-under-continent margin erosion.
+    pub eroded_this_step: f64,
+    /// Mass shed this step by roots past the thickness cap.
+    pub delaminated_this_step: f64,
+    /// Accreted mass this step that could not be taken up at the thickening cap
+    /// and foundered into the mantle instead of spilling.
+    pub foundered_this_step: f64,
+    /// Area turned continental this step, by whether accretion or lateral
+    /// spreading carried it past the threshold.
+    pub continentalised_by_accretion: f64,
+    pub continentalised_by_spreading: f64,
+    /// Area of thinned continental crust that reverted to oceanic this step.
+    pub decontinentalised: f64,
 }
 
 impl AdvectionField {
@@ -38,11 +58,19 @@ impl AdvectionField {
             welded: vec![0.0; n],
             rift_cell: vec![0; n],
             subducted: vec![0; n],
+            spread_in: vec![0.0; n],
+            margin_eroded: vec![0.0; n],
             live_mass: 0.0,
             subducted_this_step: 0.0,
             subducted_total: 0.0,
             created_this_step: 0.0,
             created_total: 0.0,
+            eroded_this_step: 0.0,
+            delaminated_this_step: 0.0,
+            foundered_this_step: 0.0,
+            continentalised_by_accretion: 0.0,
+            continentalised_by_spreading: 0.0,
+            decontinentalised: 0.0,
         }
     }
 }
@@ -91,7 +119,12 @@ pub fn advect(
     out.welded.fill(0.0);
     out.rift_cell.fill(0);
     out.subducted.fill(0);
+    out.spread_in.fill(0.0);
+    out.margin_eroded.fill(0.0);
     let mut subducted_this_step = 0.0f64;
+    let mut eroded_this_step = 0.0f64;
+    let mut delaminated_this_step = 0.0f64;
+    let mut foundered_this_step = 0.0f64;
 
     // Mantle heat belongs to the mantle, not the crust, so it stays put.
     dst.mantle_heat.copy_from_slice(&src.mantle_heat);
@@ -424,6 +457,8 @@ pub fn advect(
         dst.age[dest] = src.age[source];
         dst.density[dest] = src.density[source];
         dst.weakness[dest] = src.weakness[source];
+        dst.slab[dest] = src.slab[source];
+        dst.rift_side[dest] = src.rift_side[source];
         dst.thickness[dest] = if source == dest {
             src.thickness[source]
         } else {
@@ -448,6 +483,8 @@ pub fn advect(
                 dst.density[d] = t.rift_density as f32;
                 dst.thickness[d] = 0.0;
                 dst.weakness[d] = src.weakness[d];
+                dst.slab[d] = 0.0;
+                dst.rift_side[d] = 0;
                 out.rift_cell[d] = 1;
             } else {
                 copy_cell(dst, d, d);
@@ -476,6 +513,7 @@ pub fn advect(
                 // welds on, the rest is the trench's erosion of the margin.
                 let eroded = t.subduction_erosion * mass;
                 subducted_this_step += eroded;
+                eroded_this_step += eroded;
                 add_f32(&mut out.welded[cell], (mass - eroded) / area(cell));
                 out.subducted[cell] = 1;
                 if out.rift_cell[cell] == 0 {
@@ -495,6 +533,12 @@ pub fn advect(
             subducted_this_step += mass - accreted;
             add_f32(&mut out.accreted[into], accreted / area(into));
             out.subducted[into] = 1;
+            if dst.crust_type[into] == CONTINENTAL && out.rift_cell[into] == 0 {
+                add_f32(
+                    &mut out.margin_eroded[into],
+                    t.margin_erosion * mass / area(into),
+                );
+            }
         } else {
             add_f32(&mut out.welded[cell], mass / area(cell));
         }
@@ -507,20 +551,129 @@ pub fn advect(
     let mut headroom = std::mem::take(&mut s.f32c);
     let mut incoming = std::mem::take(&mut s.f32d);
     surplus.fill(0.0);
+    // `margin_eroded` is reused after the strip as remaining accretion this
+    // cell may still absorb at the thickening cap.
     for d in 0..n {
+        let eroded_h = out.margin_eroded[d] as f64;
+        if eroded_h > 0.0 && out.rift_cell[d] == 0 {
+            let available = (dst.thickness[d] as f64 - t.rift_thickness_floor).max(0.0);
+            let take = eroded_h.min(available);
+            add_f32(&mut dst.thickness[d], -take);
+            eroded_this_step += take * area(d);
+            subducted_this_step += take * area(d);
+        }
+        out.margin_eroded[d] = if out.rift_cell[d] != 0 {
+            0.0
+        } else {
+            max_gain as f32
+        };
         let acc = out.accreted[d] as f64;
-        let gain = acc + out.welded[d] as f64;
-        if gain == 0.0 {
+        if acc <= 0.0 {
             continue;
         }
-        let absorbable = acc.min(max_gain) + out.welded[d] as f64;
+        let cap_room = if out.rift_cell[d] != 0 {
+            0.0
+        } else {
+            (thickness_cap - dst.thickness[d] as f64).max(0.0)
+        };
+        let take = acc.min(out.margin_eroded[d] as f64).min(cap_room);
+        add_f32(&mut dst.thickness[d], take);
+        out.margin_eroded[d] = (out.margin_eroded[d] as f64 - take) as f32;
+        surplus[d] = (acc - take) as f32;
+    }
+
+    for _round in 0..PLACEMENT_ROUNDS {
+        if !surplus.iter().any(|&x| x > 0.0) {
+            break;
+        }
+        for d in 0..n {
+            headroom[d] = if out.rift_cell[d] != 0 {
+                0.0
+            } else {
+                (thickness_cap - dst.thickness[d] as f64)
+                    .max(0.0)
+                    .min(out.margin_eroded[d] as f64) as f32
+            };
+        }
+        incoming.fill(0.0);
+        next.fill(0.0);
+        for d in 0..n {
+            let have = surplus[d] as f64;
+            if have <= 0.0 {
+                continue;
+            }
+            let own = dst.plate_id[d];
+            let accepts = |m: usize| dst.plate_id[m] == own && out.rift_cell[m] == 0;
+            let mut room = 0.0f64;
+            for k in range(d) {
+                let m = nbr[k] as usize;
+                if accepts(m) {
+                    room += headroom[m] as f64;
+                }
+            }
+            let crowded = room <= 0.0;
+            let weight_of = |m: usize| {
+                if crowded {
+                    1.0 / (1.0 + dst.thickness[m] as f64)
+                } else {
+                    headroom[m] as f64
+                }
+            };
+            let mut weight = 0.0f64;
+            for k in range(d) {
+                let m = nbr[k] as usize;
+                if accepts(m) {
+                    weight += weight_of(m);
+                }
+            }
+            if weight <= 0.0 {
+                add_f32(&mut next[d], have);
+                continue;
+            }
+            for k in range(d) {
+                let m = nbr[k] as usize;
+                if !accepts(m) {
+                    continue;
+                }
+                let w = weight_of(m);
+                if w <= 0.0 {
+                    continue;
+                }
+                add_f32(&mut incoming[m], have * (w / weight) * area(d) / area(m));
+            }
+        }
+        for d in 0..n {
+            let inc = incoming[d] as f64;
+            if inc == 0.0 {
+                continue;
+            }
+            let place = inc.min(headroom[d] as f64);
+            add_f32(&mut dst.thickness[d], place);
+            add_f32(&mut out.margin_eroded[d], -place);
+            add_f32(&mut next[d], inc - place);
+        }
+        std::mem::swap(&mut surplus, &mut next);
+    }
+    for d in 0..n {
+        if surplus[d] > 0.0 {
+            foundered_this_step += surplus[d] as f64 * area(d);
+            subducted_this_step += surplus[d] as f64 * area(d);
+            surplus[d] = 0.0;
+        }
+    }
+
+    for d in 0..n {
+        let welded = out.welded[d] as f64;
+        if welded == 0.0 {
+            continue;
+        }
         let held = if out.rift_cell[d] != 0 {
             0.0
         } else {
-            absorbable.min((thickness_cap - dst.thickness[d] as f64).max(0.0))
+            welded.min((thickness_cap - dst.thickness[d] as f64).max(0.0))
         };
         add_f32(&mut dst.thickness[d], held);
-        surplus[d] = (gain - held) as f32;
+        surplus[d] = (welded - held) as f32;
     }
 
     for round in 0..PLACEMENT_ROUNDS {
@@ -619,7 +772,10 @@ pub fn advect(
             let mut deficit = 0.0f64;
             for k in range(d) {
                 let m = nbr[k] as usize;
-                if dst.plate_id[m] != own || out.rift_cell[m] != 0 {
+                if dst.plate_id[m] != own
+                    || out.rift_cell[m] != 0
+                    || dst.crust_type[m] != CONTINENTAL
+                {
                     continue;
                 }
                 if before[m] < before[d] {
@@ -633,7 +789,11 @@ pub fn advect(
             add_f32(&mut flow[d], -give);
             for k in range(d) {
                 let m = nbr[k] as usize;
-                if dst.plate_id[m] != own || out.rift_cell[m] != 0 || before[m] >= before[d] {
+                if dst.plate_id[m] != own
+                    || out.rift_cell[m] != 0
+                    || dst.crust_type[m] != CONTINENTAL
+                    || before[m] >= before[d]
+                {
                     continue;
                 }
                 let share = (before[d] as f64 - before[m] as f64) / deficit;
@@ -642,6 +802,7 @@ pub fn advect(
         }
         for d in 0..n {
             add_f32(&mut dst.thickness[d], flow[d] as f64);
+            out.spread_in[d] = flow[d].max(0.0);
         }
     }
 
@@ -656,6 +817,7 @@ pub fn advect(
             let shed = over.min(shed_per_step);
             add_f32(&mut dst.thickness[d], -shed);
             subducted_this_step += shed * area(d);
+            delaminated_this_step += shed * area(d);
         }
     }
 
@@ -739,6 +901,9 @@ pub fn advect(
 
     out.subducted_this_step = subducted_this_step;
     out.subducted_total += subducted_this_step;
+    out.eroded_this_step = eroded_this_step;
+    out.delaminated_this_step = delaminated_this_step;
+    out.foundered_this_step = foundered_this_step;
 }
 
 #[cfg(test)]
