@@ -119,8 +119,8 @@ pub fn subduction(
 }
 
 /// Grow each trench's slab by how fast crust is converging into it, start new
-/// ones where old ocean founders at a margin that is not spreading, and let
-/// every slab sink away a little.
+/// ones where ocean older than `slab_initiation_age` founders at a margin that
+/// is not spreading, and let every slab sink away a little.
 pub fn update_slabs(
     mesh: &Mesh,
     data: &mut CellData,
@@ -186,10 +186,14 @@ pub fn update_slabs(
         } else {
             0.0
         };
-        let founder = if data.crust_type[sub.down] == CONTINENTAL {
+        // Unforced, a trench only starts where the ocean has grown old and
+        // heavy enough to founder on its own, and slowly at that: the
+        // Atlantic's 180 Myr-old margins have yet to start one.
+        let age = data.age[sub.down] as f64;
+        let founder = if data.crust_type[sub.down] == CONTINENTAL || age < t.slab_initiation_age {
             0.0
         } else {
-            founder_rate * slab_pull(t, data.age[sub.down] as f64)
+            founder_rate * slab_pull(t, age)
         };
         let rate = (closing + founder) as f32;
         growth[sub.over] = growth[sub.over].max(rate);

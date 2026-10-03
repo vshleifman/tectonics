@@ -30,6 +30,8 @@ export interface WorldFields {
   age: Float32Array;
   density: Float32Array;
   thickness: Float32Array;
+  /** Cratonic keel per cell, in [0, 1]. */
+  keel: Float32Array;
   cellKind: Uint8Array;
   arcKind: Int8Array;
 }

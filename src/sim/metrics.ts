@@ -96,6 +96,18 @@ export interface WorldMetrics {
    */
   continentalisedByAccretion: number;
   continentalisedBySpreading: number;
+  /** Share of the surface per Myr turned continental by trapped ocean filling in. */
+  continentalisedByInfill: number;
+  /**
+   * Share of the surface per Myr of continental crust recycled into the mantle
+   * at active margins. Levelled off, it matches {@link continentalGrowth}.
+   */
+  continentalRecycled: number;
+  /**
+   * Share of the surface per Myr by which everything but recycling grows the
+   * continents, averaged over 200 Myr.
+   */
+  continentalGrowth: number;
   /** Share of the continental mass lost per Myr to subduction erosion. */
   continentalEroded: number;
   /** Share of the continental mass shed per Myr by over-thick roots. */
@@ -110,6 +122,41 @@ export interface WorldMetrics {
    * revert threshold and was reclassified as oceanic.
    */
   decontinentalised: number;
+  /**
+   * Share of the surface per Myr vacated with no other plate beside it: gaps
+   * the quantised transport tears inside a plate, which on Earth do not exist.
+   */
+  interiorHoles: number;
+  /**
+   * Of {@link interiorHoles}, the share no nearby crust of the plate could
+   * fill, left to open as rifts. Each one inside a continent leaves a pocket
+   * of ocean behind.
+   */
+  interiorHolesUnfilled: number;
+  /**
+   * Bodies of ocean ringed by continent and smaller than about the Caspian.
+   * Earth has a handful; a model pock-marking its continents has hundreds.
+   */
+  oceanPocketCount: number;
+  /** Share of the surface in those pockets, in [0, 1]. */
+  oceanPocketArea: number;
+  /**
+   * Connected landmasses covering at least 0.5% of the globe, whichever plates
+   * they ride on. Earth has five (Afro-Eurasia, the two Americas, Antarctica,
+   * Australia).
+   */
+  continentCount: number;
+  /**
+   * Share of all continental crust in the largest landmass, in [0, 1].
+   * Afro-Eurasia holds about half of Earth's; a supercontinent nearly all.
+   */
+  largestContinentShare: number;
+  /**
+   * Share of continental crust that is craton, weighted by how far each cell
+   * has grown its keel, in [0, 1]. Archean and Palaeoproterozoic cratons make
+   * up very roughly a sixth to a third of Earth's continents.
+   */
+  cratonShare: number;
   /** Area-weighted mean age of oceanic crust (Myr). */
   meanOceanAge: number;
   /** Age of the oldest surviving oceanic crust (Myr). */

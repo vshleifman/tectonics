@@ -71,6 +71,7 @@ const allocateBuffers = (w: SimWorld): SnapshotBuffers => {
     age: new Float32Array(cells),
     density: new Float32Array(cells),
     thickness: new Float32Array(cells),
+    keel: new Float32Array(cells),
     cellKind: new Uint8Array(cells),
     arcKind: new Int8Array(arcs),
   };
@@ -93,6 +94,7 @@ const publish = (): void => {
   buffers.age.set(fields.age);
   buffers.density.set(fields.density);
   buffers.thickness.set(fields.thickness);
+  buffers.keel.set(fields.keel);
   buffers.cellKind.set(fields.cellKind);
   buffers.arcKind.set(fields.arcKind);
 

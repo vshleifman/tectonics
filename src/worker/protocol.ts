@@ -72,6 +72,7 @@ export const bufferList = (b: SnapshotBuffers): ArrayBuffer[] => [
   b.age.buffer as ArrayBuffer,
   b.density.buffer as ArrayBuffer,
   b.thickness.buffer as ArrayBuffer,
+  b.keel.buffer as ArrayBuffer,
   b.cellKind.buffer as ArrayBuffer,
   b.arcKind.buffer as ArrayBuffer,
 ];

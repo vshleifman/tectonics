@@ -90,6 +90,24 @@ const MOVING_SPEED: f64 = 1e-3;
 const SMALL_PLATE_SHARE: f64 = 0.01;
 /// Ticks over which a cluster of rifts counts as one burst.
 const RIFT_BURST_TICKS: usize = 5;
+/// Ticks back a plate's heading is compared against: 10 and 50 Myr at 2 Myr
+/// a tick.
+const HEADING_LAGS: [usize; 2] = [5, 25];
+/// Share of the globe a plate must cover for its heading to be tracked.
+const HEADING_MIN_SHARE: f64 = 0.01;
+/// Turn (degrees) that counts as a change of direction.
+const HEADING_SWING: f64 = 45.0;
+/// Time (Myr) before which headings are not tallied, while the seeded world
+/// finds its feet.
+const HEADING_FROM_MYR: f64 = 200.0;
+/// Time (Myr) after which the continents have grown and their arrangement is
+/// worth summarising.
+const GROWN_MYR: f64 = 2000.0;
+/// Ticks between samples of the landmasses.
+const LAND_SAMPLE_TICKS: usize = 10;
+/// Share of the continental crust in one landmass that counts as a
+/// supercontinent.
+const SUPERCONTINENT_SHARE: f64 = 0.75;
 
 const PASS_NAMES: [&str; PASS_COUNT] = [
     "motion",
@@ -110,7 +128,8 @@ fn print_continental_budget(sim: &Sim) {
     let m = sim.metrics();
     println!(
         "  {:>6.0} Myr  plates {:>3}  cont area {:5.1}% mass {:5.1}%  mean {:5.1} km  thin {:5.2}%  \
-         gain/Myr accretion {:.4}% spreading {:.4}%  loss/Myr erosion {:.4}% delamination {:.4}% founder {:.4}%  revert/Myr {:.4}%",
+         gain/Myr accretion {:.4}% spreading {:.4}% infill {:.4}% net growth {:.4}% recycled {:.4}%  loss/Myr erosion {:.4}% delamination {:.4}% founder {:.4}%  revert/Myr {:.4}%  \
+         holes/Myr {:.4}% unfilled {:.4}%  pockets {} ({:.2}%)",
         m.elapsed_myr,
         m.plate_count,
         m.continental_area * 100.0,
@@ -119,10 +138,17 @@ fn print_continental_budget(sim: &Sim) {
         m.thin_continental_area * 100.0,
         m.continentalised_by_accretion * 100.0,
         m.continentalised_by_spreading * 100.0,
+        m.continentalised_by_infill * 100.0,
+        m.continental_growth * 100.0,
+        m.continental_recycled * 100.0,
         m.continental_eroded * 100.0,
         m.delaminated * 100.0,
         m.foundered * 100.0,
         m.decontinentalised * 100.0,
+        m.interior_holes * 100.0,
+        m.interior_holes_unfilled * 100.0,
+        m.ocean_pocket_count,
+        m.ocean_pocket_area * 100.0,
     );
 }
 
@@ -163,6 +189,22 @@ fn main() {
             "rift_duration" => t.rift_duration = value,
             "rift_stretch" => t.rift_stretch = value,
             "weakness_decay_time" => t.weakness_decay_time = value,
+            "suture_weakness" => t.suture_weakness = value,
+            "weakness_relief" => t.weakness_relief = value,
+            "rift_margin_weakness" => t.rift_margin_weakness = value,
+            "suture_merge_time" => t.suture_merge_time = value,
+            "mantle_flow_coupling" => t.mantle_flow_coupling = value,
+            "downwelling_memory" => t.downwelling_memory = value,
+            "slab_initiation_age" => t.slab_initiation_age = value,
+            "trench_suction" => t.trench_suction = value,
+            "dome_push_duration" => t.dome_push_duration = value,
+            "max_turn_rate" => t.max_turn_rate = value,
+            "craton_min_age" => t.craton_min_age = value,
+            "craton_inland" => t.craton_inland = value,
+            "craton_growth_time" => t.craton_growth_time = value,
+            "craton_decay_time" => t.craton_decay_time = value,
+            "craton_strength" => t.craton_strength = value,
+            "craton_keel_gain" => t.craton_keel_gain = value,
             "accretion_fraction" => t.accretion_fraction = value,
             "subduction_erosion" => t.subduction_erosion = value,
             "crust_spread_start" => t.crust_spread_start = value,
@@ -170,6 +212,10 @@ fn main() {
             "continental_thickness_threshold" => t.continental_thickness_threshold = value,
             "continental_revert_thickness" => t.continental_revert_thickness = value,
             "margin_erosion" => t.margin_erosion = value,
+            "basin_infill_rate" => t.basin_infill_rate = value,
+            "basin_infill_max_area" => t.basin_infill_max_area = value,
+            "continental_area_target" => t.continental_area_target = value,
+            "continental_recycling_rate" => t.continental_recycling_rate = value,
             "max_thickening_per_myr" => t.max_thickening_per_myr = value,
             _ => eprintln!("unknown tuning override {name}"),
         }
@@ -185,6 +231,16 @@ fn main() {
     let mut rifts_at: VecDeque<u64> = VecDeque::from([sim.rift_count()]);
     let mut rift_burst = 0u64;
     let budget_every = (ticks / 10).max(1);
+    // Landmass sampling, once the continents have had time to grow.
+    let settled = (GROWN_MYR / sim.tuning.dt_myr) as usize;
+    let (mut land_samples, mut largest_sum, mut count_sum, mut assembled) =
+        (0usize, 0.0, 0.0, 0usize);
+    let (mut correlation_sum, mut correlation_samples) = (0.0, 0usize);
+    let mut craton_sum = 0.0;
+    let mut largest_series: Vec<f64> = Vec::new();
+    // Heading (degrees) and share of the globe of every plate, each tick.
+    let mut headings: VecDeque<HashMap<i32, (f64, f64)>> = VecDeque::new();
+    let mut turn = [(0.0f64, 0.0f64, 0.0f64); HEADING_LAGS.len()];
     let run = Instant::now();
     for tick in 0..ticks {
         sim.tick();
@@ -196,6 +252,21 @@ fn main() {
         if (tick + 1) % budget_every == 0 {
             print_continental_budget(&sim);
         }
+        if tick >= settled && tick % LAND_SAMPLE_TICKS == 0 {
+            let m = sim.metrics();
+            land_samples += 1;
+            largest_sum += m.largest_continent_share;
+            count_sum += m.continent_count as f64;
+            if m.largest_continent_share >= SUPERCONTINENT_SHARE {
+                assembled += 1;
+            }
+            largest_series.push(m.largest_continent_share);
+            craton_sum += m.craton_share;
+            if let Some(r) = m.speed_trench_correlation {
+                correlation_sum += r;
+                correlation_samples += 1;
+            }
+        }
         for (total, &ms) in pass_ms.iter_mut().zip(sim.timings()) {
             *total += ms;
         }
@@ -205,11 +276,36 @@ fn main() {
             .map(|c| (c[0] as i32, [c[1], c[2], c[3]]))
             .collect();
         let earlier = (history.len() == REVERSAL_LAG).then(|| &history[0]);
-        let share: HashMap<i32, f64> = sim
-            .summaries()
+        let summaries = sim.summaries();
+        let share: HashMap<i32, f64> = summaries.iter().map(|p| (p.id, p.area_share)).collect();
+        let heading_now: HashMap<i32, (f64, f64)> = summaries
             .iter()
-            .map(|p| (p.id, p.area_share))
+            .filter(|p| p.area_share >= HEADING_MIN_SHARE && p.speed >= MOVING_SPEED)
+            .filter_map(|p| p.heading.map(|h| (p.id, (h, p.area_share))))
             .collect();
+        if tick as f64 * sim.tuning.dt_myr >= HEADING_FROM_MYR {
+            for (slot, &lag) in HEADING_LAGS.iter().enumerate() {
+                let Some(then) = headings.len().checked_sub(lag).map(|i| &headings[i]) else {
+                    continue;
+                };
+                for (id, &(h, a)) in &heading_now {
+                    let Some(&(h0, _)) = then.get(id) else {
+                        continue;
+                    };
+                    let d = (h - h0).rem_euclid(360.0);
+                    let d = d.min(360.0 - d);
+                    turn[slot].0 += d * a;
+                    turn[slot].1 += a;
+                    if d > HEADING_SWING {
+                        turn[slot].2 += a;
+                    }
+                }
+            }
+        }
+        headings.push_back(heading_now);
+        if headings.len() > HEADING_LAGS[HEADING_LAGS.len() - 1] {
+            headings.pop_front();
+        }
         for (id, w) in &now {
             let speed = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
             speed_sum += speed;
@@ -267,6 +363,44 @@ fn main() {
         sim.rift_count(),
         RIFT_BURST_TICKS as f64 * sim.tuning.dt_myr,
         sim.failed_rift_count(),
+    );
+    if land_samples > 0 {
+        let s = land_samples as f64;
+        // Supercontinent cycles: how often the largest landmass crosses up
+        // through the supercontinent share.
+        let assemblies = largest_series
+            .windows(2)
+            .filter(|w| w[0] < SUPERCONTINENT_SHARE && w[1] >= SUPERCONTINENT_SHARE)
+            .count();
+        println!(
+            "  landmasses after {GROWN_MYR:.0} Myr: {:.1} continents, largest {:.0}% of continental area, \
+             one landmass with >{:.0}% {:.0}% of the time, {assemblies} assemblies, \
+             speed-trench correlation {:.2}, cratons {:.0}% of continental area",
+            count_sum / s,
+            largest_sum / s * 100.0,
+            SUPERCONTINENT_SHARE * 100.0,
+            assembled as f64 / s * 100.0,
+            correlation_sum / correlation_samples.max(1) as f64,
+            craton_sum / s * 100.0,
+        );
+    }
+    let turns: Vec<String> = HEADING_LAGS
+        .iter()
+        .zip(&turn)
+        .map(|(&lag, &(sum, weight, swung))| {
+            let w = weight.max(1e-12);
+            format!(
+                "over {:.0} Myr {:.1} deg ({:.0}% >{HEADING_SWING:.0} deg)",
+                lag as f64 * sim.tuning.dt_myr,
+                sum / w,
+                swung / w * 100.0
+            )
+        })
+        .collect();
+    println!(
+        "  heading turn, plates over {:.0}% of the globe: {}",
+        HEADING_MIN_SHARE * 100.0,
+        turns.join(", ")
     );
     let ((plate_aspect, plate_strips), (cont_aspect, cont_strips)) = shapes(&sim);
     println!(

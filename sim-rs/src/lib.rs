@@ -10,14 +10,17 @@
 pub mod advect;
 pub mod boundaries;
 pub mod cell_data;
+pub mod craton;
 pub mod crust_lifecycle;
 pub mod elevation;
+pub mod mantle;
 pub mod math;
 pub mod mesh;
 pub mod metrics;
 pub mod plate_forces;
 pub mod plate_lifecycle;
 pub mod plates;
+pub mod recycling;
 pub mod registry;
 pub mod rifting;
 pub mod rng;
@@ -150,6 +153,10 @@ impl World {
 
     pub fn thickness_ptr(&self) -> *const f32 {
         self.sim.front().thickness.as_ptr()
+    }
+
+    pub fn keel_ptr(&self) -> *const f32 {
+        self.sim.front().keel.as_ptr()
     }
 
     pub fn cell_kind_ptr(&self) -> *const u8 {

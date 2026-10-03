@@ -14,6 +14,11 @@ use std::collections::HashMap;
 
 const MIN_FOOTHOLD: i32 = 2;
 const PLACEMENT_ROUNDS: usize = 6;
+/// Most cells a gap inside a plate is handed back through towards the margin.
+const HOLE_CHAIN_LIMIT: usize = 256;
+/// Rings of cells around a gap still inside a plate that give up crust to
+/// close it.
+const HOLE_DONOR_RINGS: usize = 2;
 
 /// Per-step events and the conservation ledger.
 pub struct AdvectionField {
@@ -46,8 +51,26 @@ pub struct AdvectionField {
     /// spreading carried it past the threshold.
     pub continentalised_by_accretion: f64,
     pub continentalised_by_spreading: f64,
+    /// Area turned continental this step by trapped ocean filling in.
+    pub continentalised_by_infill: f64,
+    /// Continental area recycled into the mantle at active margins this step.
+    pub continental_recycled: f64,
+    /// Recycling owed but not yet taken, as area: margins are taken a whole
+    /// cell at a time.
+    pub recycle_debt: f64,
+    /// Running rate (share of the globe per Myr) at which everything but
+    /// recycling grows the continents.
+    pub continental_growth: f64,
+    /// Continental share of the globe at the end of the last step.
+    pub continental_share_before: Option<f64>,
     /// Area of thinned continental crust that reverted to oceanic this step.
     pub decontinentalised: f64,
+    /// Area vacated this step with no other plate beside it: a gap the
+    /// quantised transport tore in a plate's interior, not a divergent margin.
+    pub interior_holes: f64,
+    /// Of `interior_holes`, the area no nearby crust of the plate could fill,
+    /// left to open as a rift.
+    pub interior_holes_unfilled: f64,
 }
 
 impl AdvectionField {
@@ -70,7 +93,14 @@ impl AdvectionField {
             foundered_this_step: 0.0,
             continentalised_by_accretion: 0.0,
             continentalised_by_spreading: 0.0,
+            continentalised_by_infill: 0.0,
+            continental_recycled: 0.0,
+            recycle_debt: 0.0,
+            continental_growth: 0.0,
+            continental_share_before: None,
             decontinentalised: 0.0,
+            interior_holes: 0.0,
+            interior_holes_unfilled: 0.0,
         }
     }
 }
@@ -450,6 +480,102 @@ pub fn advect(
         s.new_plate[d] = src.plate_id[taker];
     }
 
+    // --- Pass 2c: a gap torn inside a plate is handed back to its margin -----
+    // Moving a plate a whole cell over an irregular mesh cannot map cells one
+    // to one: the matching leaves holes at fixed spots of the mesh (the
+    // pentagons and their kin), its unplaced crust turning up at the margins.
+    // A hole with no other plate beside it is no rift. Moved rigidly, a plate
+    // opens its gaps along its trailing edge, so the crust just behind the hole
+    // steps into it instead, leaving the hole behind it, until the hole reaches
+    // the margin or meets crust that had nowhere to go. Every cell still moves
+    // one cell, and nothing is thinned.
+    let mut target_of = std::mem::take(&mut s.i32a);
+    target_of.fill(-1);
+    for d in 0..n {
+        let source = s.source_of[d];
+        if source >= 0 {
+            target_of[source as usize] = d as i32;
+        }
+    }
+    let at_margin =
+        |new_plate: &[i32], d: usize| range(d).any(|k| new_plate[nbr[k] as usize] != new_plate[d]);
+    let mut interior: Vec<usize> = Vec::new();
+    let mut chain: Vec<usize> = Vec::new();
+    let mut torn = 0.0f64;
+    for start in 0..n {
+        let plate = s.new_plate[start];
+        if plate < 0 || s.source_of[start] >= 0 || s.claimed[start] == 0 {
+            continue;
+        }
+        if !is_stepping(plate) || at_margin(&s.new_plate, start) {
+            continue;
+        }
+        torn += area(start);
+        let w = s.omega(plate);
+        let mut hole = Some(start);
+        chain.clear();
+        for _ in 0..HOLE_CHAIN_LIMIT {
+            let Some(h) = hole else { break };
+            if at_margin(&s.new_plate, h) {
+                break;
+            }
+            let (px, py, pz) = (c[h * 3] as f64, c[h * 3 + 1] as f64, c[h * 3 + 2] as f64);
+            let v = [
+                w[1] * pz - w[2] * py,
+                w[2] * px - w[0] * pz,
+                w[0] * py - w[1] * px,
+            ];
+            let mut behind: Option<usize> = None;
+            let mut most = 0.0f64;
+            for k in range(h) {
+                let m = nbr[k] as usize;
+                if src.plate_id[m] != plate
+                    || s.new_plate[m] != plate
+                    || s.stalled[m] != 0
+                    || s.eaten[m] != 0
+                    || s.u8a[m] != 0
+                {
+                    continue;
+                }
+                let along = chord[k * 3] as f64 * v[0]
+                    + chord[k * 3 + 1] as f64 * v[1]
+                    + chord[k * 3 + 2] as f64 * v[2];
+                if along < most {
+                    most = along;
+                    behind = Some(m);
+                }
+            }
+            let Some(m) = behind else { break };
+            s.u8a[m] = 1;
+            chain.push(m);
+            s.source_of[h] = m as i32;
+            let was = target_of[m];
+            target_of[m] = h as i32;
+            if s.claimed[m] == 0 || was < 0 {
+                s.claimed[m] = 1;
+                // Crust that was to stay put leaves a gap where it stood,
+                // unless something else was already moving in.
+                hole = (s.source_of[m] < 0).then_some(m);
+            } else {
+                let was = was as usize;
+                s.source_of[was] = -1;
+                // A cell whose own crust never left keeps it: no gap there.
+                hole = (s.claimed[was] != 0).then_some(was);
+            }
+        }
+        for &m in &chain {
+            s.u8a[m] = 0;
+        }
+        if let Some(h) = hole
+            && !at_margin(&s.new_plate, h)
+        {
+            interior.push(h);
+        }
+    }
+    s.i32a = target_of;
+    out.interior_holes = torn;
+    out.interior_holes_unfilled = 0.0;
+
     let copy_cell = |dst: &mut CellData, source: usize, dest: usize| {
         dst.elevation[dest] = src.elevation[source];
         dst.plate_id[dest] = src.plate_id[source];
@@ -459,6 +585,7 @@ pub fn advect(
         dst.weakness[dest] = src.weakness[source];
         dst.slab[dest] = src.slab[source];
         dst.rift_side[dest] = src.rift_side[source];
+        dst.keel[dest] = src.keel[source];
         dst.thickness[dest] = if source == dest {
             src.thickness[source]
         } else {
@@ -485,6 +612,7 @@ pub fn advect(
                 dst.weakness[d] = src.weakness[d];
                 dst.slab[d] = 0.0;
                 dst.rift_side[d] = 0;
+                dst.keel[d] = 0.0;
                 out.rift_cell[d] = 1;
             } else {
                 copy_cell(dst, d, d);
@@ -554,7 +682,8 @@ pub fn advect(
     // `margin_eroded` is reused after the strip as remaining accretion this
     // cell may still absorb at the thickening cap.
     for d in 0..n {
-        let eroded_h = out.margin_eroded[d] as f64;
+        // A cratonic keel is too deep and buoyant for the trench to scrape.
+        let eroded_h = out.margin_eroded[d] as f64 * (1.0 - dst.keel[d] as f64);
         if eroded_h > 0.0 && out.rift_cell[d] == 0 {
             let available = (dst.thickness[d] as f64 - t.rift_thickness_floor).max(0.0);
             let take = eroded_h.min(available);
@@ -819,6 +948,117 @@ pub fn advect(
             subducted_this_step += shed * area(d);
             delaminated_this_step += shed * area(d);
         }
+    }
+
+    // --- Pass 4e: a gap that could not be handed back closes up -------------
+    // The hole takes on the crust most of its rim is made of, drawing its
+    // thickness from that crust a couple of rings around so no one cell is
+    // thinned much, and nothing is created.
+    let mut ring: Vec<usize> = Vec::new();
+    let mut next_ring: Vec<usize> = Vec::new();
+    let mut donors: Vec<usize> = Vec::new();
+    let mut spare: Vec<f64> = Vec::new();
+    for &d in &interior {
+        if out.rift_cell[d] == 0 {
+            continue;
+        }
+        let plate = dst.plate_id[d];
+        let rim = |m: usize| dst.plate_id[m] == plate && out.rift_cell[m] == 0;
+        let (mut continental, mut oceanic) = (0.0f64, 0.0f64);
+        for k in range(d) {
+            let m = nbr[k] as usize;
+            if !rim(m) {
+                continue;
+            }
+            if dst.crust_type[m] == CONTINENTAL {
+                continental += area(m);
+            } else {
+                oceanic += area(m);
+            }
+        }
+        if continental + oceanic <= 0.0 {
+            out.interior_holes_unfilled += area(d);
+            continue;
+        }
+        let kind = if continental >= oceanic {
+            CONTINENTAL
+        } else {
+            OCEANIC
+        };
+        let like = |m: usize| rim(m) && dst.crust_type[m] == kind;
+
+        let (mut model, mut rim_mass, mut rim_area) = (d, 0.0f64, 0.0f64);
+        for k in range(d) {
+            let m = nbr[k] as usize;
+            if !like(m) {
+                continue;
+            }
+            rim_mass += dst.thickness[m] as f64 * area(m);
+            rim_area += area(m);
+            if model == d || dst.thickness[m] > dst.thickness[model] {
+                model = m;
+            }
+        }
+
+        donors.clear();
+        ring.clear();
+        ring.push(d);
+        s.u8a[d] = 1;
+        for _ in 0..HOLE_DONOR_RINGS {
+            next_ring.clear();
+            for &cell in &ring {
+                for k in range(cell) {
+                    let m = nbr[k] as usize;
+                    if s.u8a[m] != 0 || !like(m) {
+                        continue;
+                    }
+                    s.u8a[m] = 1;
+                    donors.push(m);
+                    next_ring.push(m);
+                }
+            }
+            std::mem::swap(&mut ring, &mut next_ring);
+        }
+        s.u8a[d] = 0;
+        for &m in &donors {
+            s.u8a[m] = 0;
+        }
+
+        // Closing a gap must not thin the continent around it into ocean.
+        let floor = if kind == CONTINENTAL {
+            t.continental_thickness_threshold
+        } else {
+            t.rift_thickness_floor
+        };
+        spare.clear();
+        spare.extend(
+            donors
+                .iter()
+                .map(|&m| (dst.thickness[m] as f64 - floor).max(0.0) * area(m)),
+        );
+        let available: f64 = spare.iter().sum();
+        if available <= 0.0 {
+            out.interior_holes_unfilled += area(d);
+            continue;
+        }
+        let wanted = available.min(rim_mass / rim_area * area(d));
+        let mut pulled = 0.0f64;
+        for (&m, &own) in donors.iter().zip(&spare) {
+            let take = wanted * own / available;
+            add_f32(&mut dst.thickness[m], -take / area(m));
+            pulled += take;
+        }
+
+        dst.elevation[d] = dst.elevation[model];
+        dst.crust_type[d] = kind;
+        dst.age[d] = dst.age[model];
+        dst.density[d] = dst.density[model];
+        dst.weakness[d] = dst.weakness[model];
+        dst.slab[d] = dst.slab[model];
+        dst.rift_side[d] = dst.rift_side[model];
+        dst.keel[d] = dst.keel[model];
+        dst.thickness[d] = (pulled / area(d)) as f32;
+        out.rift_cell[d] = 0;
     }
 
     // --- Pass 4c: a continent rifts by stretching, not by melting ------------

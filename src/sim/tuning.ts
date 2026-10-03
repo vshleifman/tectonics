@@ -73,11 +73,35 @@ export interface Tuning {
    */
   slabInitiationTime: number;
   /**
-   * Myr a plate takes to settle onto the motion its forces call for. Slabs and
-   * keels do not change direction overnight; at 0 a plate jumps straight to the
-   * new balance each tick, which lets it reverse in a single step.
+   * Youngest ocean (Myr) that can founder into a new trench unforced. Real
+   * subduction rarely starts on its own: the Atlantic's 180 Myr-old margins
+   * have yet to. Raising it makes new trenches rarer and plate motions steadier,
+   * but the sea floor then ages far beyond Earth's (~250 Myr mean at 100) and
+   * the continents shrink, short of active margins to recycle at. 0 lets any
+   * ocean old enough to pull founder.
+   */
+  slabInitiationAge: number;
+  /**
+   * Myr a plate takes to settle onto the motion its forces call for. Plates
+   * have no inertia, but the slabs that drive them cannot swing round: a
+   * trench and the mantle flow around it take tens of Myr to reorganise, which
+   * is why plates hold their heading for tens of Myr. At 40 a large plate's
+   * heading turns ~19° over 50 Myr; at 15 it wanders ~28°.
    */
   motionResponseTime: number;
+  /**
+   * Pull on the overriding plate toward a trench, as a share of the slab pull
+   * on the plate going down: a rolling-back slab draws the plate above after
+   * it. Real, but here it makes plates track their slabs less, so off by
+   * default.
+   */
+  trenchSuction: number;
+  /**
+   * Fastest a plate's Euler pole may swing (degrees per Myr); 0 for no limit.
+   * Not physics, a knob: low values (<1) make headings very steady, but plates
+   * then cannot follow their slabs, trenches stall and continents dwindle.
+   */
+  maxTurnRate: number;
   /** Push per unit length of ridge, per km of flank relief (0 disables). */
   ridgeWeight: number;
   /**
@@ -123,6 +147,27 @@ export interface Tuning {
    * motion, so that a pair welded for long enough can be merged into one plate.
    */
   mergeQuietSpeed: number;
+  /**
+   * How strongly the mantle flowing in toward downwellings carries continents
+   * along, as a multiple of the basal drag on their keels (see
+   * sim-rs/src/mantle.rs). Slabs sinking at trenches drag the mantle down and
+   * it flows in toward them from all around; deep continental keels are
+   * carried with it, while ocean floor rides on a soft asthenosphere and goes
+   * where its slabs pull it. So continents drift toward where the mantle goes
+   * down and gather there, which is what assembles supercontinents. Higher
+   * gathers them into fewer, larger landmasses more of the time, but plate
+   * speeds track their trenches less (the Forsyth & Uyeda signature), and
+   * above ~50 faster continents feed the downwellings that pull them and the
+   * motion runs away. 0 turns it off.
+   */
+  mantleFlowCoupling: number;
+  /**
+   * Myr a downwelling outlives the subduction that feeds it: slab piles keep
+   * sinking long after the trench above them has gone quiet, and continents
+   * keep converging on where an ocean closed. Longer makes steadier targets
+   * for continents to gather over.
+   */
+  downwellingMemory: number;
 
   // --- Crust lifecycle & densities (see sim-rs/src/plates.rs, crust_lifecycle.rs) ---
   /** Oceanic crust ages out to here before being treated as fully cooled (Myr). */
@@ -167,7 +212,14 @@ export interface Tuning {
   delaminationRate: number;
 
   // --- Advection (see sim-rs/src/advect.rs) ---
-  /** Fraction of a subducting cell's mass that accretes onto the survivor. */
+  /**
+   * Fraction of a subducting cell's mass that accretes onto the survivor. This
+   * sets how fast arcs build continent, and so how fast continents turn over
+   * once {@link continentalAreaTarget} has levelled them off. Earth's arcs keep
+   * roughly a tenth of what they consume; at 0.2 continents reach their target
+   * in ~3 Gyr and their crust lasts ~1.5 Gyr before it is recycled (Earth's
+   * averages ~2 Gyr). Higher grows them faster and turns them over faster.
+   */
   accretionFraction: number;
   /**
    * Fastest a cell may thicken by accretion (km/Myr). Several cells can subduct
@@ -193,8 +245,9 @@ export interface Tuning {
    * buoyant to subduct, so this stands for the two processes that do remove it
    * at a trench -- subduction erosion of the overriding margin and subducted
    * continental sediment -- both of which are minor next to how much crust
-   * survives a collision. Keep it small: it is the main sink on continental
-   * area, and at a high value continents stop growing.
+   * survives a collision. Keep it small: the steady recycling at active
+   * margins is {@link continentalAreaTarget}'s job, and at a high value
+   * continents stop growing.
    */
   subductionErosion: number;
   /**
@@ -211,6 +264,74 @@ export interface Tuning {
    * rifted apart, and fresh ocean is minted there instead of a paper-thin sliver.
    */
   riftThicknessFloor: number;
+  /**
+   * Rate (km/Myr) at which a small body of ocean ringed by continent fills with
+   * crust shed from the land around it, until it is thick enough to count as
+   * continent. Arcs coalescing around a patch of sea floor trap it inside the
+   * continent they build, where no trench can ever reach it; on Earth such
+   * basins are buried under sediment eroded off their rims (the South Caspian
+   * holds ~20 km of it) and end up as continental basement. Without this they
+   * ride inside the continents for ever and pock-mark them.
+   */
+  basinInfillRate: number;
+  /**
+   * Largest enclosed body of ocean, as a share of the globe, that fills in.
+   * Larger trapped seas, and any touching a plate boundary, are left alone.
+   */
+  basinInfillMaxArea: number;
+  /**
+   * Share of the globe at which continental growth levels off, in [0, 1];
+   * Earth's is ~0.4. Continental crust goes back into the mantle at active
+   * margins, as sediment carried down trenches and as forearc scraped off the
+   * overriding plate, at a rate proportional to how much continent there is.
+   * That rate is matched to the growth everything else produces (averaged over
+   * 200 Myr), so the two balance at this area: growth is fast while continents
+   * are small and slows as they near it, as Earth's did. 0 uses the fixed
+   * {@link continentalRecyclingRate} instead. Arcs cannot build past a natural
+   * ceiling of roughly half the globe at the default accretion, as the ocean
+   * that feeds them runs out; a target above it leaves growth uncapped.
+   */
+  continentalAreaTarget: number;
+  /**
+   * Share of the continental area recycled per Myr when
+   * {@link continentalAreaTarget} is 0. Earth returns ~3 km³/yr of its ~7×10⁹
+   * km³ of continental crust, ~0.0004 per Myr; where growth then levels off is
+   * up to the rest of the model.
+   */
+  continentalRecyclingRate: number;
+
+  // --- Cratons (see sim-rs/src/craton.rs) ---
+  /**
+   * Age (Myr) continental crust must reach before it can grow a cratonic keel:
+   * the cold, buoyant, stiff mantle root of an ancient continental core.
+   */
+  cratonMinAge: number;
+  /**
+   * How far inland (radians; 0.02 ≈ 130 km) crust must lie from the ocean to
+   * grow a keel: continental margins are too busy to cratonise. A plate
+   * boundary through a continent does not count; a craton may lie against a
+   * suture.
+   */
+  cratonInland: number;
+  /** Myr for a qualifying interior to grow a full keel. */
+  cratonGrowthTime: number;
+  /**
+   * Myr for a keel to be lost where its crust is rifted, weakened or thinned,
+   * as North China's was.
+   */
+  cratonDecayTime: number;
+  /**
+   * Extra strength a full keel gives continental lithosphere against rifting,
+   * on top of its own 1: rifts go around cratons and break continents along
+   * the younger belts between them, so the pieces keep their cores.
+   */
+  cratonStrength: number;
+  /**
+   * Extra coupling a full keel gives its crust to the mantle beneath, on top
+   * of {@link continentalDrag}: craton-bearing plates resist changes of motion
+   * and are carried harder by {@link mantleFlowCoupling}.
+   */
+  cratonKeelGain: number;
 
   // --- Rifting (see sim-rs/src/rifting.rs) ---
   /**
@@ -307,6 +428,12 @@ export interface Tuning {
    */
   domePush: number;
   /**
+   * Myr after a breakup that {@link domePush} goes on separating the pieces,
+   * until breakup melting has vented the dome. A push lasting for good between
+   * every pair of hot neighbours would hold all continents apart.
+   */
+  domePushDuration: number;
+  /**
    * Share of the mantle heat under a plate that is vented when it rifts, as
    * the melting of breakup does. Too little and the pieces, still sitting on
    * hot mantle, break again within a few ticks, so a supercontinent shatters
@@ -352,7 +479,10 @@ export const defaultTuning: Tuning = {
   slabFullLength: 0.1,
   slabDecayTime: 30,
   slabInitiationTime: 20,
-  motionResponseTime: 15,
+  slabInitiationAge: 0,
+  motionResponseTime: 40,
+  trenchSuction: 0,
+  maxTurnRate: 0,
   ridgeWeight: 0.05,
   mantleDrag: 30,
   continentalDrag: 3,
@@ -362,6 +492,8 @@ export const defaultTuning: Tuning = {
   sutureMergeTime: 80,
   boundaryDeathTime: 120,
   mergeQuietSpeed: 0.002,
+  mantleFlowCoupling: 30,
+  downwellingMemory: 800,
 
   maxOceanicAge: 200,
   continentalDensity: 2.7,
@@ -373,7 +505,7 @@ export const defaultTuning: Tuning = {
   maxCrustThickness: 60,
   delaminationRate: 0.3,
 
-  accretionFraction: 0.35,
+  accretionFraction: 0.2,
   maxThickeningPerMyr: 0.5,
   subductionErosion: 0.05,
   marginErosion: 0.12,
@@ -381,6 +513,16 @@ export const defaultTuning: Tuning = {
   crustSpreadRate: 0.05,
   riftDensity: 2.9,
   riftThicknessFloor: 2,
+  basinInfillRate: 1,
+  basinInfillMaxArea: 0.0005,
+  continentalAreaTarget: 0.4,
+  continentalRecyclingRate: 0.0004,
+  cratonMinAge: 500,
+  cratonInland: 0.02,
+  cratonGrowthTime: 400,
+  cratonDecayTime: 100,
+  cratonStrength: 2,
+  cratonKeelGain: 1,
 
   riftStrength: 0.65,
   oceanicStrengthYoung: 0.6,
@@ -400,6 +542,7 @@ export const defaultTuning: Tuning = {
   insulationWeakening: 0.6,
   insulationDrive: 1.2,
   domePush: 0.5,
+  domePushDuration: 60,
   riftHeatRelease: 0.5,
 
   minPlateArea: 0.0005,

@@ -23,11 +23,14 @@ export interface ColourFields {
   plateId: ArrayLike<number>;
   crustType: ArrayLike<number>;
   density: ArrayLike<number>;
+  keel: ArrayLike<number>;
 }
 
 const WHITE: Rgb = [1, 1, 1];
 const NO_PLATE: Rgb = [0.5, 0.5, 0.5];
 const CONTINENTAL: Rgb = [0.82, 0.71, 0.48];
+/** Cratons in the deep rose-brown geological maps give Archean shields. */
+const CRATON: Rgb = [0.55, 0.3, 0.27];
 const OCEANIC: Rgb = [0.13, 0.32, 0.55];
 const DENSITY_LIGHT: Rgb = [0.95, 0.93, 0.82];
 const DENSITY_DARK: Rgb = [0.35, 0.12, 0.18];
@@ -111,7 +114,7 @@ const putMix = (
 
 /**
  * Fill `out` (RGBA8, four bytes per cell) with every cell's colour for the
- * active mode. Allocation-free per cell: the ramps' anchors are resolved once
+ * active mode. The crust view shades continent toward craton by keel. Allocation-free per cell: the ramps' anchors are resolved once
  * up front, and plate hues are memoised per id.
  */
 export const writeCellColours = (
@@ -141,7 +144,11 @@ export const writeCellColours = (
     }
     case "crust":
       for (let i = 0; i < cellCount; i++) {
-        put(out, i * 4, data.crustType[i] === 1 ? CONTINENTAL : OCEANIC);
+        if (data.crustType[i] === 1) {
+          putMix(out, i * 4, CONTINENTAL, CRATON, clamp01(data.keel[i]));
+        } else {
+          put(out, i * 4, OCEANIC);
+        }
       }
       return;
     case "density": {

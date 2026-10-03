@@ -38,7 +38,7 @@ use std::collections::BinaryHeap;
 use crate::cell_data::{CONTINENTAL, CellData, RIFT_FAR, RIFT_NEAR};
 use crate::math::{Vec3, clamp01, cross, dot, len3, normalise, rotate};
 use crate::mesh::Mesh;
-use crate::plates::{OpeningRift, PlateData, PlateProps, PlateStress};
+use crate::plates::{OpeningRift, PlateData, PlateProps, PlateStress, suture_key};
 use crate::registry::Registry;
 use crate::scratch::Scratch;
 use crate::shape::Moments;
@@ -261,7 +261,8 @@ fn insulate(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scratch, t: &
 /// and heat. Oceanic lithosphere thickens as the square root of its age.
 fn lithosphere_strength(t: &Tuning, data: &CellData, i: usize) -> f64 {
     if data.crust_type[i] == CONTINENTAL {
-        return 1.0;
+        // A cratonic keel is cold and stiff; rifts go around it.
+        return 1.0 + t.craton_strength * data.keel[i] as f64;
     }
     let cooled = clamp01(data.age[i] as f64 / t.max_oceanic_age).sqrt();
     t.oceanic_strength_young + (t.oceanic_strength_old - t.oceanic_strength_young) * cooled
@@ -805,6 +806,7 @@ fn break_up(
     plates.rifts += 1;
     plates.opening.shift_remove(&id);
     let new_id = registry.allocate();
+    plates.breakups.insert(suture_key(id, new_id), 0.0);
     let omega = plates.by_id.get(&id).map_or([0.0, 0.0, 0.0], |p| p.omega);
     plates.by_id.insert(
         new_id,

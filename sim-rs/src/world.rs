@@ -4,14 +4,17 @@
 use crate::advect::{AdvectionField, advect};
 use crate::boundaries::{BoundaryField, classify};
 use crate::cell_data::{CellData, total_crust_mass};
-use crate::crust_lifecycle::apply_crust_lifecycle;
+use crate::craton::update_cratons;
+use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins};
 use crate::elevation::apply_elevation;
+use crate::mantle::MantleFlow;
 use crate::math::read3;
 use crate::mesh::Mesh;
 use crate::metrics::{PlateSummary, WorldMetrics, compute_metrics, summaries};
 use crate::plate_forces::update_plate_motion;
 use crate::plate_lifecycle::update_plate_identity;
 use crate::plates::{PlateData, initialise_crust, reconcile};
+use crate::recycling::{recycle_continental_margins, track_continental_growth};
 use crate::registry::{Registry, assign_plates};
 use crate::rifting::update_rifting;
 use crate::rng::Rng;
@@ -32,6 +35,7 @@ pub struct Sim {
     registry: Registry,
     boundaries: BoundaryField,
     advection: AdvectionField,
+    mantle: MantleFlow,
     scratch: Scratch,
     raw_labels: Vec<i32>,
     pub tuning: Tuning,
@@ -55,6 +59,7 @@ impl Sim {
             registry: Registry::default(),
             boundaries: BoundaryField::new(n, arcs),
             advection: AdvectionField::new(n),
+            mantle: MantleFlow::new(&mesh),
             scratch: Scratch::new(n),
             raw_labels: vec![0; n],
             tuning: Tuning::default(),
@@ -78,6 +83,10 @@ impl Sim {
             self.advection.live_mass = self.initial_mass;
             self.advection.subducted_total = 0.0;
             self.advection.created_total = 0.0;
+            self.advection.recycle_debt = 0.0;
+            self.advection.continental_growth = 0.0;
+            self.advection.continental_share_before = None;
+            self.mantle.reset();
             self.elapsed = 0.0;
         }
         seed_slabs(&self.mesh, &mut self.front, &self.boundaries, &self.tuning);
@@ -87,6 +96,7 @@ impl Sim {
             &self.front,
             &mut self.plates,
             &self.boundaries,
+            &self.mantle,
             &mut self.scratch,
             &self.tuning,
             dt,
@@ -111,6 +121,7 @@ impl Sim {
             registry,
             boundaries,
             advection,
+            mantle,
             scratch,
             tuning: t,
             options,
@@ -126,7 +137,8 @@ impl Sim {
         };
 
         update_slabs(mesh, front, boundaries, scratch, t, dt);
-        update_plate_motion(mesh, front, plates, boundaries, scratch, t, dt);
+        mantle.update(mesh, front, boundaries, dt, t);
+        update_plate_motion(mesh, front, plates, boundaries, mantle, scratch, t, dt);
         lap(0);
         classify(mesh, front, plates, boundaries, scratch, t);
         lap(1);
@@ -140,7 +152,11 @@ impl Sim {
         lap(4);
         update_rifting(mesh, back, plates, dt, registry, scratch, t, options);
         lap(5);
+        recycle_continental_margins(mesh, back, dt, advection, t);
+        infill_enclosed_basins(mesh, back, dt, advection, scratch, t);
         apply_crust_lifecycle(&mesh.areas, back, dt, advection, t);
+        track_continental_growth(mesh, back, dt, advection);
+        update_cratons(mesh, back, dt, scratch, t);
         lap(6);
         apply_elevation(&mesh.arc_cells, back, dt, boundaries, t);
         lap(7);
@@ -270,6 +286,41 @@ mod tests {
         assert!(sim.plate_count() > 1);
     }
 
+    /// Continental share of the globe after `myr`, sampled every 100 Myr over
+    /// the last `window` Myr.
+    fn continental_area_after(target: f64, myr: f64, window: f64) -> Vec<f64> {
+        let mut sim = Sim::new(4);
+        sim.tuning.continental_area_target = target;
+        sim.crack_great_circles(4, "growth");
+        let ticks = (myr / sim.tuning.dt_myr) as usize;
+        let every = (100.0 / sim.tuning.dt_myr) as usize;
+        let from = ((myr - window) / sim.tuning.dt_myr) as usize;
+        let mut samples = Vec::new();
+        for tick in 1..=ticks {
+            sim.tick();
+            if tick >= from && tick % every == 0 {
+                samples.push(sim.metrics().continental_area);
+            }
+        }
+        let drift = sim.mass_drift();
+        assert!(drift.abs() < 1e-3, "drift {drift}");
+        samples
+    }
+
+    /// Two targets under the natural ceiling, which on a mesh this coarse is
+    /// only ~0.27.
+    #[test]
+    fn continental_growth_levels_off_at_the_target() {
+        for target in [0.12, 0.22] {
+            let samples = continental_area_after(target, 5000.0, 1000.0);
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            assert!(
+                (mean - target).abs() < 0.04,
+                "target {target}: levelled off at {mean:.3} ({samples:.3?})"
+            );
+        }
+    }
+
     #[test]
     fn world_keeps_moving() {
         let mut sim = Sim::new(4);
@@ -283,10 +334,12 @@ mod tests {
     }
 
     /// A hemisphere of continent at rest over mantle heat just past what it
-    /// takes to tear intact continent, beside ocean too young to pull: the only
-    /// thing that can break it is the heat.
+    /// takes to tear intact continent, beside ocean too young to pull and with
+    /// no mantle flow to carry it: the only thing that can break it is the
+    /// heat.
     fn hot_continent(tune: impl FnOnce(&mut Tuning)) -> Sim {
         let mut sim = Sim::new(4);
+        sim.tuning.mantle_flow_coupling = 0.0;
         tune(&mut sim.tuning);
         sim.crack_great_circles(1, "dome");
         let continent = sim.front.plate_id[0];
@@ -424,6 +477,164 @@ mod tests {
             sim.tick();
         }
         assert_eq!(sim.rift_count(), 0, "a failed rift still broke the plate");
+    }
+
+    #[test]
+    fn a_drifting_continent_opens_no_ocean_inside_it() {
+        use crate::math::{cross, normalise, scale};
+        let mut sim = hot_continent(|_| {});
+        sim.options.supercontinent_insulation = false;
+        sim.front.mantle_heat.fill(0.0);
+        let continent = sim.front.plate_id[0];
+        let n = sim.mesh.cell_count;
+        let c = &sim.mesh.centres;
+        let mut centre = [0.0f64; 3];
+        for i in (0..n).filter(|&i| sim.front.plate_id[i] == continent) {
+            for (axis, p) in centre.iter_mut().enumerate() {
+                *p += c[i * 3 + axis] as f64;
+            }
+        }
+        let centre = normalise(centre);
+        let across = normalise(cross(centre, [0.0, 0.0, 1.0]));
+        // A pole out in the ocean, so the whole continent drifts across the
+        // mesh rather than wheeling about a point of itself.
+        let (sin, cos) = 120f64.to_radians().sin_cos();
+        let pole = normalise([
+            cos * centre[0] + sin * across[0],
+            cos * centre[1] + sin * across[1],
+            cos * centre[2] + sin * across[2],
+        ]);
+        let omega = scale(pole, 0.03);
+        // Building the continent by hand put crust outside the ledger, so the
+        // drift is measured from the first tick on.
+        sim.tick();
+        let drift = sim.mass_drift();
+        let mut holes = 0.0;
+        for _ in 0..40 {
+            if let Some(p) = sim.plates.by_id.get_mut(&continent) {
+                p.omega = omega;
+            }
+            sim.tick();
+            holes += sim.advection.interior_holes;
+            // Ocean made this tick with continent all round it.
+            let d = &sim.front;
+            let continental = |i: usize| d.crust_type[i] == crate::cell_data::CONTINENTAL;
+            let opened = (0..n)
+                .filter(|&i| {
+                    !continental(i)
+                        && d.age[i] as f64 <= sim.tuning.dt_myr
+                        && sim
+                            .mesh
+                            .nbrs(i)
+                            .all(|k| continental(sim.mesh.nbr[k] as usize))
+                })
+                .count();
+            assert_eq!(opened, 0, "ocean opened inside the continent");
+        }
+        assert!(holes > 0.0, "the transport tore no gaps to close");
+        let change = sim.mass_drift() - drift;
+        assert!(
+            change.abs() < 1e-4,
+            "closing gaps lost or made crust: {change}"
+        );
+    }
+
+    #[test]
+    fn ocean_trapped_inside_a_continent_fills_in() {
+        use crate::cell_data::{CONTINENTAL, OCEANIC};
+        let mut sim = hot_continent(|_| {});
+        sim.options.supercontinent_insulation = false;
+        sim.front.mantle_heat.fill(0.0);
+        let continent = sim.front.plate_id[0];
+        let mesh = &sim.mesh;
+        let deep = |i: usize| {
+            mesh.nbrs(i).all(|k| {
+                let m = mesh.nbr[k] as usize;
+                mesh.nbrs(m)
+                    .all(|j| sim.front.plate_id[mesh.nbr[j] as usize] == continent)
+            })
+        };
+        let pocket = (0..mesh.cell_count)
+            .find(|&i| sim.front.plate_id[i] == continent && deep(i))
+            .expect("no cell deep inside the continent");
+        let d = &mut sim.front;
+        d.crust_type[pocket] = OCEANIC;
+        d.thickness[pocket] = 9.0;
+        d.age[pocket] = 150.0;
+        d.density[pocket] = sim.tuning.oceanic_density_old as f32;
+        // Building the world by hand put crust outside the ledger, so the
+        // drift is measured from the first tick on.
+        sim.tick();
+        assert_eq!(sim.front.crust_type[pocket], OCEANIC, "filled in at once");
+        let drift = sim.mass_drift();
+        let ticks = (40.0 / sim.tuning.dt_myr) as usize;
+        for _ in 0..ticks {
+            for p in sim.plates.by_id.values_mut() {
+                p.omega = [0.0; 3];
+            }
+            sim.tick();
+        }
+        assert_eq!(
+            sim.front.crust_type[pocket], CONTINENTAL,
+            "trapped ocean never filled"
+        );
+        let change = sim.mass_drift() - drift;
+        assert!(
+            change.abs() < 1e-4,
+            "filling in lost or made crust: {change}"
+        );
+    }
+
+    #[test]
+    fn keels_grow_in_quiet_interiors_and_not_at_margins() {
+        use crate::cell_data::{CONTINENTAL, OCEANIC};
+        let mut sim = Sim::new(4);
+        sim.options.supercontinent_insulation = false;
+        sim.tuning.mantle_flow_coupling = 0.0;
+        // Recycling would eat the coast back to the cratons, which it spares.
+        sim.tuning.continental_area_target = 0.0;
+        sim.tuning.continental_recycling_rate = 0.0;
+        sim.crack_great_circles(1, "craton");
+        let continent = sim.front.plate_id[0];
+        let d = &mut sim.front;
+        for i in 0..sim.mesh.cell_count {
+            d.mantle_heat[i] = 0.0;
+            d.slab[i] = 0.0;
+            d.age[i] = 1000.0;
+            if d.plate_id[i] == continent {
+                d.crust_type[i] = CONTINENTAL;
+                d.thickness[i] = 38.0;
+                d.density[i] = sim.tuning.continental_density as f32;
+            } else {
+                d.crust_type[i] = OCEANIC;
+            }
+        }
+        let ticks = (1.5 * sim.tuning.craton_growth_time / sim.tuning.dt_myr) as usize;
+        for _ in 0..ticks {
+            for p in sim.plates.by_id.values_mut() {
+                p.omega = [0.0; 3];
+            }
+            sim.tick();
+        }
+        let d = &sim.front;
+        let mesh = &sim.mesh;
+        let (mut deep, mut edge) = ((0.0f32, 0usize), (0.0f32, 0usize));
+        for i in 0..mesh.cell_count {
+            if d.crust_type[i] != CONTINENTAL {
+                continue;
+            }
+            let at_edge = mesh.nbrs(i).any(|k| {
+                let m = mesh.nbr[k] as usize;
+                d.crust_type[m] != CONTINENTAL || d.plate_id[m] != d.plate_id[i]
+            });
+            let bucket = if at_edge { &mut edge } else { &mut deep };
+            bucket.0 += d.keel[i];
+            bucket.1 += 1;
+        }
+        let deep = deep.0 / deep.1.max(1) as f32;
+        let edge = edge.0 / edge.1.max(1) as f32;
+        assert!(deep > 0.5, "interior barely cratonised: {deep}");
+        assert!(edge < 0.1, "margins cratonised: {edge}");
     }
 
     #[test]

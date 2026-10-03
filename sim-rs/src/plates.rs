@@ -52,6 +52,10 @@ pub struct PlateData {
     pub stress: HashMap<i32, PlateStress>,
     /// Plates with a rift still stretching.
     pub opening: IndexMap<i32, OpeningRift>,
+    /// Myr since each pair of plates broke apart over trapped heat, keyed by
+    /// [`suture_key`]: the dome between them pushes them apart until it has
+    /// vented, then stops.
+    pub breakups: IndexMap<i64, f64>,
     /// Rifts that broke a plate in two since the world was built.
     pub rifts: u64,
     /// Rifts that began to stretch but stalled and healed.

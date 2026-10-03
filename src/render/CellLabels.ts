@@ -25,6 +25,7 @@ export interface LabelFields {
   age: ArrayLike<number>;
   density: ArrayLike<number>;
   thickness: ArrayLike<number>;
+  keel: ArrayLike<number>;
 }
 
 /** Multi-line debug dump of every per-cell property for a given cell. */
@@ -35,7 +36,8 @@ const labelText = (data: LabelFields, i: number): string =>
   `crust ${data.crustType[i] === 1 ? "cont" : "ocean"}\n` +
   `age ${data.age[i].toFixed(1)}\n` +
   `dens ${data.density[i].toFixed(2)}\n` +
-  `thick ${data.thickness[i].toFixed(1)}`;
+  `thick ${data.thickness[i].toFixed(1)}\n` +
+  `keel ${data.keel[i].toFixed(2)}`;
 
 /**
  * Overlays crisp HTML labels (cell id + elevation) on each cell using a

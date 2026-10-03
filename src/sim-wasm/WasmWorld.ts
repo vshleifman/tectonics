@@ -69,6 +69,7 @@ export class WasmWorld implements SimWorld {
       age: new Float32Array(buffer, w.age_ptr(), cells),
       density: new Float32Array(buffer, w.density_ptr(), cells),
       thickness: new Float32Array(buffer, w.thickness_ptr(), cells),
+      keel: new Float32Array(buffer, w.keel_ptr(), cells),
       cellKind: new Uint8Array(buffer, w.cell_kind_ptr(), cells),
       arcKind: new Int8Array(buffer, w.arc_kind_ptr(), arcs),
     };

@@ -24,6 +24,10 @@ pub struct CellData {
     /// Which side of a rift that is still stretching the cell lies on:
     /// 0 for none, otherwise [`RIFT_NEAR`] or [`RIFT_FAR`]. Travels with crust.
     pub rift_side: Vec<u8>,
+    /// How far the cell's continental crust has grown a cratonic keel, in
+    /// [0, 1]: the deep, cold, buoyant root of an ancient continental core.
+    /// Travels with crust.
+    pub keel: Vec<f32>,
 }
 
 pub const RIFT_NEAR: u8 = 1;
@@ -42,6 +46,7 @@ impl CellData {
             mantle_heat: vec![0.0; n],
             slab: vec![0.0; n],
             rift_side: vec![0; n],
+            keel: vec![0.0; n],
         }
     }
 }

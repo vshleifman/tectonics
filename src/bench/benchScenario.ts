@@ -43,10 +43,20 @@ export interface TrajectoryPoint {
   thinContinentalArea: number;
   continentalisedByAccretion: number;
   continentalisedBySpreading: number;
+  continentalisedByInfill: number;
+  continentalRecycled: number;
+  continentalGrowth: number;
   continentalEroded: number;
   delaminated: number;
   foundered: number;
   decontinentalised: number;
+  interiorHoles: number;
+  interiorHolesUnfilled: number;
+  oceanPocketCount: number;
+  oceanPocketArea: number;
+  continentCount: number;
+  largestContinentShare: number;
+  cratonShare: number;
   meanOceanAge: number;
   maxOceanAge: number;
   oceanRecyclingMyr: number | null;
@@ -118,10 +128,20 @@ export const runBench = (
       thinContinentalArea: m.thinContinentalArea,
       continentalisedByAccretion: m.continentalisedByAccretion,
       continentalisedBySpreading: m.continentalisedBySpreading,
+      continentalisedByInfill: m.continentalisedByInfill,
+      continentalRecycled: m.continentalRecycled,
+      continentalGrowth: m.continentalGrowth,
       continentalEroded: m.continentalEroded,
       delaminated: m.delaminated,
       foundered: m.foundered,
       decontinentalised: m.decontinentalised,
+      interiorHoles: m.interiorHoles,
+      interiorHolesUnfilled: m.interiorHolesUnfilled,
+      oceanPocketCount: m.oceanPocketCount,
+      oceanPocketArea: m.oceanPocketArea,
+      continentCount: m.continentCount,
+      largestContinentShare: m.largestContinentShare,
+      cratonShare: m.cratonShare,
       meanOceanAge: m.meanOceanAge,
       maxOceanAge: m.maxOceanAge,
       oceanRecyclingMyr: m.oceanRecyclingMyr,
@@ -165,11 +185,20 @@ const describeContinentalBudget = (r: BenchResult): string => {
     ` | continents: area ${percent(last.continentalArea, 1)}, mass ${percent(last.continentalMassShare, 1)}, ` +
     `mean ${last.meanContinentalThickness.toFixed(1)} km, thin ${percent(last.thinContinentalArea, 2)}; ` +
     `gain/Myr accretion ${percent(mean("continentalisedByAccretion"), 4)} ` +
-    `spreading ${percent(mean("continentalisedBySpreading"), 4)}; ` +
+    `spreading ${percent(mean("continentalisedBySpreading"), 4)} ` +
+    `infill ${percent(mean("continentalisedByInfill"), 4)}, ` +
+    `net growth ${percent(mean("continentalGrowth"), 4)}; ` +
+    `recycled/Myr ${percent(mean("continentalRecycled"), 4)}; ` +
     `loss/Myr erosion ${percent(mean("continentalEroded"), 4)} ` +
     `delamination ${percent(mean("delaminated"), 4)} ` +
     `founder ${percent(mean("foundered"), 4)}; ` +
-    `revert/Myr ${percent(mean("decontinentalised"), 4)}`
+    `revert/Myr ${percent(mean("decontinentalised"), 4)}; ` +
+    `interior holes/Myr ${percent(mean("interiorHoles"), 4)} ` +
+    `unfilled ${percent(mean("interiorHolesUnfilled"), 4)}; ` +
+    `pockets ${last.oceanPocketCount} (${percent(last.oceanPocketArea, 2)}); ` +
+    `continents ${mean("continentCount").toFixed(1)}, ` +
+    `largest ${percent(mean("largestContinentShare"), 0)} of continental area, ` +
+    `cratons ${percent(mean("cratonShare"), 0)}`
   );
 };
 

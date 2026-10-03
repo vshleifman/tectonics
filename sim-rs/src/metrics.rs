@@ -16,6 +16,12 @@ pub const AGE_BIN_MYR: f64 = 20.0;
 pub const AGE_BINS: usize = 10;
 const MIN_CORRELATION_AREA: f64 = 0.01;
 const MAJOR_PLATE_AREA: f64 = 0.02;
+/// Share of the globe below which a body of ocean ringed by continent counts as
+/// a pocket: about the size of the Caspian.
+const OCEAN_POCKET_AREA: f64 = 0.0005;
+/// Share of the globe a landmass must cover to count as a continent: Australia
+/// with its shelf is ~1.7%, Greenland ~0.4%.
+const CONTINENT_AREA: f64 = 0.005;
 const EARTH_RADIUS_KM: f64 = 6371.0;
 const CM_PER_YR_PER_RAD_MYR: f64 = EARTH_RADIUS_KM * 1e5 / 1e6;
 
@@ -40,10 +46,20 @@ pub struct WorldMetrics {
     pub thin_continental_area: f64,
     pub continentalised_by_accretion: f64,
     pub continentalised_by_spreading: f64,
+    pub continentalised_by_infill: f64,
+    pub continental_recycled: f64,
+    pub continental_growth: f64,
     pub continental_eroded: f64,
     pub delaminated: f64,
     pub foundered: f64,
     pub decontinentalised: f64,
+    pub interior_holes: f64,
+    pub interior_holes_unfilled: f64,
+    pub ocean_pocket_count: usize,
+    pub continent_count: usize,
+    pub largest_continent_share: f64,
+    pub craton_share: f64,
+    pub ocean_pocket_area: f64,
     pub mean_ocean_age: f64,
     pub max_ocean_age: f64,
     pub ocean_recycling_myr: Option<f64>,
@@ -79,6 +95,7 @@ pub fn compute_metrics(
     let mut continental_area = 0.0;
     let mut continental_mass = 0.0;
     let mut thin_continental_area = 0.0;
+    let mut craton_area = 0.0;
     let mut ocean_area = 0.0;
     let mut ocean_age_area = 0.0;
     let mut max_ocean_age = 0.0f64;
@@ -97,6 +114,7 @@ pub fn compute_metrics(
         if data.crust_type[i] == CONTINENTAL {
             continental_area += area;
             continental_mass += area * data.thickness[i] as f64;
+            craton_area += area * data.keel[i] as f64;
             if (data.thickness[i] as f64) < t.continental_thickness_threshold {
                 thin_continental_area += area;
             }
@@ -196,6 +214,9 @@ pub fn compute_metrics(
     }
     drives.sort_by(|a, b| b.area_share.total_cmp(&a.area_share));
 
+    let (ocean_pocket_count, pocket_area) = ocean_pockets(mesh, data, total_area);
+    let (continent_count, largest_continent) = landmasses(mesh, data, total_area);
+
     let dt = dt_myr.max(1e-9);
     let per_myr = advection.subducted_this_step / dt;
     let globe_share_per_myr = |a: f64| {
@@ -247,10 +268,32 @@ pub fn compute_metrics(
         },
         continentalised_by_accretion: globe_share_per_myr(advection.continentalised_by_accretion),
         continentalised_by_spreading: globe_share_per_myr(advection.continentalised_by_spreading),
+        continentalised_by_infill: globe_share_per_myr(advection.continentalised_by_infill),
+        continental_recycled: globe_share_per_myr(advection.continental_recycled),
+        continental_growth: advection.continental_growth,
         continental_eroded: continental_share_per_myr(advection.eroded_this_step),
         delaminated: continental_share_per_myr(advection.delaminated_this_step),
         foundered: continental_share_per_myr(advection.foundered_this_step),
         decontinentalised: globe_share_per_myr(advection.decontinentalised),
+        interior_holes: globe_share_per_myr(advection.interior_holes),
+        interior_holes_unfilled: globe_share_per_myr(advection.interior_holes_unfilled),
+        ocean_pocket_count,
+        continent_count,
+        largest_continent_share: if continental_area > 0.0 {
+            largest_continent / continental_area
+        } else {
+            0.0
+        },
+        craton_share: if continental_area > 0.0 {
+            craton_area / continental_area
+        } else {
+            0.0
+        },
+        ocean_pocket_area: if total_area > 0.0 {
+            pocket_area / total_area
+        } else {
+            0.0
+        },
         mean_ocean_age: if ocean_area > 0.0 {
             ocean_age_area / ocean_area
         } else {
@@ -280,6 +323,72 @@ pub fn compute_metrics(
         speed_trench_correlation: correlate(&correlated),
         drives,
     }
+}
+
+/// Connected bodies of continental crust, whichever plates they ride on: how
+/// many cover at least [`CONTINENT_AREA`] of the globe, and the area of the
+/// largest.
+fn landmasses(mesh: &Mesh, data: &CellData, total_area: f64) -> (usize, f64) {
+    let n = mesh.cell_count;
+    let mut seen = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let (mut count, mut largest) = (0usize, 0.0f64);
+    for start in 0..n {
+        if seen[start] || data.crust_type[start] != CONTINENTAL {
+            continue;
+        }
+        seen[start] = true;
+        stack.push(start);
+        let mut area = 0.0;
+        while let Some(cell) = stack.pop() {
+            area += mesh.area(cell);
+            for k in mesh.nbrs(cell) {
+                let m = mesh.nbr[k] as usize;
+                if !seen[m] && data.crust_type[m] == CONTINENTAL {
+                    seen[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        if area >= CONTINENT_AREA * total_area {
+            count += 1;
+        }
+        largest = largest.max(area);
+    }
+    (count, largest)
+}
+
+/// Bodies of oceanic crust under [`OCEAN_POCKET_AREA`] of the globe, each
+/// necessarily ringed by continent: how many, and their total area.
+fn ocean_pockets(mesh: &Mesh, data: &CellData, total_area: f64) -> (usize, f64) {
+    let n = mesh.cell_count;
+    let limit = OCEAN_POCKET_AREA * total_area;
+    let mut seen = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let (mut count, mut pocket_area) = (0usize, 0.0f64);
+    for start in 0..n {
+        if seen[start] || data.crust_type[start] == CONTINENTAL {
+            continue;
+        }
+        seen[start] = true;
+        stack.push(start);
+        let mut area = 0.0;
+        while let Some(cell) = stack.pop() {
+            area += mesh.area(cell);
+            for k in mesh.nbrs(cell) {
+                let m = mesh.nbr[k] as usize;
+                if !seen[m] && data.crust_type[m] != CONTINENTAL {
+                    seen[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        if area < limit {
+            count += 1;
+            pocket_area += area;
+        }
+    }
+    (count, pocket_area)
 }
 
 /// Pearson correlation of speed against trench fraction, or `None` where it
