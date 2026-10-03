@@ -4,9 +4,15 @@ import type { Projection } from "../render/projection";
  * How cells render: elevation colour ("colour"), greyscale with per-cell
  * id/elevation labels ("data"), crust type ("crust"), density ramp ("density"),
  * or boundary type ("boundary"). Plates are no longer a base view mode — they
- * are an independently-toggled overlay (see `showPlates`).
+ * are an independently chosen overlay (see `plateOverlay`).
  */
 export type ViewMode = "colour" | "data" | "crust" | "density" | "boundary";
+
+/**
+ * How plate regions are drawn over the base view: not at all, as boundary
+ * lines, or as a coloured fill together with those lines.
+ */
+export type PlateOverlay = "off" | "lines" | "colours";
 
 /** Every user-tunable UI setting. The store below is the sole owner of these. */
 export interface Settings {
@@ -18,10 +24,12 @@ export interface Settings {
   seedMode: boolean;
   branchesPerSeed: number;
   showVelocities: boolean;
-  showPlates: boolean;
+  plateOverlay: PlateOverlay;
   running: boolean;
   /** Simulation ticks attempted per second of wall clock. */
   ticksPerSecond: number;
+  /** When true, the control panels and diagnostics are taken off the screen. */
+  uiHidden: boolean;
 }
 
 /** Listener fired after a `set`, told which keys actually changed. */

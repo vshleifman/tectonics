@@ -8,7 +8,11 @@ import { CellRenderer, type ColourMode } from "./render/CellRenderer";
 import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
 import { simOptions, tuning } from "./sim/tuning";
 import { createControls } from "./ui/controls";
-import { createSettingsStore, type ViewMode } from "./ui/settingsStore";
+import {
+  createSettingsStore,
+  type PlateOverlay,
+  type ViewMode,
+} from "./ui/settingsStore";
 import type { Snapshot } from "./worker/protocol";
 import { platesFromOmegas, SimClient } from "./worker/SimClient";
 
@@ -20,7 +24,8 @@ const INITIAL_VIEW_MODE: ViewMode = "colour";
 const INITIAL_SEED_MODE = true;
 const INITIAL_BRANCHES_PER_SEED = 3;
 const INITIAL_SHOW_VELOCITIES = false;
-const INITIAL_SHOW_PLATES = true;
+const INITIAL_PLATE_OVERLAY: PlateOverlay = "colours";
+const INITIAL_UI_HIDDEN = false;
 const INITIAL_RUNNING = false;
 /**
  * Default simulation rate. Tectonics is decoupled from rendering and ticks
@@ -122,9 +127,10 @@ const settings = createSettingsStore({
   seedMode: INITIAL_SEED_MODE,
   branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
   showVelocities: INITIAL_SHOW_VELOCITIES,
-  showPlates: INITIAL_SHOW_PLATES,
+  plateOverlay: INITIAL_PLATE_OVERLAY,
   running: INITIAL_RUNNING,
   ticksPerSecond: INITIAL_TICKS_PER_SECOND,
+  uiHidden: INITIAL_UI_HIDDEN,
 });
 
 /** Map the UI view mode onto the renderer's colour mode. */
@@ -144,21 +150,29 @@ const recolour = (): void => {
   );
 };
 
-/** Refresh the plates overlay colours (if it is shown). */
+/**
+ * Refresh whatever the current plate overlay draws. The coloured fill is only
+ * the "colours" mode; the boundary lines are drawn in both "lines" and
+ * "colours".
+ */
 const refreshPlateOverlay = (): void => {
   const snapshot = client.snapshot;
-  if (!snapshot || !settings.get("showPlates")) return;
-  cellRenderer?.updatePlateOverlay(snapshot.buffers);
+  const overlay = settings.get("plateOverlay");
+  if (!snapshot || !cellRenderer || overlay === "off") return;
+  if (overlay === "colours") cellRenderer.updatePlateOverlay(snapshot.buffers);
+  cellRenderer.updatePlateLines(snapshot.buffers.plateId);
 };
 
 const applyVelocities = (): void => {
   cellRenderer?.setVelocitiesVisible(settings.get("showVelocities"));
 };
 
-/** Set the plates-overlay visibility and refresh its colours when shown. */
+/** Set the plates-overlay visibility and refresh it when it is shown. */
 const applyShowPlates = (): void => {
+  const overlay = settings.get("plateOverlay");
   refreshPlateOverlay();
-  cellRenderer?.setPlatesVisible(settings.get("showPlates"));
+  cellRenderer?.setPlatesVisible(overlay === "colours");
+  cellRenderer?.setPlateLinesVisible(overlay !== "off");
 };
 
 /**
@@ -306,7 +320,7 @@ settings.on("viewMode", () => applyViewMode());
 settings.on("seedMode", () => applyViewMode());
 settings.on("branchesPerSeed", (branches) => client.setBranches(branches));
 settings.on("showVelocities", () => applyVelocities());
-settings.on("showPlates", () => applyShowPlates());
+settings.on("plateOverlay", () => applyShowPlates());
 settings.on("running", () => applyRunning());
 settings.on("ticksPerSecond", () => {
   if (settings.get("running")) applyRunning();

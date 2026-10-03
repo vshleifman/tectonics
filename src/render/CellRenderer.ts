@@ -22,6 +22,12 @@ export type { ColourMode } from "./colour";
 const EDGE_LIFT = 0.003;
 const FAULT_LIFT = 0.005;
 const VELOCITY_LIFT = 0.012;
+/**
+ * Plate boundaries sit just above the coloured fill ({@link PLATE_LIFT}) and
+ * the fault lines ({@link FAULT_LIFT}), and below the velocity arrows, so a
+ * boundary stays readable and does not z-fight the fault drawn on the same arc.
+ */
+const PLATE_LINE_LIFT = 0.008;
 
 /**
  * How far the semi-transparent plates overlay floats above the faces. On the
@@ -280,6 +286,17 @@ export class CellRenderer {
   private readonly faultLines: THREE.LineSegments;
   private readonly faultPositions: Float32Array;
 
+  /**
+   * Light overlay of the arcs that separate two plates. Preallocated to one
+   * segment per arc, like the faults, and redrawn from {@link plateIdCache}
+   * when the projection changes.
+   */
+  private readonly plateLineGeometry: THREE.BufferGeometry;
+  private readonly plateLineMaterial: THREE.LineBasicMaterial;
+  private readonly plateLines: THREE.LineSegments;
+  private readonly plateLinePositions: Float32Array;
+  private plateIdCache: ArrayLike<number> | null = null;
+
   /** Markers at the seed junctions the player placed. */
   private readonly seedGeometry: THREE.BufferGeometry;
   private readonly seedMaterial: THREE.PointsMaterial;
@@ -459,6 +476,29 @@ export class CellRenderer {
     this.faultLines.visible = false;
     this.faultLines.frustumCulled = false;
 
+    this.plateLinePositions = new Float32Array(graph.arcCount * 2 * 3);
+    this.plateLineGeometry = new THREE.BufferGeometry();
+    this.plateLineGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(this.plateLinePositions, 3),
+    );
+    this.plateLineGeometry.setDrawRange(0, 0);
+    this.plateLineMaterial = new THREE.LineBasicMaterial({
+      color: 0xffffff,
+      transparent: true,
+      opacity: 0.75,
+      depthWrite: false,
+    });
+    this.plateLines = new THREE.LineSegments(
+      this.plateLineGeometry,
+      this.plateLineMaterial,
+    );
+    this.plateLines.visible = false;
+    this.plateLines.frustumCulled = false;
+    // Above the plates fill (renderOrder 1). Transparent so it joins the queue
+    // drawn after the opaque faults and is not painted over by the fill.
+    this.plateLines.renderOrder = 2;
+
     this.seedGeometry = new THREE.BufferGeometry();
     this.seedGeometry.setAttribute(
       "position",
@@ -498,8 +538,8 @@ export class CellRenderer {
     );
     this.velocityArrows.visible = false;
     this.velocityArrows.frustumCulled = false;
-    // Above the plates overlay (renderOrder 1) so arrows always read on top.
-    this.velocityArrows.renderOrder = 2;
+    // Above the plates fill (1) and the plate boundaries (2).
+    this.velocityArrows.renderOrder = 3;
 
     // Plates overlay: the base faces again, with their own colour texture,
     // blended semi-transparently on top. Lifted off the faces (radial scale on
@@ -521,6 +561,7 @@ export class CellRenderer {
       this.seedPoints,
       this.velocityArrows,
       this.platesMesh,
+      this.plateLines,
     );
   }
 
@@ -602,6 +643,57 @@ export class CellRenderer {
     }
     this.faultGeometry.setDrawRange(0, w / 3);
     const attr = this.faultGeometry.getAttribute(
+      "position",
+    ) as THREE.BufferAttribute;
+    attr.needsUpdate = true;
+  }
+
+  /**
+   * Rebuild the plate-boundary overlay: one segment for each arc whose two
+   * cells belong to different plates. Endpoints are projected the same way as
+   * the faults, at {@link PLATE_LINE_LIFT}.
+   */
+  updatePlateLines(plateId: ArrayLike<number>): void {
+    this.plateIdCache = plateId;
+    const graph = this.cellMesh.boundaryGraph();
+    const { arcEnds, arcCells, junctionPos } = graph;
+    let w = 0;
+    for (let a = 0; a < graph.arcCount; a++) {
+      const cellA = arcCells[a * 2];
+      const cellB = arcCells[a * 2 + 1];
+      if (cellA < 0 || cellB < 0) continue;
+      if (plateId[cellA] === plateId[cellB]) continue;
+      const j0 = arcEnds[a * 2];
+      const j1 = arcEnds[a * 2 + 1];
+      const x0 = junctionPos[j0 * 3];
+      const y0 = junctionPos[j0 * 3 + 1];
+      const z0 = junctionPos[j0 * 3 + 2];
+      const refLon = longitudeOf(x0, y0, z0);
+      const p0 = projectPoint(
+        x0,
+        y0,
+        z0,
+        this.projection,
+        PLATE_LINE_LIFT,
+        refLon,
+      );
+      const p1 = projectPoint(
+        junctionPos[j1 * 3],
+        junctionPos[j1 * 3 + 1],
+        junctionPos[j1 * 3 + 2],
+        this.projection,
+        PLATE_LINE_LIFT,
+        refLon,
+      );
+      this.plateLinePositions[w++] = p0[0];
+      this.plateLinePositions[w++] = p0[1];
+      this.plateLinePositions[w++] = p0[2];
+      this.plateLinePositions[w++] = p1[0];
+      this.plateLinePositions[w++] = p1[1];
+      this.plateLinePositions[w++] = p1[2];
+    }
+    this.plateLineGeometry.setDrawRange(0, w / 3);
+    const attr = this.plateLineGeometry.getAttribute(
       "position",
     ) as THREE.BufferAttribute;
     attr.needsUpdate = true;
@@ -889,6 +981,7 @@ export class CellRenderer {
     edgeAttr.needsUpdate = true;
 
     if (this.crackedCache) this.updateFaults(this.crackedCache);
+    if (this.plateIdCache) this.updatePlateLines(this.plateIdCache);
     if (this.seedsCache) this.updateSeeds(this.seedsCache);
     this.refreshVelocities();
   }
@@ -915,6 +1008,11 @@ export class CellRenderer {
     this.platesMesh.visible = visible;
   }
 
+  /** Show or hide the plate-boundary lines. */
+  setPlateLinesVisible(visible: boolean): void {
+    this.plateLines.visible = visible;
+  }
+
   /** Show or hide the black cell-boundary lines (used in data mode). */
   setEdgesVisible(visible: boolean): void {
     this.edges.visible = visible;
@@ -935,6 +1033,8 @@ export class CellRenderer {
     this.edgeMaterial.dispose();
     this.faultGeometry.dispose();
     this.faultMaterial.dispose();
+    this.plateLineGeometry.dispose();
+    this.plateLineMaterial.dispose();
     this.seedGeometry.dispose();
     this.seedMaterial.dispose();
     this.velocityGeometry.dispose();
