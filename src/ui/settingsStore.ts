@@ -1,3 +1,4 @@
+import type { ElevationStyle } from "../render/colour";
 import type { Projection } from "../render/projection";
 
 /**
@@ -14,6 +15,8 @@ export type ViewMode = "colour" | "data" | "crust" | "density" | "boundary";
  */
 export type PlateOverlay = "off" | "lines" | "colours";
 
+export type { ElevationStyle };
+
 /** Every user-tunable UI setting. The store below is the sole owner of these. */
 export interface Settings {
   level: number;
@@ -21,6 +24,12 @@ export interface Settings {
   autoRotate: boolean;
   projection: Projection;
   viewMode: ViewMode;
+  /**
+   * Elevation colouring. `"absolute"` keeps the atlas ramp, ocean depth
+   * included. `"land"` uses sea level as the lowest colour and stretches the
+   * continental colours.
+   */
+  elevationStyle: ElevationStyle;
   seedMode: boolean;
   branchesPerSeed: number;
   showVelocities: boolean;

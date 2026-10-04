@@ -17,6 +17,13 @@ export type ColourMode =
   | "density"
   | "boundary";
 
+/**
+ * How the elevation view spends its colours. `"absolute"` is the atlas ramp,
+ * ocean depth included. `"land"` paints everything at or below sea level in
+ * one colour and stretches the continental colours across the low relief.
+ */
+export type ElevationStyle = "absolute" | "land";
+
 /** The per-cell fields the colour ramps read. */
 export interface ColourFields {
   elevation: ArrayLike<number>;
@@ -90,6 +97,29 @@ const SEA_STOPS: Stops = [
   [7.0, hex(0x071b40)],
 ];
 
+/**
+ * One colour for every cell at or below sea level. Depth is not encoded, so
+ * the scale can spend its whole range on the continents.
+ */
+const LAND_DETAIL_OCEAN: Rgb = hex(0x1a5276);
+
+/**
+ * Height above sea level (km), from the coast to about 8 km. The hue range is
+ * wider than the atlas ramp, and the steps are a kilometre apart so low land
+ * and high summits both stay separable. White is kept for the top of the scale.
+ */
+const LAND_DETAIL_STOPS: Stops = [
+  [0.0, hex(0xc5e8c8)],
+  [1.0, hex(0x43a047)],
+  [2.0, hex(0x1b5e20)],
+  [3.0, hex(0xc0ca33)],
+  [4.0, hex(0xf9a825)],
+  [5.0, hex(0xef6c00)],
+  [6.0, hex(0xd84315)],
+  [7.0, hex(0x8d6e63)],
+  [8.0, hex(0xf5f4f2)],
+];
+
 /** Write `c` into `out` at `o` as RGBA8. */
 const put = (out: Uint8Array, o: number, c: Rgb): void => {
   out[o] = Math.round(c[0] * 255);
@@ -124,6 +154,7 @@ export const writeCellColours = (
   mode: ColourMode,
   seaLevel: number,
   boundaryKind?: ArrayLike<number>,
+  elevationStyle: ElevationStyle = "absolute",
 ): void => {
   switch (mode) {
     case "data":
@@ -170,7 +201,13 @@ export const writeCellColours = (
       }
       return;
     default:
-      writeElevationColours(out, cellCount, data.elevation, seaLevel);
+      writeElevationColours(
+        out,
+        cellCount,
+        data.elevation,
+        seaLevel,
+        elevationStyle,
+      );
   }
 };
 
@@ -227,9 +264,15 @@ const writeElevationColours = (
   cellCount: number,
   elevation: ArrayLike<number>,
   seaLevel: number,
+  style: ElevationStyle,
 ): void => {
   for (let i = 0; i < cellCount; i++) {
     const h = elevation[i] - seaLevel;
+    if (style === "land") {
+      if (h <= 0) put(out, i * 4, LAND_DETAIL_OCEAN);
+      else putRamp(out, i * 4, LAND_DETAIL_STOPS, h);
+      continue;
+    }
     if (h < 0) putRamp(out, i * 4, SEA_STOPS, -h);
     else putRamp(out, i * 4, LAND_STOPS, h);
   }
@@ -262,3 +305,130 @@ const hslToRgb = (h: number, s: number, l: number): Rgb => {
 /** An `Rgb` as a CSS colour, for DOM swatches that must match the 3D scene. */
 export const toCssRgb = ([r, g, b]: Rgb): string =>
   `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+
+/** One label along a gradient legend, placed at `at` in [0, 1] from the left. */
+export interface LegendTick {
+  at: number;
+  label: string;
+}
+
+/** A discrete colour in a legend, matching a colour the renderer paints. */
+export interface LegendSwatch {
+  colour: string;
+  label: string;
+}
+
+/** What the view panel draws under the view dropdown for the active mode. */
+export interface ViewLegend {
+  gradient: string | null;
+  ticks: readonly LegendTick[];
+  swatches: readonly LegendSwatch[];
+  note: string;
+}
+
+const stopsToGradient = (colours: readonly Rgb[]): string => {
+  const parts = colours.map((colour, index) => {
+    const pct = colours.length === 1 ? 0 : (index / (colours.length - 1)) * 100;
+    return `${toCssRgb(colour)} ${pct.toFixed(1)}%`;
+  });
+  return `linear-gradient(to right, ${parts.join(", ")})`;
+};
+
+const absoluteElevationLegend = (): ViewLegend => {
+  const sea = [...SEA_STOPS].reverse().map((stop) => stop[1]);
+  const land = LAND_STOPS.map((stop) => stop[1]);
+  const colours = [...sea, ...land];
+  const seaLevelAt = (sea.length - 1) / (colours.length - 1);
+  return {
+    gradient: stopsToGradient(colours),
+    ticks: [
+      { at: 0, label: "Deep" },
+      { at: seaLevelAt, label: "Sea level" },
+      { at: 1, label: "6 km" },
+    ],
+    swatches: [],
+    note: "Height and depth, measured from sea level.",
+  };
+};
+
+const landElevationLegend = (): ViewLegend => {
+  const land = LAND_DETAIL_STOPS.map((stop) => stop[1]);
+  const colours = [LAND_DETAIL_OCEAN, ...land];
+  const atKm = (km: number): number => {
+    const index = LAND_DETAIL_STOPS.findIndex((stop) => stop[0] >= km);
+    const stopIndex = index < 0 ? LAND_DETAIL_STOPS.length - 1 : index;
+    return (stopIndex + 1) / (colours.length - 1);
+  };
+  return {
+    gradient: stopsToGradient(colours),
+    ticks: [
+      { at: 0, label: "Sea level" },
+      { at: atKm(4), label: "4 km" },
+      { at: 1, label: "8 km" },
+    ],
+    swatches: [],
+    note: "Ocean is one colour. Continental colours are stretched so low land stays distinct.",
+  };
+};
+
+/**
+ * The colour key for a view mode, built from the same ramps the renderer uses.
+ * `density` supplies the live tuning bounds, because that ramp moves with them.
+ */
+export const legendForView = (
+  mode: ColourMode,
+  style: ElevationStyle,
+  density: { min: number; max: number },
+): ViewLegend => {
+  switch (mode) {
+    case "elevation":
+      return style === "land"
+        ? landElevationLegend()
+        : absoluteElevationLegend();
+    case "data":
+      return {
+        gradient: null,
+        ticks: [],
+        swatches: [
+          { colour: toCssRgb(WHITE), label: "Cell" },
+          { colour: "rgb(8, 10, 14)", label: "Edge" },
+        ],
+        note: "Every cell is labelled with its properties.",
+      };
+    case "crust":
+      return {
+        gradient: null,
+        ticks: [],
+        swatches: [
+          { colour: toCssRgb(OCEANIC), label: "Oceanic" },
+          { colour: toCssRgb(CONTINENTAL), label: "Continental" },
+          { colour: toCssRgb(CRATON), label: "Craton" },
+        ],
+        note: "Continental crust darkens toward craton as the keel thickens.",
+      };
+    case "density":
+      return {
+        gradient: stopsToGradient([DENSITY_LIGHT, DENSITY_DARK]),
+        ticks: [
+          { at: 0, label: density.min.toFixed(2) },
+          { at: 1, label: density.max.toFixed(2) },
+        ],
+        swatches: [],
+        note: "Light is buoyant continental crust; dark is old oceanic crust.",
+      };
+    case "boundary":
+      return {
+        gradient: null,
+        ticks: [],
+        swatches: [
+          { colour: toCssRgb(BOUNDARY_CONVERGENT), label: "Convergent" },
+          { colour: toCssRgb(BOUNDARY_DIVERGENT), label: "Divergent" },
+          { colour: toCssRgb(BOUNDARY_TRANSFORM), label: "Transform" },
+          { colour: toCssRgb(BOUNDARY_NONE), label: "Interior" },
+        ],
+        note: "Each cell takes the colour of its dominant boundary.",
+      };
+    default:
+      return { gradient: null, ticks: [], swatches: [], note: "" };
+  }
+};

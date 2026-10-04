@@ -6,6 +6,7 @@ import { BoundaryKind } from "../sim/boundaries";
 import {
   type ColourFields,
   type ColourMode,
+  type ElevationStyle,
   type Rgb,
   writeCellColours,
 } from "./colour";
@@ -569,7 +570,8 @@ export class CellRenderer {
    * Rewrite the colour buffer for the given mode. Cheap: no geometry rebuild,
    * just one colour attribute upload.
    *
-   * - `"elevation"`: ocean/land ramp split at `seaLevel`.
+   * - `"elevation"`: ocean/land ramp split at `seaLevel`. `"land"` flattens
+   *   the ocean to one colour and stretches the continental colours.
    * - `"data"`: flat white faces (the black wireframe carries the structure).
    * - `"plate"`: a stable per-`plateId` hue so plates read as solid regions.
    * - `"crust"`: oceanic vs continental two-tone.
@@ -582,6 +584,7 @@ export class CellRenderer {
     mode: ColourMode = "elevation",
     seaLevel = 0,
     boundaryKind?: ArrayLike<number>,
+    elevationStyle: ElevationStyle = "absolute",
   ): void {
     writeCellColours(
       this.colourTexture.image.data as Uint8Array,
@@ -590,6 +593,7 @@ export class CellRenderer {
       mode,
       seaLevel,
       boundaryKind,
+      elevationStyle,
     );
     this.colourTexture.needsUpdate = true;
   }

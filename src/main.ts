@@ -5,6 +5,7 @@ import { Picker } from "./interaction/Picker";
 import { ArrayCellMesh } from "./mesh/ArrayCellMesh";
 import { CellLabels } from "./render/CellLabels";
 import { CellRenderer, type ColourMode } from "./render/CellRenderer";
+import type { ElevationStyle } from "./render/colour";
 import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
 import { simOptions, tuning } from "./sim/tuning";
 import { createControls } from "./ui/controls";
@@ -21,6 +22,7 @@ const INITIAL_SEA_LEVEL = 0;
 const INITIAL_AUTO_ROTATE = false;
 const INITIAL_PROJECTION: Projection = "sphere";
 const INITIAL_VIEW_MODE: ViewMode = "colour";
+const INITIAL_ELEVATION_STYLE: ElevationStyle = "absolute";
 const INITIAL_SEED_MODE = true;
 const INITIAL_BRANCHES_PER_SEED = 3;
 const INITIAL_SHOW_VELOCITIES = false;
@@ -131,6 +133,7 @@ const settings = createSettingsStore({
   autoRotate: INITIAL_AUTO_ROTATE,
   projection: INITIAL_PROJECTION,
   viewMode: INITIAL_VIEW_MODE,
+  elevationStyle: INITIAL_ELEVATION_STYLE,
   seedMode: INITIAL_SEED_MODE,
   branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
   showVelocities: INITIAL_SHOW_VELOCITIES,
@@ -154,6 +157,7 @@ const recolour = (): void => {
     colourMode(),
     settings.get("seaLevel"),
     snapshot.buffers.cellKind,
+    settings.get("elevationStyle"),
   );
 };
 
@@ -348,6 +352,7 @@ const ui = createControls(
 // own the side effects each setting triggers.
 settings.on("level", (level) => rebuild(level));
 settings.on("seaLevel", () => recolour());
+settings.on("elevationStyle", () => recolour());
 settings.on("autoRotate", (enabled) => {
   controls.autoRotate = enabled;
 });

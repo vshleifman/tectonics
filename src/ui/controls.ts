@@ -1,6 +1,16 @@
 import { clamp } from "../math/scalar";
-import { CM_PER_YR_PER_RAD_MYR, type PlateSummary } from "../plates/PlateData";
-import { colourForPlate, toCssRgb } from "../render/colour";
+import {
+  CM_PER_YR_PER_RAD_MYR,
+  densityMax,
+  densityMin,
+  type PlateSummary,
+} from "../plates/PlateData";
+import {
+  colourForPlate,
+  type ElevationStyle,
+  legendForView,
+  toCssRgb,
+} from "../render/colour";
 import type { Projection } from "../render/projection";
 import type { WorldMetrics } from "../sim/metrics";
 import {
@@ -825,31 +835,17 @@ export const createControls = (
     initial.seedMode,
   );
   const runButton = makeButton("Run");
-  const pauseButton = makeButton("Pause");
-  const runRow = document.createElement("div");
-  Object.assign(runRow.style, {
-    display: "flex",
-    gap: "6px",
-    marginBottom: "10px",
-  } satisfies Partial<CSSStyleDeclaration>);
-  for (const button of [runButton, pauseButton]) {
-    button.style.flex = "1 1 0";
-    button.style.width = "auto";
-    button.style.marginBottom = "0";
-  }
-  runRow.append(runButton, pauseButton);
-  const paintTransport = (running: boolean): void => {
-    const paint = (button: HTMLButtonElement, active: boolean): void => {
-      button.disabled = active;
-      button.style.background = active ? ACCENT : "rgba(79, 143, 240, 0.18)";
-      button.style.borderColor = active ? ACCENT : "rgba(120, 140, 180, 0.35)";
-      button.style.opacity = "1";
-      button.style.cursor = active ? "default" : "pointer";
-    };
-    paint(runButton, running);
-    paint(pauseButton, !running);
+  runButton.setAttribute("aria-keyshortcuts", "Space");
+  const paintRun = (running: boolean): void => {
+    runButton.textContent = running ? "Pause" : "Run";
+    runButton.setAttribute("aria-pressed", String(running));
+    runButton.style.background = running ? ACCENT : "rgba(79, 143, 240, 0.18)";
+    runButton.style.borderColor = running
+      ? ACCENT
+      : "rgba(120, 140, 180, 0.35)";
   };
-  paintTransport(initial.running);
+  paintRun(initial.running);
+  tooltip.attach(runButton, "Run or pause the simulation (Space).");
   const rateLabel = makeLabel();
   const rateSlider = makeSlider(
     MIN_TICK_RATE,
@@ -965,6 +961,7 @@ export const createControls = (
         render();
         if (spec.key === "dtMyr") renderRateLabel();
         onTuningChange();
+        renderViewLegend();
       });
       sliderRefs.push({ spec, slider, render });
       const field = document.createElement("div");
@@ -985,6 +982,7 @@ export const createControls = (
       render();
     }
     onTuningChange();
+    renderViewLegend();
   });
   tooltip.attach(
     resetButton,
@@ -1025,10 +1023,7 @@ export const createControls = (
     store.set({ seedMode: seedToggle.input.checked });
   });
   runButton.addEventListener("click", () => {
-    store.set({ running: true });
-  });
-  pauseButton.addEventListener("click", () => {
-    store.set({ running: false });
+    store.set({ running: !store.get("running") });
   });
   rateSlider.addEventListener("input", () => {
     store.set({
@@ -1052,7 +1047,7 @@ export const createControls = (
     branchesLabel,
     branchesSlider,
     seedToggle.row,
-    runRow,
+    runButton,
     rateLabel,
     rateSlider,
     stepButton,
@@ -1060,6 +1055,7 @@ export const createControls = (
     insulationToggle.row,
     readout,
     massEl,
+    diagnostics.pinned,
     note,
     diagnosticsButton,
     tuningHeading,
@@ -1095,6 +1091,31 @@ export const createControls = (
     ],
     initial.viewMode,
   );
+
+  const elevationLabel = makeLabel();
+  elevationLabel.textContent = "Elevation scale";
+  const elevationControl = makeSegmented<ElevationStyle>(
+    [
+      { value: "absolute", label: "Full" },
+      { value: "land", label: "Land" },
+    ],
+    initial.elevationStyle,
+    (elevationStyle) => {
+      store.set({ elevationStyle });
+    },
+  );
+  const elevationBlock = document.createElement("div");
+  elevationBlock.append(elevationLabel, elevationControl.row);
+  tooltip.attach(
+    elevationBlock,
+    "Full keeps ocean depth. Land paints sea level as the lowest colour and stretches the continental colours.",
+  );
+
+  const viewLegend = document.createElement("div");
+  Object.assign(viewLegend.style, {
+    margin: "-2px 0 10px",
+    fontSize: "11px",
+  } satisfies Partial<CSSStyleDeclaration>);
 
   const seaLabel = makeLabel();
   const seaSlider = makeSlider(
@@ -1214,11 +1235,106 @@ export const createControls = (
     store.set({ showVelocities: velocityToggle.input.checked });
   });
 
+  const renderViewLegend = (): void => {
+    const viewMode = store.get("viewMode");
+    const legend = legendForView(
+      viewMode === "colour" ? "elevation" : viewMode,
+      store.get("elevationStyle"),
+      { min: densityMin(), max: densityMax() },
+    );
+    viewLegend.replaceChildren();
+    if (legend.gradient) {
+      const bar = document.createElement("div");
+      Object.assign(bar.style, {
+        height: "12px",
+        borderRadius: "4px",
+        background: legend.gradient,
+        border: "1px solid rgba(120, 140, 180, 0.35)",
+      } satisfies Partial<CSSStyleDeclaration>);
+      const ticks = document.createElement("div");
+      Object.assign(ticks.style, {
+        position: "relative",
+        height: "16px",
+        marginTop: "2px",
+        opacity: "0.8",
+      } satisfies Partial<CSSStyleDeclaration>);
+      for (const tick of legend.ticks) {
+        const label = document.createElement("span");
+        label.textContent = tick.label;
+        const shift =
+          tick.at <= 0
+            ? "none"
+            : tick.at >= 1
+              ? "translateX(-100%)"
+              : "translateX(-50%)";
+        Object.assign(label.style, {
+          position: "absolute",
+          top: "0",
+          left: `${tick.at * 100}%`,
+          transform: shift,
+          whiteSpace: "nowrap",
+        } satisfies Partial<CSSStyleDeclaration>);
+        ticks.append(label);
+      }
+      viewLegend.append(bar, ticks);
+    }
+    if (legend.swatches.length > 0) {
+      const row = document.createElement("div");
+      Object.assign(row.style, {
+        display: "flex",
+        flexWrap: "wrap",
+        gap: "8px 12px",
+        marginTop: legend.gradient ? "4px" : "0",
+      } satisfies Partial<CSSStyleDeclaration>);
+      for (const swatch of legend.swatches) {
+        const item = document.createElement("span");
+        Object.assign(item.style, {
+          display: "flex",
+          alignItems: "center",
+          gap: "4px",
+        } satisfies Partial<CSSStyleDeclaration>);
+        const chip = document.createElement("span");
+        Object.assign(chip.style, {
+          width: "12px",
+          height: "12px",
+          borderRadius: "2px",
+          background: swatch.colour,
+          border: "1px solid rgba(230, 236, 245, 0.35)",
+          flex: "0 0 auto",
+        } satisfies Partial<CSSStyleDeclaration>);
+        const text = document.createElement("span");
+        text.textContent = swatch.label;
+        item.append(chip, text);
+        row.append(item);
+      }
+      viewLegend.append(row);
+    }
+    if (legend.note) {
+      const caption = document.createElement("div");
+      caption.textContent = legend.note;
+      Object.assign(caption.style, {
+        marginTop: "4px",
+        opacity: "0.65",
+        lineHeight: "1.35",
+      } satisfies Partial<CSSStyleDeclaration>);
+      viewLegend.append(caption);
+    }
+  };
+
+  const syncElevationChrome = (): void => {
+    elevationBlock.style.display =
+      store.get("viewMode") === "colour" ? "" : "none";
+    renderViewLegend();
+  };
+  syncElevationChrome();
+
   view.panel.append(
     projectionLabel,
     projectionControl.row,
     viewLabel,
     viewSelect,
+    elevationBlock,
+    viewLegend,
     seaLabel,
     seaSlider,
     rotateToggle.row,
@@ -1253,6 +1369,12 @@ export const createControls = (
     if (changed.has("viewMode")) {
       viewSelect.value = state.viewMode;
     }
+    if (changed.has("elevationStyle")) {
+      elevationControl.setSelected(state.elevationStyle);
+    }
+    if (changed.has("viewMode") || changed.has("elevationStyle")) {
+      syncElevationChrome();
+    }
     if (changed.has("seedMode")) {
       seedToggle.input.checked = state.seedMode;
     }
@@ -1268,7 +1390,7 @@ export const createControls = (
       renderBranchesLabel();
     }
     if (changed.has("running")) {
-      paintTransport(state.running);
+      paintRun(state.running);
     }
     if (changed.has("uiHidden")) applyUiHidden(state.uiHidden);
     if (changed.has("ticksPerSecond")) {
@@ -1301,9 +1423,24 @@ export const createControls = (
 
   window.addEventListener("keydown", (event) => {
     if (event.repeat || event.metaKey || event.ctrlKey || event.altKey) return;
-    if (event.key.toLowerCase() !== "h") return;
     if (isTypingTarget(event.target)) return;
-    store.set({ uiHidden: !store.get("uiHidden") });
+    if (event.key.toLowerCase() === "h") {
+      store.set({ uiHidden: !store.get("uiHidden") });
+      return;
+    }
+    if (event.code !== "Space") return;
+    // A focused button or select already uses Space. Leave that activation
+    // alone so the run control is not toggled twice.
+    const target = event.target;
+    if (
+      target instanceof HTMLButtonElement ||
+      target instanceof HTMLSelectElement ||
+      (target instanceof HTMLElement && target.tagName === "SUMMARY")
+    ) {
+      return;
+    }
+    event.preventDefault();
+    store.set({ running: !store.get("running") });
   });
 
   parent.append(sim.panel, view.panel, hideButton);

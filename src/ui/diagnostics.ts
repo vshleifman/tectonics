@@ -67,9 +67,142 @@ interface TabView {
 /** The diagnostics dialog: opened from the simulation panel, updated live. */
 export interface DiagnosticsPanel {
   dialog: HTMLDialogElement;
+  /** Live readings pinned out of the dialog, hidden while nothing is pinned. */
+  pinned: HTMLElement;
   open: () => void;
   update: (metrics: WorldMetrics) => void;
 }
+
+/** A control that pins one reading onto {@link DiagnosticsPanel.pinned}. */
+interface PinBoard {
+  control: (
+    id: string,
+    label: string,
+    read: (metrics: WorldMetrics) => string,
+  ) => HTMLButtonElement;
+}
+
+interface PinBoardHandle extends PinBoard {
+  panel: HTMLElement;
+  refresh: (metrics: WorldMetrics | undefined) => void;
+}
+
+const pinId = (title: string, label: string): string =>
+  `${title}:${label}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+
+const makePinButton = (): HTMLButtonElement => {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Pin";
+  Object.assign(button.style, {
+    flex: "0 0 auto",
+    padding: "0 6px",
+    background: "transparent",
+    color: "#e6ecf5",
+    border: "1px solid rgba(120, 140, 180, 0.35)",
+    borderRadius: "4px",
+    font: "10px/1.6 ui-sans-serif, system-ui, sans-serif",
+    cursor: "pointer",
+    opacity: "0.8",
+  } satisfies Partial<CSSStyleDeclaration>);
+  return button;
+};
+
+/**
+ * Session memory of which readings are pinned. The first registration of an id
+ * owns the label and the formatter, so a chart series and the matching
+ * overview row share one pin.
+ */
+const createPinBoard = (): PinBoardHandle => {
+  const items = new Map<
+    string,
+    { label: string; read: (metrics: WorldMetrics) => string }
+  >();
+  const buttons = new Map<string, HTMLButtonElement[]>();
+  const pinned = new Set<string>();
+  let latest: WorldMetrics | undefined;
+
+  const panel = document.createElement("div");
+  Object.assign(panel.style, {
+    display: "none",
+    marginTop: "8px",
+    paddingTop: "6px",
+    borderTop: "1px solid rgba(120, 140, 180, 0.18)",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  const paintButton = (id: string, button: HTMLButtonElement): void => {
+    const on = pinned.has(id);
+    button.textContent = on ? "Pinned" : "Pin";
+    button.setAttribute("aria-pressed", String(on));
+    button.style.borderColor = on ? "#4f8ff0" : "rgba(120, 140, 180, 0.35)";
+    button.style.color = on ? "#4f8ff0" : "#e6ecf5";
+  };
+
+  const render = (): void => {
+    panel.replaceChildren();
+    if (pinned.size === 0) {
+      panel.style.display = "none";
+      return;
+    }
+    panel.style.display = "";
+    const heading = document.createElement("div");
+    heading.textContent = "Pinned";
+    Object.assign(heading.style, {
+      fontWeight: "600",
+      marginBottom: "4px",
+      fontSize: "12px",
+    } satisfies Partial<CSSStyleDeclaration>);
+    panel.append(heading);
+    for (const id of pinned) {
+      const item = items.get(id);
+      if (!item) continue;
+      const row = document.createElement("div");
+      Object.assign(row.style, {
+        display: "flex",
+        justifyContent: "space-between",
+        gap: "10px",
+        fontSize: "12px",
+        fontVariantNumeric: "tabular-nums",
+        padding: "2px 0",
+      } satisfies Partial<CSSStyleDeclaration>);
+      const name = document.createElement("span");
+      name.textContent = item.label;
+      name.style.opacity = "0.8";
+      const value = document.createElement("span");
+      value.textContent = latest ? item.read(latest) : "—";
+      row.append(name, value);
+      panel.append(row);
+    }
+  };
+
+  return {
+    panel,
+    refresh: (metrics) => {
+      latest = metrics;
+      render();
+    },
+    control: (id, label, read) => {
+      if (!items.has(id)) items.set(id, { label, read });
+      const button = makePinButton();
+      button.setAttribute("aria-label", `Pin ${label}`);
+      const list = buttons.get(id) ?? [];
+      list.push(button);
+      buttons.set(id, list);
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        if (pinned.has(id)) pinned.delete(id);
+        else pinned.add(id);
+        for (const entry of buttons.get(id) ?? []) paintButton(id, entry);
+        render();
+      });
+      paintButton(id, button);
+      return button;
+    },
+  };
+};
 
 /**
  * Samples of {@link WorldMetrics} in simulated time.
@@ -155,6 +288,21 @@ const chartTitle = (text: string): HTMLDivElement => {
   return title;
 };
 
+const titled = (text: string, pin: HTMLButtonElement): HTMLDivElement => {
+  const row = document.createElement("div");
+  Object.assign(row.style, {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: "8px",
+    marginBottom: "4px",
+  } satisfies Partial<CSSStyleDeclaration>);
+  const title = chartTitle(text);
+  title.style.marginBottom = "0";
+  row.append(title, pin);
+  return row;
+};
+
 const axisRow = (): {
   row: HTMLDivElement;
   start: HTMLSpanElement;
@@ -227,7 +375,10 @@ interface ChartDomain {
  * A polyline per series against `elapsedMyr`, with a dashed Earth line where
  * one exists, min/max axis labels, and a hover readout of the nearest sample.
  */
-const makeLineChart = (options: LineChartOptions): ChartView => {
+const makeLineChart = (
+  options: LineChartOptions,
+  pins: PinBoard,
+): ChartView => {
   const format = options.format ?? formatNumber;
   const show = (value: number): string =>
     options.unit ? `${format(value)} ${options.unit}` : format(value);
@@ -247,7 +398,19 @@ const makeLineChart = (options: LineChartOptions): ChartView => {
   } satisfies Partial<CSSStyleDeclaration>);
   series.forEach((entry, index) => {
     const colour = SERIES_COLOURS[index % SERIES_COLOURS.length] ?? CHART_INK;
-    legend.append(legendItem(colour, entry.label, false));
+    const item = legendItem(colour, entry.label, false);
+    const pinLabel =
+      series.length === 1 ? options.title : `${options.title} · ${entry.label}`;
+    item.append(
+      pins.control(pinId(options.title, entry.label), pinLabel, (metrics) => {
+        const value = entry.get(metrics);
+        const text = value === null ? "—" : show(value);
+        return entry.earth === undefined
+          ? text
+          : `${text} · Earth ${show(entry.earth)}`;
+      }),
+    );
+    legend.append(item);
     if (entry.earth !== undefined) {
       legend.append(legendItem(colour, `Earth ${show(entry.earth)}`, true));
     }
@@ -472,12 +635,22 @@ const referenceLine = (svg: SVGSVGElement, colour: string): SVGLineElement => {
 };
 
 /** The current sea-floor age-area histogram, against Earth's linear falloff. */
-const makeAgeHistogram = (): {
+const makeAgeHistogram = (
+  pins: PinBoard,
+): {
   element: HTMLElement;
   update: (metrics: WorldMetrics | undefined) => void;
 } => {
   const root = document.createElement("div");
-  root.append(chartTitle("Sea floor by age"));
+  root.append(
+    titled(
+      "Sea floor by age",
+      pins.control("sea-floor-by-age", "Sea floor <20 Myr", (metrics) => {
+        const share = metrics.ageHistogram[0] ?? 0;
+        return `${(share * 100).toFixed(1)}% of ocean`;
+      }),
+    ),
+  );
 
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${LINE_WIDTH} ${HISTOGRAM_HEIGHT}`);
@@ -563,12 +736,21 @@ interface ScatterDot {
 }
 
 /** The current plates: surface speed against the trench share of the perimeter. */
-const makeDriveScatter = (): {
+const makeDriveScatter = (
+  pins: PinBoard,
+): {
   element: HTMLElement;
   update: (metrics: WorldMetrics | undefined) => void;
 } => {
   const root = document.createElement("div");
-  root.append(chartTitle("Speed against trench fraction"));
+  root.append(
+    titled(
+      "Speed against trench fraction",
+      pins.control("plate-drives", "Plates in the drive plot", (metrics) =>
+        String(metrics.drives.length),
+      ),
+    ),
+  );
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${LINE_WIDTH} ${LINE_HEIGHT}`);
   svg.setAttribute("preserveAspectRatio", "none");
@@ -673,16 +855,19 @@ const latestOf = (samples: readonly WorldMetrics[]): WorldMetrics | undefined =>
   samples[samples.length - 1];
 
 /** World value beside the Earth value it is trying to reach. */
-const makeOverview = (): {
+const makeOverview = (
+  pins: PinBoard,
+): {
   element: HTMLElement;
   update: (metrics: WorldMetrics | undefined) => void;
 } => {
   const grid = document.createElement("div");
   Object.assign(grid.style, {
     display: "grid",
-    gridTemplateColumns: "1fr auto auto",
+    gridTemplateColumns: "auto 1fr auto auto",
     columnGap: "10px",
     rowGap: "3px",
+    alignItems: "center",
     fontVariantNumeric: "tabular-nums",
   } satisfies Partial<CSSStyleDeclaration>);
 
@@ -698,11 +883,17 @@ const makeOverview = (): {
   };
   grid.append(
     heading("", "left"),
+    heading("", "left"),
     heading("world", "right"),
     heading("Earth", "right"),
   );
 
-  const addRow = (label: string, earth: string): HTMLDivElement => {
+  const addRow = (
+    label: string,
+    earth: string,
+    read: (metrics: WorldMetrics) => string,
+    id = pinId("Overview", label),
+  ): HTMLDivElement => {
     const name = document.createElement("div");
     name.textContent = label;
     name.style.opacity = "0.8";
@@ -715,31 +906,53 @@ const makeOverview = (): {
       textAlign: "right",
       opacity: "0.45",
     } satisfies Partial<CSSStyleDeclaration>);
-    grid.append(name, value, target);
+    grid.append(pins.control(id, label, read), name, value, target);
     return value;
   };
 
-  const elapsedValue = addRow("Elapsed", "—");
+  const elapsedValue = addRow(
+    "Elapsed",
+    "—",
+    (metrics) => `${Math.round(metrics.elapsedMyr)} Myr`,
+  );
   const plateValue = addRow(
     "Plates (major)",
     `${EARTH.totalPlates} (${EARTH.majorPlates})`,
+    (metrics) =>
+      `${metrics.plateCount} (${metrics.majorPlateCount}) · Earth ${EARTH.totalPlates} (${EARTH.majorPlates})`,
   );
   const continentValue = addRow(
     "Continental",
     `${Math.round(EARTH.continentalArea * 100)}%`,
+    (metrics) =>
+      `${(metrics.continentalArea * 100).toFixed(1)}% · Earth ${Math.round(EARTH.continentalArea * 100)}%`,
+    pinId("Continental area", "Continental"),
   );
   const ageValue = addRow(
     "Ocean age mean/max",
     `${EARTH.meanOceanAge}/${EARTH.maxOceanAge}`,
+    (metrics) =>
+      `${Math.round(metrics.meanOceanAge)}/${Math.round(metrics.maxOceanAge)} · Earth ${EARTH.meanOceanAge}/${EARTH.maxOceanAge}`,
   );
   const recycleValue = addRow(
     "Ocean recycling",
     `${EARTH.oceanRecyclingMyr} Myr`,
+    (metrics) =>
+      metrics.oceanRecyclingMyr === null
+        ? "never"
+        : `${Math.round(metrics.oceanRecyclingMyr)} Myr · Earth ${EARTH.oceanRecyclingMyr} Myr`,
   );
-  const boundaryValue = addRow("Conv/div/trans %", "");
+  const boundaryValue = addRow("Conv/div/trans %", "", (metrics) => {
+    const [conv, div, trans] = metrics.boundaryShare;
+    return `${Math.round(conv * 100)}/${Math.round(div * 100)}/${Math.round(trans * 100)}`;
+  });
   const driveValue = addRow(
     "Speed vs trench",
     `+${EARTH.speedTrenchCorrelation.toFixed(1)}`,
+    (metrics) =>
+      metrics.speedTrenchCorrelation === null
+        ? "—"
+        : `${formatSigned(metrics.speedTrenchCorrelation)} · Earth +${EARTH.speedTrenchCorrelation.toFixed(1)}`,
   );
 
   const update = (metrics: WorldMetrics | undefined): void => {
@@ -788,148 +1001,191 @@ const makeTab = (
 /**
  * A non-modal, draggable diagnostics dialog. `show` rather than `showModal`
  * leaves the globe interactive. History is recorded whether or not the dialog
- * is open; only the visible tab is redrawn.
+ * is open; only the visible tab is redrawn. Pinned readings refresh either way.
  */
 export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
   const history = createMetricsHistory();
+  const pins = createPinBoard();
 
-  const overview = makeOverview();
-  const plates = makeLineChart({
-    title: "Plate count",
-    series: [
-      { label: "Plates", get: (m) => m.plateCount, earth: EARTH.totalPlates },
-      {
-        label: "Major",
-        get: (m) => m.majorPlateCount,
-        earth: EARTH.majorPlates,
-      },
-    ],
-    format: formatCount,
-  });
-  const continentalArea = makeLineChart({
-    title: "Continental area",
-    series: [
-      {
-        label: "Continental",
-        get: (m) => m.continentalArea,
-        earth: EARTH.continentalArea,
-      },
-      { label: "Thin", get: (m) => m.thinContinentalArea },
-    ],
-    format: formatPercent,
-  });
-  const landmasses = makeLineChart({
-    title: "Landmasses",
-    series: [{ label: "Continents", get: (m) => m.continentCount }],
-    format: formatCount,
-  });
-  const continentShare = makeLineChart({
-    title: "Largest landmass and craton",
-    series: [
-      { label: "Largest share", get: (m) => m.largestContinentShare },
-      { label: "Craton", get: (m) => m.cratonShare },
-    ],
-    format: formatPercent,
-  });
-  const thickness = makeLineChart({
-    title: "Mean continental thickness",
-    unit: "km",
-    series: [{ label: "Thickness", get: (m) => m.meanContinentalThickness }],
-    format: formatKm,
-  });
-  const growth = makeLineChart({
-    title: "Continental growth",
-    unit: "%/Myr",
-    series: [
-      { label: "Accretion", get: (m) => m.continentalisedByAccretion },
-      { label: "Spreading", get: (m) => m.continentalisedBySpreading },
-      { label: "Infill", get: (m) => m.continentalisedByInfill },
-      { label: "Recycled", get: (m) => m.continentalRecycled },
-      { label: "Growth", get: (m) => m.continentalGrowth },
-    ],
-    format: formatRate,
-  });
-  const loss = makeLineChart({
-    title: "Continental loss",
-    unit: "%/Myr",
-    series: [
-      { label: "Eroded", get: (m) => m.continentalEroded },
-      { label: "Delaminated", get: (m) => m.delaminated },
-      { label: "Foundered", get: (m) => m.foundered },
-      { label: "Decontinentalised", get: (m) => m.decontinentalised },
-    ],
-    format: formatRate,
-  });
-  const oceanAge = makeLineChart({
-    title: "Ocean age",
-    unit: "Myr",
-    series: [
-      {
-        label: "Mean",
-        get: (m) => m.meanOceanAge,
-        earth: EARTH.meanOceanAge,
-      },
-      {
-        label: "Oldest",
-        get: (m) => m.maxOceanAge,
-        earth: EARTH.maxOceanAge,
-      },
-    ],
-    format: formatMyr,
-  });
-  const recycling = makeLineChart({
-    title: "Ocean recycling time",
-    unit: "Myr",
-    series: [
-      {
-        label: "Recycling",
-        get: (m) => m.oceanRecyclingMyr,
-        earth: EARTH.oceanRecyclingMyr,
-      },
-    ],
-    format: formatMyr,
-  });
-  const histogram = makeAgeHistogram();
+  const overview = makeOverview(pins);
+  const plates = makeLineChart(
+    {
+      title: "Plate count",
+      series: [
+        { label: "Plates", get: (m) => m.plateCount, earth: EARTH.totalPlates },
+        {
+          label: "Major",
+          get: (m) => m.majorPlateCount,
+          earth: EARTH.majorPlates,
+        },
+      ],
+      format: formatCount,
+    },
+    pins,
+  );
+  const continentalArea = makeLineChart(
+    {
+      title: "Continental area",
+      series: [
+        {
+          label: "Continental",
+          get: (m) => m.continentalArea,
+          earth: EARTH.continentalArea,
+        },
+        { label: "Thin", get: (m) => m.thinContinentalArea },
+      ],
+      format: formatPercent,
+    },
+    pins,
+  );
+  const landmasses = makeLineChart(
+    {
+      title: "Landmasses",
+      series: [{ label: "Continents", get: (m) => m.continentCount }],
+      format: formatCount,
+    },
+    pins,
+  );
+  const continentShare = makeLineChart(
+    {
+      title: "Largest landmass and craton",
+      series: [
+        { label: "Largest share", get: (m) => m.largestContinentShare },
+        { label: "Craton", get: (m) => m.cratonShare },
+      ],
+      format: formatPercent,
+    },
+    pins,
+  );
+  const thickness = makeLineChart(
+    {
+      title: "Mean continental thickness",
+      unit: "km",
+      series: [{ label: "Thickness", get: (m) => m.meanContinentalThickness }],
+      format: formatKm,
+    },
+    pins,
+  );
+  const growth = makeLineChart(
+    {
+      title: "Continental growth",
+      unit: "%/Myr",
+      series: [
+        { label: "Accretion", get: (m) => m.continentalisedByAccretion },
+        { label: "Spreading", get: (m) => m.continentalisedBySpreading },
+        { label: "Infill", get: (m) => m.continentalisedByInfill },
+        { label: "Recycled", get: (m) => m.continentalRecycled },
+        { label: "Growth", get: (m) => m.continentalGrowth },
+      ],
+      format: formatRate,
+    },
+    pins,
+  );
+  const loss = makeLineChart(
+    {
+      title: "Continental loss",
+      unit: "%/Myr",
+      series: [
+        { label: "Eroded", get: (m) => m.continentalEroded },
+        { label: "Delaminated", get: (m) => m.delaminated },
+        { label: "Foundered", get: (m) => m.foundered },
+        { label: "Decontinentalised", get: (m) => m.decontinentalised },
+      ],
+      format: formatRate,
+    },
+    pins,
+  );
+  const oceanAge = makeLineChart(
+    {
+      title: "Ocean age",
+      unit: "Myr",
+      series: [
+        {
+          label: "Mean",
+          get: (m) => m.meanOceanAge,
+          earth: EARTH.meanOceanAge,
+        },
+        {
+          label: "Oldest",
+          get: (m) => m.maxOceanAge,
+          earth: EARTH.maxOceanAge,
+        },
+      ],
+      format: formatMyr,
+    },
+    pins,
+  );
+  const recycling = makeLineChart(
+    {
+      title: "Ocean recycling time",
+      unit: "Myr",
+      series: [
+        {
+          label: "Recycling",
+          get: (m) => m.oceanRecyclingMyr,
+          earth: EARTH.oceanRecyclingMyr,
+        },
+      ],
+      format: formatMyr,
+    },
+    pins,
+  );
+  const histogram = makeAgeHistogram(pins);
   const boundaryLabels = ["Convergent", "Divergent", "Transform", "Inactive"];
-  const boundaries = makeLineChart({
-    title: "Boundary length",
-    series: boundaryLabels.map((label, index) => ({
-      label,
-      get: (m: WorldMetrics) => m.boundaryShare[index] ?? 0,
-    })),
-    format: formatPercent,
-  });
-  const correlation = makeLineChart({
-    title: "Speed against trench fraction",
-    series: [
-      {
-        label: "Correlation",
-        get: (m) => m.speedTrenchCorrelation,
-        earth: EARTH.speedTrenchCorrelation,
-      },
-    ],
-    format: formatSigned,
-  });
-  const scatter = makeDriveScatter();
-  const holes = makeLineChart({
-    title: "Interior holes",
-    unit: "%/Myr",
-    series: [
-      { label: "Opened", get: (m) => m.interiorHoles },
-      { label: "Unfilled", get: (m) => m.interiorHolesUnfilled },
-    ],
-    format: formatRate,
-  });
-  const pocketCount = makeLineChart({
-    title: "Ocean pockets",
-    series: [{ label: "Pockets", get: (m) => m.oceanPocketCount }],
-    format: formatCount,
-  });
-  const pocketArea = makeLineChart({
-    title: "Ocean pocket area",
-    series: [{ label: "Area", get: (m) => m.oceanPocketArea }],
-    format: formatPercent,
-  });
+  const boundaries = makeLineChart(
+    {
+      title: "Boundary length",
+      series: boundaryLabels.map((label, index) => ({
+        label,
+        get: (m: WorldMetrics) => m.boundaryShare[index] ?? 0,
+      })),
+      format: formatPercent,
+    },
+    pins,
+  );
+  const correlation = makeLineChart(
+    {
+      title: "Speed against trench fraction",
+      series: [
+        {
+          label: "Correlation",
+          get: (m) => m.speedTrenchCorrelation,
+          earth: EARTH.speedTrenchCorrelation,
+        },
+      ],
+      format: formatSigned,
+    },
+    pins,
+  );
+  const scatter = makeDriveScatter(pins);
+  const holes = makeLineChart(
+    {
+      title: "Interior holes",
+      unit: "%/Myr",
+      series: [
+        { label: "Opened", get: (m) => m.interiorHoles },
+        { label: "Unfilled", get: (m) => m.interiorHolesUnfilled },
+      ],
+      format: formatRate,
+    },
+    pins,
+  );
+  const pocketCount = makeLineChart(
+    {
+      title: "Ocean pockets",
+      series: [{ label: "Pockets", get: (m) => m.oceanPocketCount }],
+      format: formatCount,
+    },
+    pins,
+  );
+  const pocketArea = makeLineChart(
+    {
+      title: "Ocean pocket area",
+      series: [{ label: "Area", get: (m) => m.oceanPocketArea }],
+      format: formatPercent,
+    },
+    pins,
+  );
 
   const tabs: TabView[] = [
     makeTab("overview", "Overview", overview.element, (samples) => {
@@ -1131,12 +1387,14 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
 
   return {
     dialog,
+    pinned: pins.panel,
     open: () => {
       if (!dialog.open) dialog.show();
       tabs[active].update(history.samples());
     },
     update: (metrics) => {
       history.push(metrics);
+      pins.refresh(metrics);
       if (dialog.open) tabs[active].update(history.samples());
     },
   };
