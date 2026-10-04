@@ -8,10 +8,11 @@ use crate::math::{cross, len3, read3, sub};
 use crate::mesh::Mesh;
 use crate::plates::{PlateData, split_key, suture_key};
 use crate::scratch::Scratch;
-use crate::tuning::Tuning;
+use crate::tuning::{SimOptions, Tuning};
 use indexmap::{IndexMap, IndexSet};
 use std::collections::HashMap;
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_sutures(
     mesh: &Mesh,
     data: &mut CellData,
@@ -20,10 +21,13 @@ pub fn update_sutures(
     dt_myr: f64,
     scratch: &mut Scratch,
     t: &Tuning,
+    o: &SimOptions,
 ) {
     scratch.pack_plates(plates);
     let mut in_contact: IndexSet<i64> = IndexSet::new();
     let mut hardest: HashMap<i64, f64> = HashMap::new();
+    // Closing times length over all of each pair's continental contact.
+    let mut net: HashMap<i64, f64> = HashMap::new();
     let mut relative_speed: IndexMap<i64, f64> = IndexMap::new();
 
     for a in 0..mesh.arc_count() {
@@ -54,6 +58,8 @@ pub fn update_sutures(
             data.weakness[ca] = data.weakness[ca].max(w);
             data.weakness[cb] = data.weakness[cb].max(w);
         }
+        *net.entry(pair).or_insert(0.0) +=
+            boundaries.arc_closing[a] as f64 * mesh.arc_length[a] as f64;
         if boundaries.arc_kind[a] != CONVERGENT {
             continue;
         }
@@ -69,8 +75,15 @@ pub fn update_sutures(
     for &key in &in_contact {
         if let Some(age) = plates.sutures.get_mut(&key) {
             *age += dt_myr;
-        } else if hardest.get(&key).copied().unwrap_or(0.0) > 0.0 {
-            plates.sutures.insert(key, dt_myr);
+        } else {
+            let closing = if o.weld_on_net_closing {
+                net.get(&key).copied().unwrap_or(0.0)
+            } else {
+                hardest.get(&key).copied().unwrap_or(0.0)
+            };
+            if closing > 0.0 {
+                plates.sutures.insert(key, dt_myr);
+            }
         }
     }
 

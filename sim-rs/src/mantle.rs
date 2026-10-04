@@ -40,6 +40,9 @@ pub struct MantleFlow {
     sites: Vec<Vec3>,
     /// Remembered subduction at each site, as area of plate per Myr.
     sink: Vec<f64>,
+    /// Upwelling at each site from the heat trapped beneath it, as area per
+    /// Myr.
+    source: Vec<f64>,
     flux: Vec<f64>,
     /// Flow at the top of the mantle over each site, as a tangent velocity
     /// (rad/Myr).
@@ -82,6 +85,7 @@ impl MantleFlow {
             site_of,
             sites,
             sink: vec![0.0; count],
+            source: vec![0.0; count],
             flux: vec![0.0; count],
             wind: vec![[0.0; 3]; count],
         }
@@ -90,7 +94,13 @@ impl MantleFlow {
     /// Forget every downwelling, as for a world rebuilt from scratch.
     pub fn reset(&mut self) {
         self.sink.fill(0.0);
+        self.source.fill(0.0);
         self.wind.fill([0.0; 3]);
+    }
+
+    /// Every mantle site and the downwelling remembered there.
+    pub fn sinks(&self) -> (&[Vec3], &[f64]) {
+        (&self.sites, &self.sink)
     }
 
     /// The mantle flow beneath cell `i`.
@@ -135,6 +145,18 @@ impl MantleFlow {
         for (sink, &flux) in self.sink.iter_mut().zip(&self.flux) {
             *sink += (flux - *sink) * blend;
         }
+        // Heat trapped under a continent rises as an upwelling that the
+        // surface flows out from: what turns the mantle beneath a
+        // long-lived supercontinent from downwelling to upwelling.
+        self.source.fill(0.0);
+        if t.upwelling_gain > 0.0 {
+            for i in 0..mesh.cell_count {
+                let heat = data.mantle_heat[i] as f64;
+                if heat > 0.0 {
+                    self.source[self.site_of[i] as usize] += t.upwelling_gain * heat * mesh.area(i);
+                }
+            }
+        }
         self.flow();
     }
 
@@ -148,8 +170,10 @@ impl MantleFlow {
         for i in 0..count {
             let p = self.sites[i];
             let mut u = [0.0f64; 3];
-            for (j, &q) in self.sink.iter().enumerate() {
-                if q <= 0.0 || j == i {
+            for (j, (&down, &up)) in self.sink.iter().zip(&self.source).enumerate() {
+                // Net sink: negative over an upwelling, which flows outward.
+                let q = down - up;
+                if q == 0.0 || j == i {
                     continue;
                 }
                 let s = self.sites[j];

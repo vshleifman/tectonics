@@ -60,6 +60,8 @@ pub struct PlateData {
     pub rifts: u64,
     /// Rifts that began to stretch but stalled and healed.
     pub failed_rifts: u64,
+    /// Oceans broken away from the continent they aged against.
+    pub passive_collapses: u64,
 }
 
 /// Key for an unordered pair of plate ids.

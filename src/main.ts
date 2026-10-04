@@ -116,6 +116,13 @@ let cellMesh: ArrayCellMesh | null = null;
 let cellRenderer: CellRenderer | null = null;
 /** Seeds in the current fault network; faults are drawn only once there are some. */
 let seedCount = 0;
+/**
+ * The fault lines and yellow seed markers are a placement aid, drawn on the
+ * mesh junctions where the seeds were dropped. Plate motion carries the
+ * boundaries off those junctions, so the aid is taken down once the world
+ * ticks and put back only when a new network is placed while paused.
+ */
+let showSeedOverlay = true;
 
 /** Single source of truth for every UI setting. */
 const settings = createSettingsStore({
@@ -212,7 +219,7 @@ const applyViewMode = (): void => {
   const showLabels = viewMode === "data";
   recolour();
   cellRenderer?.setEdgesVisible(viewMode === "data");
-  cellRenderer?.setFaultsVisible(seedCount > 0);
+  applySeedOverlay();
   applyVelocities();
   cellLabels.setVisible(showLabels);
   if (showLabels) {
@@ -240,6 +247,7 @@ const onMesh = (arrays: ConstructorParameters<typeof ArrayCellMesh>[0]) => {
   cellRenderer.setProjection(settings.get("projection"));
   cellLabels.build(cellMesh);
   seedCount = 0;
+  showSeedOverlay = true;
   ui.setCellCount(cellMesh.cellCount);
   applyViewMode();
   applyShowPlates();
@@ -254,7 +262,8 @@ const onSnapshot = (snapshot: Snapshot): void => {
     cellRenderer.updateFaults(snapshot.faults.cracked);
     cellRenderer.updateSeeds(snapshot.faults.seeds);
     seedCount = snapshot.faults.seeds.length;
-    cellRenderer.setFaultsVisible(seedCount > 0);
+    if (settings.get("running")) showSeedOverlay = false;
+    applySeedOverlay();
   }
   recolour();
   refreshPlateOverlay();
@@ -295,17 +304,44 @@ const placeSeed = (event: PointerEvent): void => {
   client.addSeed(junction);
 };
 
+/** Show the seed markers and the fault lines they grew, or hide both. */
+const applySeedOverlay = (): void => {
+  cellRenderer?.setFaultsVisible(showSeedOverlay && seedCount > 0);
+};
+
+/**
+ * Take down the seed-placement aid. The lines and markers are fixed to the
+ * junctions the seeds were dropped on, and a running world leaves them behind.
+ */
+const dismissSeedOverlay = (): void => {
+  if (!showSeedOverlay) return;
+  showSeedOverlay = false;
+  applySeedOverlay();
+};
+
 const applyRunning = (): void => {
-  if (settings.get("running")) client.run(settings.get("ticksPerSecond"));
-  else client.pause();
+  if (settings.get("running")) {
+    dismissSeedOverlay();
+    client.run(settings.get("ticksPerSecond"));
+  } else {
+    client.pause();
+  }
 };
 
 const ui = createControls(
   document.body,
   settings,
-  () => client.clearFaults(),
+  () => {
+    // Clearing the network is a fresh placement, so the aid comes back unless
+    // the world is already running.
+    showSeedOverlay = !settings.get("running");
+    client.clearFaults();
+  },
   onTuningChange,
-  () => client.step(),
+  () => {
+    dismissSeedOverlay();
+    client.step();
+  },
 );
 
 // React to setting changes. The store is the source of truth; these subscriptions

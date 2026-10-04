@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
+use tectonics_sim::boundaries::DIVERGENT;
 use tectonics_sim::cell_data::CONTINENTAL;
 use tectonics_sim::shape::Moments;
 use tectonics_sim::world::{PASS_COUNT, Sim};
@@ -77,6 +78,557 @@ fn shapes(sim: &Sim) -> ((f64, f64), (f64, f64)) {
         }
     }
     (shape_summary(&pm, &pa), shape_summary(&cm, &ca))
+}
+
+/// Rings of ocean a landmass may be separated by and still count as joined to
+/// its neighbour: a gap of up to twice this many cells is bridged.
+const BRIDGE_RINGS: i32 = 1;
+/// Age (Myr) of ocean on a passive coast that counts as old enough to founder.
+const OLD_PASSIVE_AGE: f64 = 150.0;
+/// Ticks between samples of the supercontinent diagnostics: 100 Myr.
+const SERIES_TICKS: usize = 50;
+
+/// What the supercontinent hypotheses need to see, at one moment.
+#[derive(Default, Clone, Copy)]
+struct Assembly {
+    /// Share of continental area in the largest landmass, strictly connected.
+    strict: f64,
+    /// The same with gaps of up to `2 * BRIDGE_RINGS` ocean cells bridged.
+    bridged: f64,
+    /// Length of the area-weighted mean position of continental crust: 1 all
+    /// in one spot, near 0 spread evenly. A cap holding share `f` of the globe
+    /// scores `1 - f`.
+    clump: f64,
+    /// Share of continent-ocean coastline where the ocean is on the same
+    /// plate, so no trench can form there.
+    passive: f64,
+    /// Mean age of the ocean along passive coasts.
+    passive_age: f64,
+    /// Share of passive coast where the ocean is older than `OLD_PASSIVE_AGE`.
+    passive_old: f64,
+    /// Length of the sink-weighted mean downwelling position over the total:
+    /// 1 for one downwelling, near 0 for sinks spread evenly.
+    sink_dipole: f64,
+    /// Area-weighted mean cosine between continental crust's motion and the
+    /// mantle flow beneath it.
+    flow_align: f64,
+    /// Speed the mantle flow alone would carry continent at (coupling times
+    /// flow), over the speed it actually moves.
+    flow_ratio: f64,
+    sutures: usize,
+    /// Mean |delta omega| across welded pairs, over `merge_quiet_speed`.
+    suture_slip: f64,
+    plates: usize,
+    /// Distance (km) from the most remote ocean to the nearest continent:
+    /// Point Nemo's is ~2700 km.
+    remote_km: f64,
+    /// Share of continental area in landmasses too small to be continents.
+    fragments: f64,
+    /// Share of continental area within the cap, centred on its mean position,
+    /// that would hold all of it: 1 for a perfectly round supercontinent.
+    in_cap: f64,
+    /// Clump of the largest landmass alone, over that of a round cap of the
+    /// same area: 1 if round, lower the more it sprawls. Pangaea, as a block
+    /// from 80 S to 80 N and 120 degrees wide, scores ~0.98.
+    main_compact: f64,
+    /// Farthest the largest landmass reaches from its centre (degrees).
+    main_reach: f64,
+    /// The same for a round cap of its area.
+    main_cap_reach: f64,
+}
+
+/// Mean distance (km) between neighbouring cell centres.
+fn cell_km(n: usize) -> f64 {
+    (4.0 * std::f64::consts::PI / n as f64).sqrt() * EARTH_KM
+}
+
+const EARTH_KM: f64 = 6371.0;
+/// Share of the globe a landmass must cover to be a continent, as in
+/// `metrics.rs`.
+const CONTINENT_SHARE: f64 = 0.005;
+
+fn assembly(sim: &Sim) -> Assembly {
+    let mesh = &sim.mesh;
+    let d = sim.front();
+    let n = mesh.cell_count;
+    let cont = |i: usize| d.crust_type[i] == CONTINENTAL;
+    let c = |i: usize| {
+        [
+            mesh.centres[i * 3] as f64,
+            mesh.centres[i * 3 + 1] as f64,
+            mesh.centres[i * 3 + 2] as f64,
+        ]
+    };
+    let mut out = Assembly {
+        strict: sim.metrics().largest_continent_share,
+        plates: sim.plate_count(),
+        ..Default::default()
+    };
+
+    // Rings of ocean out from the continents, then landmasses through cells
+    // at most BRIDGE_RINGS out.
+    let mut ring = vec![-1i32; n];
+    let mut queue: VecDeque<usize> = (0..n).filter(|&i| cont(i)).collect();
+    for &i in &queue {
+        ring[i] = 0;
+    }
+    while let Some(i) = queue.pop_front() {
+        if ring[i] >= BRIDGE_RINGS {
+            continue;
+        }
+        for k in mesh.nbrs(i) {
+            let m = mesh.nbr[k] as usize;
+            if ring[m] < 0 {
+                ring[m] = ring[i] + 1;
+                queue.push_back(m);
+            }
+        }
+    }
+    // Every ring out, for the most remote ocean.
+    let mut far = vec![-1i32; n];
+    let mut queue: VecDeque<usize> = (0..n).filter(|&i| cont(i)).collect();
+    for &i in &queue {
+        far[i] = 0;
+    }
+    let mut deepest = 0;
+    while let Some(i) = queue.pop_front() {
+        deepest = deepest.max(far[i]);
+        for k in mesh.nbrs(i) {
+            let m = mesh.nbr[k] as usize;
+            if far[m] < 0 {
+                far[m] = far[i] + 1;
+                queue.push_back(m);
+            }
+        }
+    }
+    out.remote_km = deepest as f64 * cell_km(n);
+
+    // Strict landmasses, for the share of crust in fragments.
+    let globe: f64 = (0..n).map(|i| mesh.area(i)).sum();
+    let mut seen = vec![false; n];
+    let mut fragment_area = 0.0;
+    let mut main: Vec<usize> = Vec::new();
+    let mut main_area = 0.0;
+    for start in 0..n {
+        if seen[start] || !cont(start) {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![start];
+        let mut cells = Vec::new();
+        let mut area = 0.0;
+        while let Some(i) = stack.pop() {
+            cells.push(i);
+            area += mesh.area(i);
+            for k in mesh.nbrs(i) {
+                let m = mesh.nbr[k] as usize;
+                if !seen[m] && cont(m) {
+                    seen[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        if area < CONTINENT_SHARE * globe {
+            fragment_area += area;
+        }
+        if area > main_area {
+            main_area = area;
+            main = cells;
+        }
+    }
+    // The largest landmass on its own: how compact against a round cap of the
+    // same area, and how far it reaches from its centre.
+    let mut centre = [0.0f64; 3];
+    for &i in &main {
+        let p = c(i);
+        for k in 0..3 {
+            centre[k] += mesh.area(i) * p[k];
+        }
+    }
+    if main_area > 0.0 && len(centre) > 0.0 {
+        let cap = 1.0 - main_area / globe;
+        out.main_compact = len(centre) / main_area / cap;
+        let unit = [centre[0] / len(centre), centre[1] / len(centre), centre[2] / len(centre)];
+        out.main_reach = main
+            .iter()
+            .map(|&i| {
+                let p = c(i);
+                (p[0] * unit[0] + p[1] * unit[1] + p[2] * unit[2]).clamp(-1.0, 1.0).acos()
+            })
+            .fold(0.0, f64::max)
+            .to_degrees();
+        // Reach of a round cap of the same area, for comparison.
+        out.main_cap_reach = (1.0 - 2.0 * main_area / globe).clamp(-1.0, 1.0).acos().to_degrees();
+    }
+
+    let mut seen = vec![false; n];
+    let (mut total, mut largest) = (0.0f64, 0.0f64);
+    for start in 0..n {
+        if !cont(start) {
+            continue;
+        }
+        total += mesh.area(start);
+        if seen[start] {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![start];
+        let mut area = 0.0;
+        while let Some(i) = stack.pop() {
+            if cont(i) {
+                area += mesh.area(i);
+            }
+            for k in mesh.nbrs(i) {
+                let m = mesh.nbr[k] as usize;
+                if !seen[m] && ring[m] >= 0 {
+                    seen[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        largest = largest.max(area);
+    }
+    out.bridged = if total > 0.0 { largest / total } else { 0.0 };
+
+    let mut sum = [0.0f64; 3];
+    let (mut align, mut align_w, mut carried, mut moving) = (0.0, 0.0, 0.0, 0.0);
+    let coupling = sim.tuning.mantle_flow_coupling;
+    let plates = sim.plates();
+    for i in 0..n {
+        if !cont(i) {
+            continue;
+        }
+        let a = mesh.area(i);
+        let p = c(i);
+        for k in 0..3 {
+            sum[k] += a * p[k];
+        }
+        let v = plates.linear_velocity(d.plate_id[i], p);
+        let u = sim.mantle().wind_at(i);
+        let (sv, su) = (len(v), len(u));
+        carried += a * coupling * su;
+        moving += a * sv;
+        if sv > 1e-9 && su > 1e-12 {
+            align += a * (v[0] * u[0] + v[1] * u[1] + v[2] * u[2]) / (sv * su);
+            align_w += a;
+        }
+    }
+    out.clump = if total > 0.0 { len(sum) / total } else { 0.0 };
+    out.fragments = if total > 0.0 { fragment_area / total } else { 0.0 };
+    if total > 0.0 && len(sum) > 0.0 {
+        let centre = [sum[0] / len(sum), sum[1] / len(sum), sum[2] / len(sum)];
+        // A cap holding share f of the globe reaches cos = 1 - 2f.
+        let edge = 1.0 - 2.0 * total / globe;
+        let inside: f64 = (0..n)
+            .filter(|&i| cont(i))
+            .filter(|&i| {
+                let p = c(i);
+                p[0] * centre[0] + p[1] * centre[1] + p[2] * centre[2] >= edge
+            })
+            .map(|i| mesh.area(i))
+            .sum();
+        out.in_cap = inside / total;
+    }
+    out.flow_align = if align_w > 0.0 { align / align_w } else { 0.0 };
+    out.flow_ratio = if moving > 0.0 { carried / moving } else { 0.0 };
+
+    let (mut coast, mut passive, mut age, mut old) = (0usize, 0usize, 0.0, 0usize);
+    for i in 0..n {
+        if cont(i) {
+            continue;
+        }
+        for k in mesh.nbrs(i) {
+            let m = mesh.nbr[k] as usize;
+            if !cont(m) {
+                continue;
+            }
+            coast += 1;
+            if d.plate_id[m] == d.plate_id[i] {
+                passive += 1;
+                age += d.age[i] as f64;
+                if d.age[i] as f64 >= OLD_PASSIVE_AGE {
+                    old += 1;
+                }
+            }
+        }
+    }
+    out.passive = passive as f64 / coast.max(1) as f64;
+    out.passive_age = age / passive.max(1) as f64;
+    out.passive_old = old as f64 / passive.max(1) as f64;
+
+    let (sites, sinks) = sim.mantle().sinks();
+    let (mut pole, mut weight) = ([0.0f64; 3], 0.0);
+    for (s, &q) in sites.iter().zip(sinks) {
+        if q > 0.0 {
+            for k in 0..3 {
+                pole[k] += q * s[k];
+            }
+            weight += q;
+        }
+    }
+    out.sink_dipole = if weight > 0.0 { len(pole) / weight } else { 0.0 };
+
+    let mut slip = 0.0;
+    for &key in plates.sutures.keys() {
+        let (a, b) = tectonics_sim::plates::split_key(key);
+        if let (Some(pa), Some(pb)) = (plates.by_id.get(&a), plates.by_id.get(&b)) {
+            let w = [
+                pa.omega[0] - pb.omega[0],
+                pa.omega[1] - pb.omega[1],
+                pa.omega[2] - pb.omega[2],
+            ];
+            slip += len(w);
+            out.sutures += 1;
+        }
+    }
+    out.suture_slip = slip / out.sutures.max(1) as f64 / sim.tuning.merge_quiet_speed.max(1e-12);
+    out
+}
+
+/// Mantle heat under a breakup's continents, after venting, above which it
+/// counts as having broken over a dome.
+const HOT_BREAKUP: f64 = 0.15;
+/// Ticks between measurements of a breakup's gap: 10 Myr.
+const GAP_TICKS: usize = 5;
+/// Times (Myr) after a breakup at which its gap is summarised.
+const GAP_HORIZONS: [f64; 5] = [20.0, 50.0, 100.0, 200.0, 300.0];
+
+/// A rift that split two continents, followed as they part.
+struct Breakup {
+    a: i32,
+    b: i32,
+    start: f64,
+    /// Mean mantle heat under the two continents just after the breakup
+    /// (after venting): high for a breakup over a dome, low for one torn by
+    /// slab pull alone.
+    heat: f64,
+    /// Share of the boundary between the two plates that is diverging,
+    /// `GAP_TICKS` after the breakup.
+    opening: Option<f64>,
+    /// Myr after the breakup that the two plates were first welded together.
+    welded: Option<f64>,
+    /// Relative motion across the boundary at 10 and 30 Myr after.
+    parting: [Option<Parting>; 2],
+    /// Gap (km) between the two continents, every `GAP_TICKS`.
+    gaps: Vec<(f64, f64)>,
+    /// When either plate stopped existing, merged away or absorbed.
+    ended: Option<f64>,
+}
+
+/// Continental area (share of the globe) on each plate.
+fn continental_area_by_plate(sim: &Sim) -> HashMap<i32, f64> {
+    let mesh = &sim.mesh;
+    let d = sim.front();
+    let globe: f64 = (0..mesh.cell_count).map(|i| mesh.area(i)).sum();
+    let mut out: HashMap<i32, f64> = HashMap::new();
+    for i in 0..mesh.cell_count {
+        if d.crust_type[i] == CONTINENTAL {
+            *out.entry(d.plate_id[i]).or_insert(0.0) += mesh.area(i) / globe;
+        }
+    }
+    out
+}
+
+/// Shortest distance (km) from continent on plate `a` to continent on plate
+/// `b`, through anything; `None` if either has none left.
+fn gap_km(sim: &Sim, a: i32, b: i32) -> Option<f64> {
+    let mesh = &sim.mesh;
+    let d = sim.front();
+    let n = mesh.cell_count;
+    let on = |i: usize, p: i32| d.crust_type[i] == CONTINENTAL && d.plate_id[i] == p;
+    let mut hops = vec![-1i32; n];
+    let mut queue: VecDeque<usize> = (0..n).filter(|&i| on(i, a)).collect();
+    if queue.is_empty() {
+        return None;
+    }
+    for &i in &queue {
+        hops[i] = 0;
+    }
+    while let Some(i) = queue.pop_front() {
+        if on(i, b) {
+            return Some((hops[i] - 1).max(0) as f64 * cell_km(n));
+        }
+        for k in mesh.nbrs(i) {
+            let m = mesh.nbr[k] as usize;
+            if hops[m] < 0 {
+                hops[m] = hops[i] + 1;
+                queue.push_back(m);
+            }
+        }
+    }
+    None
+}
+
+/// How the two plates of a breakup move across their shared boundary, from
+/// their motions alone: length-weighted mean opening speed (cm/yr, negative
+/// closing) and mean speed along it, and the share of it opening.
+#[derive(Clone, Copy)]
+struct Parting {
+    opening_cm: f64,
+    sliding_cm: f64,
+    opening_share: f64,
+}
+
+fn parting(sim: &Sim, a: i32, b: i32) -> Option<Parting> {
+    let mesh = &sim.mesh;
+    let d = sim.front();
+    let plates = sim.plates();
+    let (wa, wb) = (plates.by_id.get(&a)?.omega, plates.by_id.get(&b)?.omega);
+    let w = [wa[0] - wb[0], wa[1] - wb[1], wa[2] - wb[2]];
+    let cm_per_rad_myr = EARTH_KM * 1e5 / 1e6;
+    let (mut total, mut open, mut slide, mut opening) = (0.0, 0.0, 0.0, 0.0);
+    for arc in 0..mesh.arc_count() {
+        let (ca, cb) = (mesh.arc_cells[arc * 2], mesh.arc_cells[arc * 2 + 1]);
+        if ca < 0 || cb < 0 {
+            continue;
+        }
+        let (pa, pb) = (d.plate_id[ca as usize], d.plate_id[cb as usize]);
+        let sign = if pa == a && pb == b {
+            1.0
+        } else if pa == b && pb == a {
+            -1.0
+        } else {
+            continue;
+        };
+        let m = [
+            mesh.arc_mid[arc * 3] as f64,
+            mesh.arc_mid[arc * 3 + 1] as f64,
+            mesh.arc_mid[arc * 3 + 2] as f64,
+        ];
+        let nrm = [
+            mesh.arc_normal[arc * 3] as f64,
+            mesh.arc_normal[arc * 3 + 1] as f64,
+            mesh.arc_normal[arc * 3 + 2] as f64,
+        ];
+        let r = [
+            w[1] * m[2] - w[2] * m[1],
+            w[2] * m[0] - w[0] * m[2],
+            w[0] * m[1] - w[1] * m[0],
+        ];
+        // Positive closing, as in `boundaries.rs`, with `a` on the arc's
+        // first side.
+        let vn = sign * (r[0] * nrm[0] + r[1] * nrm[1] + r[2] * nrm[2]);
+        let vt = len([r[0] - vn * sign * nrm[0], r[1] - vn * sign * nrm[1], r[2] - vn * sign * nrm[2]]);
+        let l = mesh.arc_length[arc] as f64;
+        total += l;
+        open -= vn * l;
+        slide += vt * l;
+        if vn < 0.0 {
+            opening += l;
+        }
+    }
+    (total > 0.0).then(|| Parting {
+        opening_cm: open / total * cm_per_rad_myr,
+        sliding_cm: slide / total * cm_per_rad_myr,
+        opening_share: opening / total,
+    })
+}
+
+/// Share of the boundary between plates `a` and `b` that is diverging, by
+/// length; `None` if they no longer touch.
+fn opening_share(sim: &Sim, a: i32, b: i32) -> Option<f64> {
+    let mesh = &sim.mesh;
+    let d = sim.front();
+    let kinds = &sim.boundaries().arc_kind;
+    let (mut total, mut opening) = (0.0, 0.0);
+    for (arc, &kind) in kinds.iter().enumerate() {
+        let (ca, cb) = (mesh.arc_cells[arc * 2], mesh.arc_cells[arc * 2 + 1]);
+        if ca < 0 || cb < 0 {
+            continue;
+        }
+        let (pa, pb) = (d.plate_id[ca as usize], d.plate_id[cb as usize]);
+        if !((pa == a && pb == b) || (pa == b && pb == a)) {
+            continue;
+        }
+        let len = mesh.arc_length[arc] as f64;
+        total += len;
+        if kind == DIVERGENT {
+            opening += len;
+        }
+    }
+    (total > 0.0).then(|| opening / total)
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
+/// How far apart the continents of each breakup got, and how many were still
+/// separate plates, at each of `GAP_HORIZONS`.
+fn print_breakups(label: &str, breakups: &[&Breakup], end: f64) {
+    let opening: Vec<f64> = breakups.iter().filter_map(|b| b.opening).collect();
+    println!(
+        "  {label} continental breakups: {}, boundary diverging after 10 Myr: median {:.0}%, none at all in {:.0}%",
+        breakups.len(),
+        median(opening.clone()) * 100.0,
+        opening.iter().filter(|&&o| o == 0.0).count() as f64 / opening.len().max(1) as f64 * 100.0,
+    );
+    let welded_by = |myr: f64| {
+        breakups
+            .iter()
+            .filter(|b| b.welded.is_some_and(|w| w <= myr))
+            .count() as f64
+            / breakups.len().max(1) as f64
+            * 100.0
+    };
+    for (slot, at) in [(0usize, 10), (1, 30)] {
+        let p: Vec<Parting> = breakups.iter().filter_map(|b| b.parting[slot]).collect();
+        println!(
+            "    +{at} Myr motion across the rift: opening {:+.2} cm/yr, sliding {:.2} cm/yr, opening along {:.0}% of it, net closing in {:.0}%",
+            median(p.iter().map(|x| x.opening_cm).collect()),
+            median(p.iter().map(|x| x.sliding_cm).collect()),
+            median(p.iter().map(|x| x.opening_share).collect()) * 100.0,
+            p.iter().filter(|x| x.opening_cm < 0.0).count() as f64 / p.len().max(1) as f64 * 100.0,
+        );
+    }
+    println!(
+        "    welded back together within 10 Myr {:.0}%, 50 Myr {:.0}%, 300 Myr {:.0}%",
+        welded_by(10.0),
+        welded_by(50.0),
+        welded_by(300.0),
+    );
+    for &h in &GAP_HORIZONS {
+        let due: Vec<&&Breakup> = breakups.iter().filter(|b| b.start + h <= end).collect();
+        let alive: Vec<f64> = due
+            .iter()
+            .filter(|b| b.ended.is_none_or(|e| e > b.start + h))
+            .filter_map(|b| {
+                b.gaps
+                    .iter()
+                    .rev()
+                    .find(|&&(t, _)| t <= b.start + h)
+                    .map(|&(_, g)| g)
+            })
+            .collect();
+        let (p25, p75) = {
+            let mut v = alive.clone();
+            v.sort_by(f64::total_cmp);
+            if v.is_empty() {
+                (f64::NAN, f64::NAN)
+            } else {
+                (v[v.len() / 4], v[v.len() * 3 / 4])
+            }
+        };
+        println!(
+            "    +{h:>3.0} Myr: {:>3}/{:<3} still apart, gap median {:>5.0} km [{p25:.0}..{p75:.0}]",
+            alive.len(),
+            due.len(),
+            median(alive.clone()),
+        );
+    }
+    let widest: Vec<f64> = breakups
+        .iter()
+        .map(|b| b.gaps.iter().map(|&(_, g)| g).fold(0.0, f64::max))
+        .collect();
+    println!("    widest gap ever reached, median {:.0} km", median(widest));
+}
+
+fn len(v: [f64; 3]) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 /// Ticks back a plate's motion is compared against when counting reversals.
@@ -217,6 +769,19 @@ fn main() {
             "continental_area_target" => t.continental_area_target = value,
             "continental_recycling_rate" => t.continental_recycling_rate = value,
             "max_thickening_per_myr" => t.max_thickening_per_myr = value,
+            "mantle_drag" => t.mantle_drag = value,
+            "upwelling_gain" => t.upwelling_gain = value,
+            "continental_drag" => t.continental_drag = value,
+            "collision_drag" => t.collision_drag = value,
+            "collision_lock_gain" => t.collision_lock_gain = value,
+            "suture_coupling" => t.suture_coupling = value,
+            "merge_quiet_speed" => t.merge_quiet_speed = value,
+            "boundary_death_time" => t.boundary_death_time = value,
+            "insulation_cooling" => t.insulation_cooling = value,
+            "insulation_weakening" => t.insulation_weakening = value,
+            "passive_margin_collapse_age" => t.passive_margin_collapse_age = value,
+            "supercontinent_insulation" => sim.options.supercontinent_insulation = value != 0.0,
+            "weld_on_net_closing" => sim.options.weld_on_net_closing = value != 0.0,
             _ => eprintln!("unknown tuning override {name}"),
         }
     }
@@ -238,6 +803,11 @@ fn main() {
     let (mut correlation_sum, mut correlation_samples) = (0.0, 0usize);
     let mut craton_sum = 0.0;
     let mut largest_series: Vec<f64> = Vec::new();
+    let mut series: Vec<Assembly> = Vec::new();
+    let quiet = std::env::var("BENCH_QUIET").is_ok();
+    let mut breakups: Vec<Breakup> = Vec::new();
+    let mut known_breakups: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let follow = GAP_HORIZONS[GAP_HORIZONS.len() - 1];
     // Heading (degrees) and share of the globe of every plate, each tick.
     let mut headings: VecDeque<HashMap<i32, (f64, f64)>> = VecDeque::new();
     let mut turn = [(0.0f64, 0.0f64, 0.0f64); HEADING_LAGS.len()];
@@ -249,8 +819,106 @@ fn main() {
             rifts_at.pop_front();
         }
         rift_burst = rift_burst.max(rifts_at[rifts_at.len() - 1] - rifts_at[0]);
-        if (tick + 1) % budget_every == 0 {
+        let now_myr = sim.elapsed();
+        let fresh: Vec<i64> = sim
+            .plates()
+            .breakups
+            .keys()
+            .copied()
+            .filter(|k| !known_breakups.contains(k))
+            .collect();
+        if !fresh.is_empty() {
+            let land = continental_area_by_plate(&sim);
+            for key in fresh {
+                known_breakups.insert(key);
+                let (a, b) = tectonics_sim::plates::split_key(key);
+                let big = |p: i32| land.get(&p).copied().unwrap_or(0.0) >= CONTINENT_SHARE;
+                if tick >= settled && big(a) && big(b) {
+                    let d = sim.front();
+                    let (mut heat, mut count) = (0.0, 0usize);
+                    for i in 0..sim.mesh.cell_count {
+                        if d.crust_type[i] == CONTINENTAL
+                            && (d.plate_id[i] == a || d.plate_id[i] == b)
+                        {
+                            heat += d.mantle_heat[i] as f64;
+                            count += 1;
+                        }
+                    }
+                    breakups.push(Breakup {
+                        a,
+                        b,
+                        start: now_myr,
+                        heat: heat / count.max(1) as f64,
+                        opening: None,
+                        welded: None,
+                        parting: [None, None],
+                        gaps: Vec::new(),
+                        ended: None,
+                    });
+                }
+            }
+        }
+        if (tick + 1) % GAP_TICKS == 0 {
+            for br in breakups
+                .iter_mut()
+                .filter(|br| br.ended.is_none() && now_myr - br.start <= follow)
+            {
+                let live = sim.plates().by_id.contains_key(&br.a)
+                    && sim.plates().by_id.contains_key(&br.b);
+                match live.then(|| gap_km(&sim, br.a, br.b)).flatten() {
+                    Some(g) => br.gaps.push((now_myr, g)),
+                    None => br.ended = Some(now_myr),
+                }
+                if live && br.opening.is_none() {
+                    br.opening = opening_share(&sim, br.a, br.b);
+                }
+                let since = now_myr - br.start;
+                for (slot, at) in [(0usize, 10.0), (1, 30.0)] {
+                    if live && br.parting[slot].is_none() && since >= at {
+                        br.parting[slot] = parting(&sim, br.a, br.b);
+                    }
+                }
+                let key = tectonics_sim::plates::suture_key(br.a, br.b);
+                if br.welded.is_none() && sim.plates().sutures.contains_key(&key) {
+                    br.welded = Some(now_myr - br.start);
+                }
+            }
+        }
+        if (tick + 1) % budget_every == 0 && !quiet {
             print_continental_budget(&sim);
+        }
+        if (tick + 1) % SERIES_TICKS == 0 {
+            let a = assembly(&sim);
+            println!(
+                "series {:>5.0} cont {:.3} strict {:.2} bridged {:.2} clump {:.2} plates {:>3} sutures {:>2} slip {:>6.1} \
+                 passive {:.2} age {:>5.0} old {:.2} sink {:.2} align {:+.2} flow/speed {:.2} rifts {} collapses {} \
+                 remote {:.0} fragments {:.2} incap {:.2} compact {:.2} reach {:.0} capreach {:.0}",
+                sim.elapsed(),
+                sim.metrics().continental_area,
+                a.strict,
+                a.bridged,
+                a.clump,
+                a.plates,
+                a.sutures,
+                a.suture_slip,
+                a.passive,
+                a.passive_age,
+                a.passive_old,
+                a.sink_dipole,
+                a.flow_align,
+                a.flow_ratio,
+                sim.rift_count(),
+                sim.plates().passive_collapses,
+                a.remote_km,
+                a.fragments,
+                a.in_cap,
+                a.main_compact,
+                a.main_reach,
+                a.main_cap_reach,
+            );
+            if tick >= settled {
+                series.push(a);
+            }
         }
         if tick >= settled && tick % LAND_SAMPLE_TICKS == 0 {
             let m = sim.metrics();
@@ -408,4 +1076,60 @@ fn main() {
         plate_strips * 100.0,
         cont_strips * 100.0,
     );
+    if !series.is_empty() {
+        let stat = |f: &dyn Fn(&Assembly) -> f64| {
+            let v: Vec<f64> = series.iter().map(f).collect();
+            let mean = v.iter().sum::<f64>() / v.len() as f64;
+            let (lo, hi) = v
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| (l.min(x), h.max(x)));
+            format!("{mean:.2} [{lo:.2}..{hi:.2}]")
+        };
+        // Swings: rises from under `low` to over `high`, a full gather after a
+        // proper dispersal.
+        let swings = |f: &dyn Fn(&Assembly) -> f64, low: f64, high: f64| {
+            let (mut armed, mut count) = (false, 0);
+            for a in &series {
+                let x = f(a);
+                if x < low {
+                    armed = true;
+                } else if x > high && armed {
+                    armed = false;
+                    count += 1;
+                }
+            }
+            count
+        };
+        println!(
+            "  assembly after {GROWN_MYR:.0} Myr, mean [min..max]: strict {} bridged {} clump {} plates {} \
+             passive {} passive age {} old passive {} sink dipole {} align {} flow/speed {} suture slip {}",
+            stat(&|a| a.strict),
+            stat(&|a| a.bridged),
+            stat(&|a| a.clump),
+            stat(&|a| a.plates as f64),
+            stat(&|a| a.passive),
+            stat(&|a| a.passive_age),
+            stat(&|a| a.passive_old),
+            stat(&|a| a.sink_dipole),
+            stat(&|a| a.flow_align),
+            stat(&|a| a.flow_ratio),
+            stat(&|a| a.suture_slip),
+        );
+        println!(
+            "  geography: most remote ocean {} km, fragments {}, in cap {}",
+            stat(&|a| a.remote_km),
+            stat(&|a| a.fragments),
+            stat(&|a| a.in_cap),
+        );
+        println!(
+            "  swings (<0.4 then >0.75): strict {} bridged {}; passive collapses {}",
+            swings(&|a| a.strict, 0.4, 0.75),
+            swings(&|a| a.bridged, 0.4, 0.75),
+            sim.plates().passive_collapses,
+        );
+    }
+    let (hot, cold): (Vec<&Breakup>, Vec<&Breakup>) =
+        breakups.iter().partition(|b| b.heat >= HOT_BREAKUP);
+    print_breakups("hot", &hot, sim.elapsed());
+    print_breakups("cold", &cold, sim.elapsed());
 }

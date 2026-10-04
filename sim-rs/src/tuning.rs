@@ -42,6 +42,7 @@ pub struct Tuning {
     pub merge_quiet_speed: f64,
     pub mantle_flow_coupling: f64,
     pub downwelling_memory: f64,
+    pub upwelling_gain: f64,
 
     pub max_oceanic_age: f64,
     pub continental_density: f64,
@@ -93,6 +94,7 @@ pub struct Tuning {
     pub rift_heat_release: f64,
 
     pub min_plate_area: f64,
+    pub passive_margin_collapse_age: f64,
 
     pub active_speed_eps: f64,
     pub dt_myr: f64,
@@ -136,6 +138,7 @@ impl Default for Tuning {
             merge_quiet_speed: 0.002,
             mantle_flow_coupling: 30.0,
             downwelling_memory: 800.0,
+            upwelling_gain: 0.0,
 
             max_oceanic_age: 200.0,
             continental_density: 2.7,
@@ -187,6 +190,7 @@ impl Default for Tuning {
             rift_heat_release: 0.5,
 
             min_plate_area: 0.0005,
+            passive_margin_collapse_age: 0.0,
 
             active_speed_eps: 1e-5,
             dt_myr: 2.0,
@@ -199,12 +203,18 @@ impl Default for Tuning {
 #[serde(rename_all = "camelCase", default)]
 pub struct SimOptions {
     pub supercontinent_insulation: bool,
+    /// Weld two plates only where their continents are closing on balance
+    /// along all their contact, rather than wherever any stretch of it closes.
+    /// A continent rifting apart by rotation closes at one end of the rift as
+    /// it opens along the rest, which otherwise welds it shut at once.
+    pub weld_on_net_closing: bool,
 }
 
 impl Default for SimOptions {
     fn default() -> Self {
         SimOptions {
             supercontinent_insulation: true,
+            weld_on_net_closing: false,
         }
     }
 }

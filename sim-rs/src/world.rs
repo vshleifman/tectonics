@@ -11,6 +11,7 @@ use crate::mantle::MantleFlow;
 use crate::math::read3;
 use crate::mesh::Mesh;
 use crate::metrics::{PlateSummary, WorldMetrics, compute_metrics, summaries};
+use crate::passive_margins::collapse_passive_margins;
 use crate::plate_forces::update_plate_motion;
 use crate::plate_lifecycle::update_plate_identity;
 use crate::plates::{PlateData, initialise_crust, reconcile};
@@ -142,7 +143,7 @@ impl Sim {
         lap(0);
         classify(mesh, front, plates, boundaries, scratch, t);
         lap(1);
-        update_sutures(mesh, front, plates, boundaries, dt, scratch, t);
+        update_sutures(mesh, front, plates, boundaries, dt, scratch, t, options);
         lap(2);
         advect(
             mesh, front, back, plates, dt, boundaries, advection, scratch, t,
@@ -151,6 +152,7 @@ impl Sim {
         update_plate_identity(mesh, back, plates, registry, scratch, t);
         lap(4);
         update_rifting(mesh, back, plates, dt, registry, scratch, t, options);
+        collapse_passive_margins(mesh, back, plates, registry, scratch, t);
         lap(5);
         recycle_continental_margins(mesh, back, dt, advection, t);
         infill_enclosed_basins(mesh, back, dt, advection, scratch, t);
@@ -169,6 +171,14 @@ impl Sim {
 
     pub fn front(&self) -> &CellData {
         &self.front
+    }
+
+    pub fn plates(&self) -> &PlateData {
+        &self.plates
+    }
+
+    pub fn mantle(&self) -> &MantleFlow {
+        &self.mantle
     }
 
     pub fn boundaries(&self) -> &BoundaryField {

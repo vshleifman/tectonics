@@ -17,6 +17,7 @@ pub mod mantle;
 pub mod math;
 pub mod mesh;
 pub mod metrics;
+pub mod passive_margins;
 pub mod plate_forces;
 pub mod plate_lifecycle;
 pub mod plates;
