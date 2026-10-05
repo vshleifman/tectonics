@@ -316,8 +316,9 @@ export interface Tuning {
   /** Myr for a qualifying interior to grow a full keel. */
   cratonGrowthTime: number;
   /**
-   * Myr for a keel to be lost where its crust is rifted, weakened or thinned,
-   * as North China's was.
+   * Myr for a keel to be lost where its crust is rifted or thinned, as North
+   * China's was, or caught in a collision before it has rooted deeply enough
+   * (half a full keel) to stand rigid against it.
    */
   cratonDecayTime: number;
   /**
@@ -332,6 +333,23 @@ export interface Tuning {
    * and are carried harder by {@link mantleFlowCoupling}.
    */
   cratonKeelGain: number;
+  /**
+   * How hard craton (keel at least half full) is to destroy, in [0, 1].
+   * Trench and margin erosion, delamination and loss of keel act on it at
+   * `1 - cratonDurability` of their usual rate, and its interior is
+   * `1 / (1 - cratonDurability)` times harder to rift, though the seams
+   * between cratons are not. Welded plates whose cratons touch are held to a
+   * common motion this firmly. Above ~0.85 cratons accumulate until they lock
+   * the plates up: few plates, ocean floor billions of years old.
+   */
+  cratonDurability: number;
+  /**
+   * Myr two plates' cratons must stay welded together before the plates
+   * become one, however much slack is left in their motions; 0 leaves them
+   * to the ordinary {@link sutureMergeTime} rule. The seam stays weak, so the
+   * union can still rift along it later.
+   */
+  cratonMergeTime: number;
 
   // --- Rifting (see sim-rs/src/rifting.rs) ---
   /**
@@ -451,6 +469,41 @@ export interface Tuning {
    */
   minPlateArea: number;
 
+  // --- Primordial era (optional; see sim-rs/src/primordial.rs) ---
+  /**
+   * Excess heat of the young mantle at the start, in [0, 1]; 0 turns the era
+   * off. While it lasts, continent is made over plumes as round, keeled
+   * cratons, and thickened ocean floor drips back into the mantle rather than
+   * piling up into continent. It decays over {@link primordialCoolingTime}.
+   */
+  primordialHeat: number;
+  /** Myr for the mantle's excess heat to fall by a factor of e. */
+  primordialCoolingTime: number;
+  /** Plumes rising per Myr at full excess heat. */
+  plumeRate: number;
+  /** Radius (radians; 0.08 is ~500 km) of the plateau a plume builds. */
+  plumeRadius: number;
+  /** Myr a plume takes to build its plateau. */
+  plumeDuration: number;
+  /** Crust thickness (km) a plume builds at the plateau's centre. */
+  plumeThickness: number;
+  /**
+   * Keel a plume's crust is born with, in [0, 1]: the depleted mantle the melt
+   * leaves behind is a cratonic root from the start.
+   */
+  plumeKeel: number;
+  /**
+   * How much a hot mantle suppresses arc accretion, per unit of excess heat:
+   * hot, buoyant slabs built continent poorly.
+   */
+  hotArcSuppression: number;
+  /**
+   * Share of thickened ocean floor's extra thickness that drips into the
+   * mantle each tick, per unit of excess heat. Without it, crust piling up at
+   * convergent margins out-builds the plumes even in the hottest mantle.
+   */
+  hotDrip: number;
+
   // --- Boundaries / timing ---
   /** Relative speed below which a boundary is treated as inactive (NONE). */
   activeSpeedEps: number;
@@ -523,6 +576,8 @@ export const defaultTuning: Tuning = {
   cratonDecayTime: 100,
   cratonStrength: 2,
   cratonKeelGain: 1,
+  cratonDurability: 0.75,
+  cratonMergeTime: 60,
 
   riftStrength: 0.65,
   oceanicStrengthYoung: 0.6,
@@ -546,6 +601,16 @@ export const defaultTuning: Tuning = {
   riftHeatRelease: 0.5,
 
   minPlateArea: 0.0005,
+
+  primordialHeat: 0,
+  primordialCoolingTime: 1000,
+  plumeRate: 0.1,
+  plumeRadius: 0.08,
+  plumeDuration: 20,
+  plumeThickness: 35,
+  plumeKeel: 1,
+  hotArcSuppression: 1,
+  hotDrip: 1,
 
   activeSpeedEps: 1e-5,
   dtMyr: 2,

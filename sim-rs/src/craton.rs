@@ -12,8 +12,9 @@
 //! around the Superior, Slave and Wyoming cratons.
 //!
 //! The keel grows over `craton_growth_time` where the crust qualifies, and is
-//! eroded over `craton_decay_time` where it is rifted, weakened or thinned, as
-//! North China's root was in the last 200 Myr. What it does is up to the
+//! eroded over `craton_decay_time` where it is rifted or thinned, as North
+//! China's root was in the last 200 Myr, or caught in a collision before it has
+//! rooted deeply enough to stand rigid against it. What it does is up to the
 //! passes that read it: rifting (strength), plate forces (drag and mantle
 //! flow), advection (margin erosion) and recycling.
 
@@ -31,6 +32,8 @@ const DEFORMED: f32 = 0.95;
 /// it has been through; cratons are the cores that stopped being deformed, not
 /// ones that never were. Only crust in or fresh out of a suture is barred.
 const QUIET: f32 = 0.9;
+/// Keel above which a collision cannot wear the craton down.
+const RIGID_KEEL: f32 = 0.5;
 
 pub fn update_cratons(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scratch, t: &Tuning) {
     let n = mesh.cell_count;
@@ -76,8 +79,14 @@ pub fn update_cratons(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scr
         }
         let h = data.thickness[i] as f64;
         let weak = data.weakness[i];
-        if data.rift_side[i] != 0 || weak >= DEFORMED || h < t.continental_thickness_threshold {
-            data.keel[i] = (data.keel[i] - erode).max(0.0);
+        // A well-rooted craton is rigid: a collision against it deforms the
+        // younger crust around it, not its core, which is why orogens wrap
+        // cratons rather than cut through them. Only rifting and thinning
+        // reach the keel itself.
+        let crushed = weak >= DEFORMED && data.keel[i] < RIGID_KEEL;
+        if data.rift_side[i] != 0 || crushed || h < t.continental_thickness_threshold {
+            let wear = (erode as f64 * t.craton_wear(data.keel[i])) as f32;
+            data.keel[i] = (data.keel[i] - wear).max(0.0);
             continue;
         }
         // Never the coastal cell itself, however coarse the mesh.

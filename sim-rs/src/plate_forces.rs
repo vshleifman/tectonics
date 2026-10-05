@@ -277,13 +277,21 @@ pub fn update_plate_motion(
 
     // Suture coupling: welded plates head for a common motion. It acts on the
     // targets, not the motion itself, so it does not compound tick on tick.
-    let blend = clamp01(t.suture_coupling * dt_myr);
-    if blend > 0.0 {
+    // A craton straddling the weld is one rigid body: the pair is held to a
+    // common motion as firmly as cratons are durable.
+    let welded = clamp01(t.suture_coupling * dt_myr);
+    let rigid = welded.max(clamp01(t.craton_durability));
+    if rigid > 0.0 {
         for &key in plates.sutures.keys() {
             let (ia, ib) = split_key(key);
             if !plates.by_id.contains_key(&ia) || !plates.by_id.contains_key(&ib) {
                 continue;
             }
+            let blend = if plates.craton_welds.contains_key(&key) {
+                rigid
+            } else {
+                welded
+            };
             let (a, b) = (ia as usize * 3, ib as usize * 3);
             for k in 0..3 {
                 let mean = 0.5 * (target[a + k] + target[b + k]);

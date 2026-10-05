@@ -8,7 +8,7 @@ use crate::math::{cross, len3, read3, sub};
 use crate::mesh::Mesh;
 use crate::plates::{PlateData, split_key, suture_key};
 use crate::scratch::Scratch;
-use crate::tuning::{SimOptions, Tuning};
+use crate::tuning::{CRATON_KEEL, SimOptions, Tuning};
 use indexmap::{IndexMap, IndexSet};
 use std::collections::HashMap;
 
@@ -29,6 +29,7 @@ pub fn update_sutures(
     // Closing times length over all of each pair's continental contact.
     let mut net: HashMap<i64, f64> = HashMap::new();
     let mut relative_speed: IndexMap<i64, f64> = IndexMap::new();
+    let mut craton_contact: IndexSet<i64> = IndexSet::new();
 
     for a in 0..mesh.arc_count() {
         let (ca, cb) = (mesh.arc_cells[a * 2], mesh.arc_cells[a * 2 + 1]);
@@ -52,16 +53,22 @@ pub fn update_sutures(
             continue;
         }
         in_contact.insert(pair);
-        if plates.sutures.contains_key(&pair) {
-            // The seam itself: the weakest line in the continent it joins.
-            let w = t.suture_weakness as f32;
-            data.weakness[ca] = data.weakness[ca].max(w);
-            data.weakness[cb] = data.weakness[cb].max(w);
+        if data.keel[ca] >= CRATON_KEEL && data.keel[cb] >= CRATON_KEEL {
+            craton_contact.insert(pair);
         }
         *net.entry(pair).or_insert(0.0) +=
             boundaries.arc_closing[a] as f64 * mesh.arc_length[a] as f64;
         if boundaries.arc_kind[a] != CONVERGENT {
             continue;
+        }
+        if plates.sutures.contains_key(&pair) {
+            // The seam itself, while the collision is still squeezing it: the
+            // weakest line in the continent it joins. Once the two sides are
+            // quietly welded it keeps what it was given, fading only slowly,
+            // and stops wearing away any keel along it.
+            let w = t.suture_weakness as f32;
+            data.weakness[ca] = data.weakness[ca].max(w);
+            data.weakness[cb] = data.weakness[cb].max(w);
         }
         let closing = boundaries.arc_closing[a] as f64;
         let h = hardest.entry(pair).or_insert(0.0);
@@ -84,6 +91,15 @@ pub fn update_sutures(
             if closing > 0.0 {
                 plates.sutures.insert(key, dt_myr);
             }
+        }
+    }
+    let sutures = &plates.sutures;
+    plates
+        .craton_welds
+        .retain(|key, _| craton_contact.contains(key) && sutures.contains_key(key));
+    for key in craton_contact {
+        if plates.sutures.contains_key(&key) {
+            *plates.craton_welds.entry(key).or_insert(0.0) += dt_myr;
         }
     }
 
@@ -117,6 +133,16 @@ pub fn update_sutures(
     for (&key, &age) in &plates.quiet {
         if age >= t.boundary_death_time {
             merging.push(key);
+        }
+    }
+    // Cratons that have stayed welded together this long are one craton, and
+    // the plates carrying them one plate, whatever slack is left in their
+    // motions. The seam stays weak, so the union can still rift along it.
+    if t.craton_merge_time > 0.0 {
+        for (&key, &age) in &plates.craton_welds {
+            if age >= t.craton_merge_time {
+                merging.push(key);
+            }
         }
     }
     for key in merging {
@@ -154,6 +180,7 @@ fn merge_plates(data: &mut CellData, plates: &mut PlateData, a: i32, b: i32) {
     plates.opening.shift_remove(&gone);
     rehome(&mut plates.sutures, gone, keep);
     rehome(&mut plates.quiet, gone, keep);
+    rehome(&mut plates.craton_welds, gone, keep);
 }
 
 /// Move every ledger entry naming `gone` onto `keep`, dropping their shared one.

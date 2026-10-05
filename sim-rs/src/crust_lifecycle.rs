@@ -129,10 +129,13 @@ pub fn apply_crust_lifecycle(
 ) {
     let mut created = 0.0f64;
     let (mut by_accretion, mut by_spreading, mut decontinentalised) = (0.0f64, 0.0f64, 0.0f64);
+    let (mut by_plume, mut by_piling) = (0.0f64, 0.0f64);
+    field.piled.fill(0);
     for i in 0..areas.len() {
         if field.rift_cell[i] != 0 {
             data.crust_type[i] = OCEANIC;
             data.age[i] = 0.0;
+            data.plume_share[i] = 0.0;
             data.density[i] = t.oceanic_density_young as f32;
             data.thickness[i] = t.oceanic_thickness as f32;
             data.elevation[i] = baseline_elevation(t, OCEANIC, 0.0, t.oceanic_thickness) as f32;
@@ -146,7 +149,12 @@ pub fn apply_crust_lifecycle(
                 data.density[i] = t.continental_density as f32;
                 // Whichever brought in more this step gets the credit; crust
                 // spilled from a full arc cell counts as accretion.
-                if field.spread_in[i] > field.accreted[i] {
+                if field.plume_in[i] > field.accreted[i].max(field.spread_in[i]) {
+                    by_plume += areas[i] as f64;
+                } else if field.accreted[i] <= 0.0 && field.spread_in[i] <= 0.0 {
+                    by_piling += areas[i] as f64;
+                    field.piled[i] = 1;
+                } else if field.spread_in[i] > field.accreted[i] {
                     by_spreading += areas[i] as f64;
                 } else {
                     by_accretion += areas[i] as f64;
@@ -165,6 +173,8 @@ pub fn apply_crust_lifecycle(
     field.created_this_step = created;
     field.continentalised_by_accretion = by_accretion;
     field.continentalised_by_spreading = by_spreading;
+    field.continentalised_by_plume = by_plume;
+    field.continentalised_by_piling = by_piling;
     field.decontinentalised = decontinentalised;
     field.created_total += created;
     field.live_mass = total_crust_mass(areas, data);

@@ -1072,8 +1072,10 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
       unit: "%/Myr",
       series: [
         { label: "Accretion", get: (m) => m.continentalisedByAccretion },
+        { label: "Piling", get: (m) => m.continentalisedByPiling },
         { label: "Spreading", get: (m) => m.continentalisedBySpreading },
         { label: "Infill", get: (m) => m.continentalisedByInfill },
+        { label: "Plume", get: (m) => m.continentalisedByPlume },
         { label: "Recycled", get: (m) => m.continentalRecycled },
         { label: "Growth", get: (m) => m.continentalGrowth },
       ],
@@ -1090,8 +1092,20 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
         { label: "Delaminated", get: (m) => m.delaminated },
         { label: "Foundered", get: (m) => m.foundered },
         { label: "Decontinentalised", get: (m) => m.decontinentalised },
+        { label: "Dripped (ocean)", get: (m) => m.dripped },
       ],
       format: formatRate,
+    },
+    pins,
+  );
+  const primordial = makeLineChart(
+    {
+      title: "Primordial era",
+      series: [
+        { label: "Mantle heat", get: (m) => m.mantleExcess },
+        { label: "Plumes", get: (m) => m.activePlumes },
+      ],
+      format: formatNumber,
     },
     pins,
   );
@@ -1211,10 +1225,11 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
     makeTab(
       "budget",
       "Continental budget",
-      stack(growth.element, loss.element),
+      stack(growth.element, loss.element, primordial.element),
       (samples) => {
         growth.update(samples);
         loss.update(samples);
+        primordial.update(samples);
       },
     ),
     makeTab(

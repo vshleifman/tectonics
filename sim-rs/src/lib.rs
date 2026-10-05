@@ -21,6 +21,7 @@ pub mod passive_margins;
 pub mod plate_forces;
 pub mod plate_lifecycle;
 pub mod plates;
+pub mod primordial;
 pub mod recycling;
 pub mod registry;
 pub mod rifting;

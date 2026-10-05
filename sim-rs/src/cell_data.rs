@@ -28,6 +28,11 @@ pub struct CellData {
     /// [0, 1]: the deep, cold, buoyant root of an ancient continental core.
     /// Travels with crust.
     pub keel: Vec<f32>,
+    /// Share of the cell's crust, by mass, that a primordial plume made, in
+    /// [0, 1]: a tracer for where crust came from. It travels with the crust,
+    /// mixes by mass wherever crust is added, and is untouched by removal, so
+    /// the plume crust still alive is the sum of area x thickness x share.
+    pub plume_share: Vec<f32>,
 }
 
 pub const RIFT_NEAR: u8 = 1;
@@ -47,8 +52,20 @@ impl CellData {
             slab: vec![0.0; n],
             rift_side: vec![0; n],
             keel: vec![0.0; n],
+            plume_share: vec![0.0; n],
         }
     }
+}
+
+/// Mix `added` km of crust carrying tracer share `share` into a cell holding
+/// `before` km at share `current`.
+#[inline]
+pub fn mixed_share(current: f32, before: f64, added: f64, share: f64) -> f32 {
+    let total = before.max(0.0) + added;
+    if added <= 0.0 || total <= 0.0 {
+        return current;
+    }
+    (((current as f64 * before.max(0.0) + share * added) / total).clamp(0.0, 1.0)) as f32
 }
 
 /// Total live crust mass: the sum of `area * thickness` over every cell.

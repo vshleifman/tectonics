@@ -167,9 +167,13 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   cratonInland: "How far inland crust must lie from the ocean to grow a keel.",
   cratonGrowthTime: "How long a qualifying interior takes to grow a full keel.",
   cratonDecayTime:
-    "How long a keel takes to be lost where its crust is weakened.",
+    "How long a keel takes to be lost where its crust is rifted, thinned or crushed.",
   cratonStrength: "Extra strength a full keel gives against rifting.",
   cratonKeelGain: "Extra coupling a full keel gives its crust to the mantle.",
+  cratonDurability:
+    "How hard cratons are to erode or rift; above ~0.85 they can lock the plates up.",
+  cratonMergeTime:
+    "How long two plates' cratons must stay welded before the plates merge; 0 to never force it.",
   riftStrength:
     "Tension continental lithosphere must be under before it tears.",
   oceanicStrengthYoung:
@@ -197,6 +201,17 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   domePushDuration: "How long that push keeps the rifted pieces apart.",
   riftHeatRelease: "Share of mantle heat vented when a plate rifts.",
   minPlateArea: "Smallest fragment that becomes a plate of its own.",
+  primordialHeat:
+    "Excess heat of the young mantle; above 0, early continent forms as plume cratons.",
+  primordialCoolingTime: "How long the young mantle takes to cool off.",
+  plumeRate: "Plumes rising per Myr while the mantle is at full heat.",
+  plumeRadius: "Radius of the plateau each plume builds.",
+  plumeDuration: "How long a plume takes to build its plateau.",
+  plumeThickness: "Crust thickness a plume builds at the plateau's centre.",
+  plumeKeel: "Cratonic keel plume crust is born with.",
+  hotArcSuppression: "How much a hot mantle holds back arc accretion.",
+  hotDrip:
+    "How much thickened ocean floor drips into a hot mantle instead of becoming continent.",
   activeSpeedEps: "Relative speed below which a boundary counts as inactive.",
   dtMyr: "Million years of plate motion advanced per simulation tick.",
 };
@@ -715,6 +730,20 @@ const TUNING_GROUP_FIELDS: {
         max: 10,
         step: 0.25,
       },
+      {
+        key: "cratonDurability",
+        label: "Craton durability",
+        min: 0,
+        max: 0.99,
+        step: 0.01,
+      },
+      {
+        key: "cratonMergeTime",
+        label: "Craton merge (Myr)",
+        min: 0,
+        max: 500,
+        step: 10,
+      },
     ],
   },
   {
@@ -761,6 +790,74 @@ const TUNING_GROUP_FIELDS: {
         min: 2.5,
         max: 3.2,
         step: 0.01,
+      },
+    ],
+  },
+  {
+    title: "Primordial era",
+    sliders: [
+      {
+        key: "primordialHeat",
+        label: "Primordial heat",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "primordialCoolingTime",
+        label: "Cooling time (Myr)",
+        min: 100,
+        max: 5000,
+        step: 100,
+      },
+      {
+        key: "plumeRate",
+        label: "Plumes /Myr",
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
+        key: "plumeRadius",
+        label: "Plume radius (rad)",
+        min: 0.02,
+        max: 0.3,
+        step: 0.01,
+      },
+      {
+        key: "plumeDuration",
+        label: "Plume duration (Myr)",
+        min: 2,
+        max: 100,
+        step: 2,
+      },
+      {
+        key: "plumeThickness",
+        label: "Plume crust (km)",
+        min: 15,
+        max: 60,
+        step: 1,
+      },
+      {
+        key: "plumeKeel",
+        label: "Plume keel",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "hotArcSuppression",
+        label: "Hot arc suppression",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
+      {
+        key: "hotDrip",
+        label: "Hot drip",
+        min: 0,
+        max: 2,
+        step: 0.05,
       },
     ],
   },

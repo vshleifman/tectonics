@@ -5,7 +5,7 @@
 //! for the geology behind each pass.
 
 use crate::boundaries::{BoundaryField, CONVERGENT};
-use crate::cell_data::{CONTINENTAL, CellData, OCEANIC};
+use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, mixed_share};
 use crate::mesh::Mesh;
 use crate::plates::PlateData;
 use crate::scratch::{MAX_NBRS, Scratch};
@@ -26,6 +26,18 @@ pub struct AdvectionField {
     pub winner: Vec<i32>,
     pub accreted: Vec<f32>,
     pub welded: Vec<f32>,
+    /// Of `welded`, the thickness that is continental crust, and that times
+    /// its age and its keel: welded crust keeps its history in the cell it
+    /// welds onto rather than taking on that of whatever moved in.
+    pub welded_continental: Vec<f32>,
+    pub welded_age: Vec<f32>,
+    pub welded_keel: Vec<f32>,
+    /// `welded` times its plume share, then the same for the welded crust
+    /// spilling on to neighbours: tracer mass in transit.
+    pub welded_share: Vec<f32>,
+    spill_share: Vec<f32>,
+    spill_share_next: Vec<f32>,
+    spill_share_in: Vec<f32>,
     pub rift_cell: Vec<u8>,
     pub subducted: Vec<u8>,
     /// Thickness each cell took in this step from lateral spreading, net of
@@ -53,6 +65,24 @@ pub struct AdvectionField {
     pub continentalised_by_spreading: f64,
     /// Area turned continental this step by trapped ocean filling in.
     pub continentalised_by_infill: f64,
+    /// Thickness each cell gained this step over a plume.
+    pub plume_in: Vec<f32>,
+    /// Crust mass plumes made this step.
+    pub plume_created_this_step: f64,
+    /// Thickened ocean crust that foundered into a hot mantle this step.
+    pub dripped_this_step: f64,
+    /// Area turned continental this step over plumes.
+    pub continentalised_by_plume: f64,
+    /// Area of ocean floor turned continental this step with neither accretion
+    /// nor lateral spreading into it: crust piled up where the transport had
+    /// nowhere to put it, or spilled over from a full arc cell beside it.
+    pub continentalised_by_piling: f64,
+    /// 1 where a cell turned continental by piling this step.
+    pub piled: Vec<u8>,
+    /// Where continental crust lost its cell this step: 1 overrun by another
+    /// plate, 2 left with nowhere to go. Either way its mass welds onto the
+    /// cell, but the cell takes the age and keel of the crust that moved in.
+    pub overrun: Vec<u8>,
     /// Continental area recycled into the mantle at active margins this step.
     pub continental_recycled: f64,
     /// Recycling owed but not yet taken, as area: margins are taken a whole
@@ -79,6 +109,13 @@ impl AdvectionField {
             winner: vec![-1; n],
             accreted: vec![0.0; n],
             welded: vec![0.0; n],
+            welded_continental: vec![0.0; n],
+            welded_age: vec![0.0; n],
+            welded_keel: vec![0.0; n],
+            welded_share: vec![0.0; n],
+            spill_share: vec![0.0; n],
+            spill_share_next: vec![0.0; n],
+            spill_share_in: vec![0.0; n],
             rift_cell: vec![0; n],
             subducted: vec![0; n],
             spread_in: vec![0.0; n],
@@ -94,6 +131,13 @@ impl AdvectionField {
             continentalised_by_accretion: 0.0,
             continentalised_by_spreading: 0.0,
             continentalised_by_infill: 0.0,
+            plume_in: vec![0.0; n],
+            plume_created_this_step: 0.0,
+            dripped_this_step: 0.0,
+            continentalised_by_plume: 0.0,
+            continentalised_by_piling: 0.0,
+            piled: vec![0; n],
+            overrun: vec![0; n],
             continental_recycled: 0.0,
             recycle_debt: 0.0,
             continental_growth: 0.0,
@@ -137,6 +181,7 @@ pub fn advect(
     t: &Tuning,
 ) {
     let n = mesh.cell_count;
+    out.overrun.fill(0);
     let areas = &mesh.areas;
     let area = |i: usize| areas[i] as f64;
     let off = &mesh.nbr_off;
@@ -147,6 +192,10 @@ pub fn advect(
     out.winner.fill(-1);
     out.accreted.fill(0.0);
     out.welded.fill(0.0);
+    out.welded_continental.fill(0.0);
+    out.welded_age.fill(0.0);
+    out.welded_keel.fill(0.0);
+    out.welded_share.fill(0.0);
     out.rift_cell.fill(0);
     out.subducted.fill(0);
     out.spread_in.fill(0.0);
@@ -217,12 +266,24 @@ pub fn advect(
         s.forward_arc[cell] = best_arc;
     }
 
-    // Does `a`'s crust ride over `b`'s when the two meet?
+    // Does `a`'s crust ride over `b`'s when the two meet? Between ocean floors
+    // the younger, more buoyant one does. Between continents the craton does:
+    // a deep keel is the rigid indenter, and the younger, thinner margin
+    // crumples against it, as India's crust does against Asia while the old
+    // Indian shield rides through intact.
     let overrides = |a: usize, b: usize| -> bool {
         let a_cont = src.crust_type[a] == CONTINENTAL;
         let b_cont = src.crust_type[b] == CONTINENTAL;
         if a_cont != b_cont {
             return a_cont;
+        }
+        if a_cont {
+            if src.keel[a] != src.keel[b] {
+                return src.keel[a] > src.keel[b];
+            }
+            if src.thickness[a] != src.thickness[b] {
+                return src.thickness[a] > src.thickness[b];
+            }
         }
         if src.age[a] != src.age[b] {
             return src.age[a] < src.age[b];
@@ -237,9 +298,11 @@ pub fn advect(
     s.claimant.fill(-1);
     s.eaten.fill(0);
 
+    // Lower rides over: continent over any ocean, and cratonic margins over
+    // younger continent, as in `overrides`.
     let buoyancy = |cell: usize| -> f64 {
         if src.crust_type[cell] == CONTINENTAL {
-            -t.max_oceanic_age
+            -t.max_oceanic_age * (1.0 + src.keel[cell] as f64)
         } else {
             src.age[cell] as f64
         }
@@ -586,6 +649,7 @@ pub fn advect(
         dst.slab[dest] = src.slab[source];
         dst.rift_side[dest] = src.rift_side[source];
         dst.keel[dest] = src.keel[source];
+        dst.plume_share[dest] = src.plume_share[source];
         dst.thickness[dest] = if source == dest {
             src.thickness[source]
         } else {
@@ -613,6 +677,7 @@ pub fn advect(
                 dst.slab[d] = 0.0;
                 dst.rift_side[d] = 0;
                 dst.keel[d] = 0.0;
+                dst.plume_share[d] = 0.0;
                 out.rift_cell[d] = 1;
             } else {
                 copy_cell(dst, d, d);
@@ -636,21 +701,28 @@ pub fn advect(
         let blocked_by_other = ahead >= 0 && src.plate_id[ahead as usize] != src.plate_id[cell];
         let mass = area(cell) * src.thickness[cell] as f64;
         if src.crust_type[cell] == CONTINENTAL {
-            if s.eaten[cell] != 0 {
+            let kept = if s.eaten[cell] != 0 {
+                out.overrun[cell] = 1;
                 // Scraped off by the plate that took the cell: nearly all of it
                 // welds on, the rest is the trench's erosion of the margin.
-                let eroded = t.subduction_erosion * mass;
+                let eroded = t.subduction_erosion * t.craton_wear(src.keel[cell]) * mass;
                 subducted_this_step += eroded;
                 eroded_this_step += eroded;
-                add_f32(&mut out.welded[cell], (mass - eroded) / area(cell));
                 out.subducted[cell] = 1;
                 if out.rift_cell[cell] == 0 {
                     dst.crust_type[cell] = CONTINENTAL;
                     dst.density[cell] = t.continental_density as f32;
                 }
+                (mass - eroded) / area(cell)
             } else {
-                add_f32(&mut out.welded[cell], mass / area(cell));
-            }
+                out.overrun[cell] = 2;
+                mass / area(cell)
+            };
+            add_f32(&mut out.welded[cell], kept);
+            add_f32(&mut out.welded_share[cell], kept * src.plume_share[cell] as f64);
+            add_f32(&mut out.welded_continental[cell], kept);
+            add_f32(&mut out.welded_age[cell], kept * src.age[cell] as f64);
+            add_f32(&mut out.welded_keel[cell], kept * src.keel[cell] as f64);
         } else if s.eaten[cell] != 0 || blocked_by_other {
             let into = if s.eaten[cell] != 0 {
                 cell
@@ -669,6 +741,10 @@ pub fn advect(
             }
         } else {
             add_f32(&mut out.welded[cell], mass / area(cell));
+            add_f32(
+                &mut out.welded_share[cell],
+                mass / area(cell) * src.plume_share[cell] as f64,
+            );
         }
     }
 
@@ -683,7 +759,9 @@ pub fn advect(
     // cell may still absorb at the thickening cap.
     for d in 0..n {
         // A cratonic keel is too deep and buoyant for the trench to scrape.
-        let eroded_h = out.margin_eroded[d] as f64 * (1.0 - dst.keel[d] as f64);
+        let eroded_h = out.margin_eroded[d] as f64
+            * (1.0 - dst.keel[d] as f64)
+            * t.craton_wear(dst.keel[d]);
         if eroded_h > 0.0 && out.rift_cell[d] == 0 {
             let available = (dst.thickness[d] as f64 - t.rift_thickness_floor).max(0.0);
             let take = eroded_h.min(available);
@@ -706,6 +784,7 @@ pub fn advect(
             (thickness_cap - dst.thickness[d] as f64).max(0.0)
         };
         let take = acc.min(out.margin_eroded[d] as f64).min(cap_room);
+        dst.plume_share[d] = mixed_share(dst.plume_share[d], dst.thickness[d] as f64, take, 0.0);
         add_f32(&mut dst.thickness[d], take);
         out.margin_eroded[d] = (out.margin_eroded[d] as f64 - take) as f32;
         surplus[d] = (acc - take) as f32;
@@ -777,6 +856,8 @@ pub fn advect(
                 continue;
             }
             let place = inc.min(headroom[d] as f64);
+            dst.plume_share[d] =
+                mixed_share(dst.plume_share[d], dst.thickness[d] as f64, place, 0.0);
             add_f32(&mut dst.thickness[d], place);
             add_f32(&mut out.margin_eroded[d], -place);
             add_f32(&mut next[d], inc - place);
@@ -791,18 +872,38 @@ pub fn advect(
         }
     }
 
+    out.spill_share.fill(0.0);
     for d in 0..n {
         let welded = out.welded[d] as f64;
         if welded == 0.0 {
             continue;
         }
+        let welded_tracer = (out.welded_share[d] as f64 / welded).clamp(0.0, 1.0);
         let held = if out.rift_cell[d] != 0 {
             0.0
         } else {
             welded.min((thickness_cap - dst.thickness[d] as f64).max(0.0))
         };
+        // Continental crust welded on brings its age and keel with it, mixed
+        // by thickness with the crust already in the cell, so a craton that
+        // loses its cell to the grid is not wiped from the record.
+        let continental = (out.welded_continental[d] as f64).min(welded);
+        let held_continental = held * continental / welded;
+        let stays_continental = dst.crust_type[d] == CONTINENTAL
+            || dst.thickness[d] as f64 + held >= t.continental_thickness_threshold;
+        if held_continental > 0.0 && stays_continental {
+            let own = dst.thickness[d].max(0.0) as f64 + (held - held_continental);
+            let total = own + held_continental;
+            let age = out.welded_age[d] as f64 / continental;
+            let keel = out.welded_keel[d] as f64 / continental;
+            dst.age[d] = ((own * dst.age[d] as f64 + held_continental * age) / total) as f32;
+            dst.keel[d] = ((own * dst.keel[d] as f64 + held_continental * keel) / total) as f32;
+        }
+        dst.plume_share[d] =
+            mixed_share(dst.plume_share[d], dst.thickness[d] as f64, held, welded_tracer);
         add_f32(&mut dst.thickness[d], held);
         surplus[d] = (welded - held) as f32;
+        out.spill_share[d] = ((welded - held) * welded_tracer) as f32;
     }
 
     for round in 0..PLACEMENT_ROUNDS {
@@ -818,11 +919,14 @@ pub fn advect(
         }
         incoming.fill(0.0);
         next.fill(0.0);
+        out.spill_share_in.fill(0.0);
+        out.spill_share_next.fill(0.0);
         for d in 0..n {
             let have = surplus[d] as f64;
             if have <= 0.0 {
                 continue;
             }
+            let tracer = (out.spill_share[d] as f64 / have).clamp(0.0, 1.0);
             let own = dst.plate_id[d];
             let accepts = |m: usize| dst.plate_id[m] == own && out.rift_cell[m] == 0;
             let mut room = 0.0f64;
@@ -849,6 +953,7 @@ pub fn advect(
             }
             if weight <= 0.0 {
                 add_f32(&mut next[d], have);
+                add_f32(&mut out.spill_share_next[d], have * tracer);
                 continue;
             }
             for k in range(d) {
@@ -860,7 +965,9 @@ pub fn advect(
                 if w <= 0.0 {
                     continue;
                 }
-                add_f32(&mut incoming[m], have * (w / weight) * area(d) / area(m));
+                let moved = have * (w / weight) * area(d) / area(m);
+                add_f32(&mut incoming[m], moved);
+                add_f32(&mut out.spill_share_in[m], moved * tracer);
             }
         }
         let last = round == PLACEMENT_ROUNDS - 1;
@@ -869,18 +976,26 @@ pub fn advect(
             if inc == 0.0 {
                 continue;
             }
+            let tracer = (out.spill_share_in[d] as f64 / inc).clamp(0.0, 1.0);
             let place = if last {
                 inc
             } else {
                 inc.min(headroom[d] as f64)
             };
+            dst.plume_share[d] =
+                mixed_share(dst.plume_share[d], dst.thickness[d] as f64, place, tracer);
             add_f32(&mut dst.thickness[d], place);
             add_f32(&mut next[d], inc - place);
+            add_f32(&mut out.spill_share_next[d], (inc - place) * tracer);
         }
         std::mem::swap(&mut surplus, &mut next);
+        std::mem::swap(&mut out.spill_share, &mut out.spill_share_next);
     }
     for d in 0..n {
         if surplus[d] > 0.0 {
+            let tracer = (out.spill_share[d] / surplus[d]).clamp(0.0, 1.0) as f64;
+            dst.plume_share[d] =
+                mixed_share(dst.plume_share[d], dst.thickness[d] as f64, surplus[d] as f64, tracer);
             add_f32(&mut dst.thickness[d], surplus[d] as f64);
         }
     }
@@ -892,6 +1007,9 @@ pub fn advect(
         let flow = &mut next;
         before.copy_from_slice(&dst.thickness);
         flow.fill(0.0);
+        // Crust each cell takes in, and that times the share it carries.
+        out.spill_share_next.fill(0.0);
+        out.spill_share_in.fill(0.0);
         for d in 0..n {
             let excess = before[d] as f64 - t.crust_spread_start;
             if excess <= 0.0 || out.rift_cell[d] != 0 {
@@ -926,10 +1044,20 @@ pub fn advect(
                     continue;
                 }
                 let share = (before[d] as f64 - before[m] as f64) / deficit;
-                add_f32(&mut flow[m], give * share * area(d) / area(m));
+                let moved = give * share * area(d) / area(m);
+                add_f32(&mut flow[m], moved);
+                add_f32(&mut out.spill_share_next[m], moved);
+                add_f32(&mut out.spill_share_in[m], moved * dst.plume_share[d] as f64);
             }
         }
         for d in 0..n {
+            let inflow = out.spill_share_next[d] as f64;
+            if inflow > 0.0 {
+                // What it kept of its own, then what flowed in.
+                let kept = before[d] as f64 - (inflow - flow[d] as f64);
+                let tracer = out.spill_share_in[d] as f64 / inflow;
+                dst.plume_share[d] = mixed_share(dst.plume_share[d], kept, inflow, tracer);
+            }
             add_f32(&mut dst.thickness[d], flow[d] as f64);
             out.spread_in[d] = flow[d].max(0.0);
         }
@@ -943,7 +1071,7 @@ pub fn advect(
             if over <= 0.0 {
                 continue;
             }
-            let shed = over.min(shed_per_step);
+            let shed = over.min(shed_per_step * t.craton_wear(dst.keel[d]));
             add_f32(&mut dst.thickness[d], -shed);
             subducted_this_step += shed * area(d);
             delaminated_this_step += shed * area(d);
@@ -1042,12 +1170,14 @@ pub fn advect(
             continue;
         }
         let wanted = available.min(rim_mass / rim_area * area(d));
-        let mut pulled = 0.0f64;
+        let (mut pulled, mut traced) = (0.0f64, 0.0f64);
         for (&m, &own) in donors.iter().zip(&spare) {
             let take = wanted * own / available;
             add_f32(&mut dst.thickness[m], -take / area(m));
             pulled += take;
+            traced += take * dst.plume_share[m] as f64;
         }
+        dst.plume_share[d] = (traced / pulled.max(1e-12)) as f32;
 
         dst.elevation[d] = dst.elevation[model];
         dst.crust_type[d] = kind;
@@ -1079,7 +1209,7 @@ pub fn advect(
             continue;
         }
         let wanted = available.min(t.oceanic_thickness * area(d));
-        let mut pulled = 0.0f64;
+        let (mut pulled, mut traced) = (0.0f64, 0.0f64);
         for k in range(d) {
             let m = nbr[k] as usize;
             if !(dst.plate_id[m] == plate && dst.crust_type[m] == CONTINENTAL) {
@@ -1092,7 +1222,9 @@ pub fn advect(
             let take = wanted * spare / available;
             add_f32(&mut dst.thickness[m], -take / area(m));
             pulled += take;
+            traced += take * dst.plume_share[m] as f64;
         }
+        dst.plume_share[d] = (traced / pulled.max(1e-12)) as f32;
         out.rift_cell[d] = 0;
         dst.thickness[d] = (pulled / area(d)) as f32;
         dst.age[d] = 0.0;

@@ -48,6 +48,10 @@ pub struct PlateData {
     pub sutures: IndexMap<i64, f64>,
     /// Myr each neighbouring pair has been moving as one without a weld.
     pub quiet: IndexMap<i64, f64>,
+    /// Myr each welded pair's cratons have touched across the weld: one rigid
+    /// craton that happens to straddle two plates, so held to a common motion
+    /// and, after `craton_merge_time`, made one plate.
+    pub craton_welds: IndexMap<i64, f64>,
     /// Extensional state from the last force balance.
     pub stress: HashMap<i32, PlateStress>,
     /// Plates with a rift still stretching.
@@ -130,5 +134,6 @@ pub fn initialise_crust(t: &Tuning, data: &mut CellData, seed: &str) {
         data.thickness[i] = t.oceanic_thickness as f32;
         data.elevation[i] = baseline_elevation(t, OCEANIC, age, t.oceanic_thickness) as f32;
         data.slab[i] = 0.0;
+        data.plume_share[i] = 0.0;
     }
 }

@@ -98,6 +98,24 @@ export interface WorldMetrics {
   continentalisedBySpreading: number;
   /** Share of the surface per Myr turned continental by trapped ocean filling in. */
   continentalisedByInfill: number;
+  /** Share of the surface per Myr turned continental over primordial plumes. */
+  continentalisedByPlume: number;
+  /**
+   * Share of the surface per Myr of ocean floor turned continental with neither
+   * accretion nor spreading into it: crust piled up where the transport had
+   * nowhere to put it, or spilled from a full arc cell beside it. Most of the
+   * model's continental growth comes this way.
+   */
+  continentalisedByPiling: number;
+  /**
+   * Share of the oceanic mass per Myr of thickened ocean floor that foundered
+   * into a hot primordial mantle instead of becoming continent.
+   */
+  dripped: number;
+  /** Excess mantle temperature of the primordial era; 0 once cooled or off. */
+  mantleExcess: number;
+  /** Plumes building crust right now. */
+  activePlumes: number;
   /**
    * Share of the surface per Myr of continental crust recycled into the mantle
    * at active margins. Levelled off, it matches {@link continentalGrowth}.

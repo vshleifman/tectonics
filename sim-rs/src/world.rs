@@ -12,6 +12,7 @@ use crate::math::read3;
 use crate::mesh::Mesh;
 use crate::metrics::{PlateSummary, WorldMetrics, compute_metrics, summaries};
 use crate::passive_margins::collapse_passive_margins;
+use crate::primordial::{Primordial, effective_tuning, mantle_excess};
 use crate::plate_forces::update_plate_motion;
 use crate::plate_lifecycle::update_plate_identity;
 use crate::plates::{PlateData, initialise_crust, reconcile};
@@ -37,6 +38,7 @@ pub struct Sim {
     boundaries: BoundaryField,
     advection: AdvectionField,
     mantle: MantleFlow,
+    primordial: Primordial,
     scratch: Scratch,
     raw_labels: Vec<i32>,
     pub tuning: Tuning,
@@ -61,6 +63,7 @@ impl Sim {
             boundaries: BoundaryField::new(n, arcs),
             advection: AdvectionField::new(n),
             mantle: MantleFlow::new(&mesh),
+            primordial: Primordial::default(),
             scratch: Scratch::new(n),
             raw_labels: vec![0; n],
             tuning: Tuning::default(),
@@ -88,6 +91,7 @@ impl Sim {
             self.advection.continental_growth = 0.0;
             self.advection.continental_share_before = None;
             self.mantle.reset();
+            self.primordial.reset();
             self.elapsed = 0.0;
         }
         seed_slabs(&self.mesh, &mut self.front, &self.boundaries, &self.tuning);
@@ -124,11 +128,15 @@ impl Sim {
             advection,
             mantle,
             scratch,
-            tuning: t,
+            primordial,
+            tuning,
             options,
             timings,
+            elapsed,
             ..
         } = self;
+        let eff = effective_tuning(tuning, *elapsed);
+        let t = &eff;
         let dt = t.dt_myr;
         let mut mark = now_ms();
         let mut lap = |pass: usize| {
@@ -156,6 +164,7 @@ impl Sim {
         lap(5);
         recycle_continental_margins(mesh, back, dt, advection, t);
         infill_enclosed_basins(mesh, back, dt, advection, scratch, t);
+        primordial.update(mesh, back, plates, advection, dt, *elapsed, t);
         apply_crust_lifecycle(&mesh.areas, back, dt, advection, t);
         track_continental_growth(mesh, back, dt, advection);
         update_cratons(mesh, back, dt, scratch, t);
@@ -166,7 +175,16 @@ impl Sim {
         std::mem::swap(front, back);
         classify(mesh, front, plates, boundaries, scratch, t);
         lap(8);
-        self.elapsed += dt;
+        *elapsed += dt;
+    }
+
+    /// Excess mantle temperature now, from the primordial era; 0 with it off.
+    pub fn mantle_excess(&self) -> f64 {
+        mantle_excess(&self.tuning, self.elapsed)
+    }
+
+    pub fn active_plumes(&self) -> usize {
+        self.primordial.active_plumes()
     }
 
     pub fn front(&self) -> &CellData {
@@ -233,7 +251,7 @@ impl Sim {
     }
 
     pub fn metrics(&self) -> WorldMetrics {
-        compute_metrics(
+        let mut m = compute_metrics(
             &self.mesh,
             &self.front,
             &self.plates,
@@ -241,7 +259,10 @@ impl Sim {
             &self.advection,
             &self.tuning,
             self.elapsed,
-        )
+        );
+        m.mantle_excess = self.mantle_excess();
+        m.active_plumes = self.active_plumes();
+        m
     }
 
     pub fn summaries(&self) -> Vec<PlateSummary> {

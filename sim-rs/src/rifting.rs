@@ -262,7 +262,14 @@ fn insulate(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scratch, t: &
 fn lithosphere_strength(t: &Tuning, data: &CellData, i: usize) -> f64 {
     if data.crust_type[i] == CONTINENTAL {
         // A cratonic keel is cold and stiff; rifts go around it.
-        return 1.0 + t.craton_strength * data.keel[i] as f64;
+        // Durable cratons are all but unbreakable inside, but the seams
+        // between them stay the place a supercontinent parts: the Atlantic
+        // opened along the sutures that had closed the Iapetus. Inherited
+        // weakness takes the extra strength away again.
+        let keeled = 1.0 + t.craton_strength * data.keel[i] as f64;
+        let durable = 1.0 / t.craton_wear(data.keel[i]).max(0.01) - 1.0;
+        let seam = clamp01(data.weakness[i] as f64);
+        return keeled * (1.0 + durable * (1.0 - seam));
     }
     let cooled = clamp01(data.age[i] as f64 / t.max_oceanic_age).sqrt();
     t.oceanic_strength_young + (t.oceanic_strength_old - t.oceanic_strength_young) * cooled

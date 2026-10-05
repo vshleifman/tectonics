@@ -47,6 +47,11 @@ pub struct WorldMetrics {
     pub continentalised_by_accretion: f64,
     pub continentalised_by_spreading: f64,
     pub continentalised_by_infill: f64,
+    pub continentalised_by_plume: f64,
+    pub continentalised_by_piling: f64,
+    pub dripped: f64,
+    pub mantle_excess: f64,
+    pub active_plumes: usize,
     pub continental_recycled: f64,
     pub continental_growth: f64,
     pub continental_eroded: f64,
@@ -269,6 +274,17 @@ pub fn compute_metrics(
         continentalised_by_accretion: globe_share_per_myr(advection.continentalised_by_accretion),
         continentalised_by_spreading: globe_share_per_myr(advection.continentalised_by_spreading),
         continentalised_by_infill: globe_share_per_myr(advection.continentalised_by_infill),
+        continentalised_by_plume: globe_share_per_myr(advection.continentalised_by_plume),
+        continentalised_by_piling: globe_share_per_myr(advection.continentalised_by_piling),
+        dripped: if ocean_mass > 0.0 {
+            advection.dripped_this_step / ocean_mass / dt
+        } else {
+            0.0
+        },
+        // The primordial era is the world's, not the crust's: `Sim::metrics`
+        // fills these in.
+        mantle_excess: 0.0,
+        active_plumes: 0,
         continental_recycled: globe_share_per_myr(advection.continental_recycled),
         continental_growth: advection.continental_growth,
         continental_eroded: continental_share_per_myr(advection.eroded_this_step),

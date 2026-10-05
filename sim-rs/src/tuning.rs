@@ -72,6 +72,8 @@ pub struct Tuning {
     pub craton_decay_time: f64,
     pub craton_strength: f64,
     pub craton_keel_gain: f64,
+    pub craton_durability: f64,
+    pub craton_merge_time: f64,
 
     pub rift_strength: f64,
     pub suture_weakness: f64,
@@ -95,6 +97,16 @@ pub struct Tuning {
 
     pub min_plate_area: f64,
     pub passive_margin_collapse_age: f64,
+
+    pub primordial_heat: f64,
+    pub primordial_cooling_time: f64,
+    pub plume_rate: f64,
+    pub plume_radius: f64,
+    pub plume_duration: f64,
+    pub plume_thickness: f64,
+    pub plume_keel: f64,
+    pub hot_arc_suppression: f64,
+    pub hot_drip: f64,
 
     pub active_speed_eps: f64,
     pub dt_myr: f64,
@@ -168,6 +180,8 @@ impl Default for Tuning {
             craton_decay_time: 100.0,
             craton_strength: 2.0,
             craton_keel_gain: 1.0,
+            craton_durability: 0.75,
+            craton_merge_time: 60.0,
 
             rift_strength: 0.65,
             suture_weakness: 1.0,
@@ -192,8 +206,36 @@ impl Default for Tuning {
             min_plate_area: 0.0005,
             passive_margin_collapse_age: 0.0,
 
+            primordial_heat: 0.0,
+            primordial_cooling_time: 1000.0,
+            plume_rate: 0.1,
+            plume_radius: 0.08,
+            plume_duration: 20.0,
+            plume_thickness: 35.0,
+            plume_keel: 1.0,
+            hot_arc_suppression: 1.0,
+            hot_drip: 1.0,
+
             active_speed_eps: 1e-5,
             dt_myr: 2.0,
+        }
+    }
+}
+
+/// Keel at and above which continental crust counts as craton, and is
+/// protected by `craton_durability`.
+pub const CRATON_KEEL: f32 = 0.5;
+
+impl Tuning {
+    /// Factor by which anything that wears crust away (trench and margin
+    /// erosion, delamination, loss of keel) acts on a cell with this keel:
+    /// `1 - craton_durability` on craton, 1 elsewhere.
+    #[inline]
+    pub fn craton_wear(&self, keel: f32) -> f64 {
+        if keel >= CRATON_KEEL {
+            (1.0 - self.craton_durability).clamp(0.0, 1.0)
+        } else {
+            1.0
         }
     }
 }

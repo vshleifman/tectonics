@@ -627,6 +627,152 @@ fn print_breakups(label: &str, breakups: &[&Breakup], end: f64) {
     println!("    widest gap ever reached, median {:.0} km", median(widest));
 }
 
+/// Where this step's piled-up continent formed: area by rings from the
+/// nearest plate boundary (0 on it, `PILE_RINGS` for that far or more), and,
+/// for those on a boundary, by its kind (none, convergent, divergent,
+/// transform); and the area touching existing continent.
+const PILE_RINGS: usize = 4;
+
+#[derive(Default)]
+struct Piling {
+    by_ring: [f64; PILE_RINGS + 1],
+    by_kind: [f64; 4],
+    beside_continent: f64,
+}
+
+fn tally_piling(sim: &Sim, out: &mut Piling) {
+    let mesh = &sim.mesh;
+    let d = sim.front();
+    let piled = &sim.advection().piled;
+    if !piled.iter().any(|&p| p != 0) {
+        return;
+    }
+    let n = mesh.cell_count;
+    let mut ring = vec![-1i32; n];
+    let mut queue: VecDeque<usize> = VecDeque::new();
+    for (i, r) in ring.iter_mut().enumerate() {
+        if mesh
+            .nbrs(i)
+            .any(|k| d.plate_id[mesh.nbr[k] as usize] != d.plate_id[i])
+        {
+            *r = 0;
+            queue.push_back(i);
+        }
+    }
+    while let Some(i) = queue.pop_front() {
+        if ring[i] as usize >= PILE_RINGS {
+            continue;
+        }
+        for k in mesh.nbrs(i) {
+            let m = mesh.nbr[k] as usize;
+            if ring[m] < 0 {
+                ring[m] = ring[i] + 1;
+                queue.push_back(m);
+            }
+        }
+    }
+    for i in (0..n).filter(|&i| piled[i] != 0) {
+        let a = mesh.area(i);
+        let r = if ring[i] < 0 { PILE_RINGS } else { ring[i] as usize };
+        out.by_ring[r] += a;
+        if r == 0 {
+            out.by_kind[sim.boundaries().cell_kind[i] as usize] += a;
+        }
+        if mesh.nbrs(i).any(|k| {
+            let m = mesh.nbr[k] as usize;
+            d.crust_type[m] == CONTINENTAL && piled[m] == 0
+        }) {
+            out.beside_continent += a;
+        }
+    }
+}
+
+/// Crust whose age dates it to the first this many Myr counts as ancient.
+const ANCIENT_MYR: f64 = 1000.0;
+/// Keel above which continental crust counts as craton.
+const CRATON_KEEL: f32 = 0.5;
+/// Share of the globe a craton must cover to have a shape worth measuring:
+/// about three cells at level 5.
+const MIN_CRATON_SHARE: f64 = 0.0003;
+
+/// Share of craton area in connected cratons that span more than one plate,
+/// so are not moving as one.
+fn split_craton_share(sim: &Sim) -> f64 {
+    let mesh = &sim.mesh;
+    let d = sim.front();
+    let n = mesh.cell_count;
+    let is = |i: usize| d.crust_type[i] == CONTINENTAL && d.keel[i] >= CRATON_KEEL;
+    let mut seen = vec![false; n];
+    let (mut total, mut split) = (0.0, 0.0);
+    for start in 0..n {
+        if seen[start] || !is(start) {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![start];
+        let mut area = 0.0;
+        let mut plates = std::collections::HashSet::new();
+        while let Some(i) = stack.pop() {
+            area += mesh.area(i);
+            plates.insert(d.plate_id[i]);
+            for k in mesh.nbrs(i) {
+                let j = mesh.nbr[k] as usize;
+                if !seen[j] && is(j) {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        total += area;
+        if plates.len() > 1 {
+            split += area;
+        }
+    }
+    if total > 0.0 { split / total } else { 0.0 }
+}
+
+/// Connected cratons: how many, their mean area (share of the globe), and
+/// their area-weighted mean aspect.
+fn cratons(sim: &Sim) -> (usize, f64, f64) {
+    let mesh = &sim.mesh;
+    let d = sim.front();
+    let n = mesh.cell_count;
+    let globe: f64 = (0..n).map(|i| mesh.area(i)).sum();
+    let is = |i: usize| d.crust_type[i] == CONTINENTAL && d.keel[i] >= CRATON_KEEL;
+    let mut seen = vec![false; n];
+    let (mut groups, mut areas) = (Vec::new(), Vec::new());
+    for start in 0..n {
+        if seen[start] || !is(start) {
+            continue;
+        }
+        seen[start] = true;
+        let mut stack = vec![start];
+        let mut m = Moments::default();
+        let mut area = 0.0;
+        while let Some(i) = stack.pop() {
+            m.add(mesh, i);
+            area += mesh.area(i);
+            for k in mesh.nbrs(i) {
+                let j = mesh.nbr[k] as usize;
+                if !seen[j] && is(j) {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        if area >= MIN_CRATON_SHARE * globe {
+            groups.push(m);
+            areas.push(area);
+        }
+    }
+    if groups.is_empty() {
+        return (0, 0.0, 0.0);
+    }
+    let (aspect, _) = shape_summary(&groups, &areas);
+    let mean = areas.iter().sum::<f64>() / areas.len() as f64 / globe;
+    (groups.len(), mean, aspect)
+}
+
 fn len(v: [f64; 3]) -> f64 {
     (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
@@ -757,6 +903,8 @@ fn main() {
             "craton_decay_time" => t.craton_decay_time = value,
             "craton_strength" => t.craton_strength = value,
             "craton_keel_gain" => t.craton_keel_gain = value,
+            "craton_durability" => t.craton_durability = value,
+            "craton_merge_time" => t.craton_merge_time = value,
             "accretion_fraction" => t.accretion_fraction = value,
             "subduction_erosion" => t.subduction_erosion = value,
             "crust_spread_start" => t.crust_spread_start = value,
@@ -771,6 +919,15 @@ fn main() {
             "max_thickening_per_myr" => t.max_thickening_per_myr = value,
             "mantle_drag" => t.mantle_drag = value,
             "upwelling_gain" => t.upwelling_gain = value,
+            "primordial_heat" => t.primordial_heat = value,
+            "primordial_cooling_time" => t.primordial_cooling_time = value,
+            "plume_rate" => t.plume_rate = value,
+            "plume_radius" => t.plume_radius = value,
+            "plume_duration" => t.plume_duration = value,
+            "plume_thickness" => t.plume_thickness = value,
+            "plume_keel" => t.plume_keel = value,
+            "hot_arc_suppression" => t.hot_arc_suppression = value,
+            "hot_drip" => t.hot_drip = value,
             "continental_drag" => t.continental_drag = value,
             "collision_drag" => t.collision_drag = value,
             "collision_lock_gain" => t.collision_lock_gain = value,
@@ -808,18 +965,76 @@ fn main() {
     let mut breakups: Vec<Breakup> = Vec::new();
     let mut known_breakups: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let follow = GAP_HORIZONS[GAP_HORIZONS.len() - 1];
+    let globe: f64 = (0..sim.mesh.cell_count).map(|i| sim.mesh.area(i)).sum();
+    // Continental area made so far, by how, as shares of the globe.
+    let (mut made_by_plume, mut made_by_arc, mut made_by_piling) = (0.0f64, 0.0f64, 0.0f64);
+    let mut piling = Piling::default();
+    // Crust mass plumes have made, for the share of it still alive.
+    let mut plume_mass_made = 0.0f64;
     // Heading (degrees) and share of the globe of every plate, each tick.
     let mut headings: VecDeque<HashMap<i32, (f64, f64)>> = VecDeque::new();
     let mut turn = [(0.0f64, 0.0f64, 0.0f64); HEADING_LAGS.len()];
     let run = Instant::now();
+    // Ancient crust (see ANCIENT_MYR) whose cell another plate overran, by
+    // whether it carried a keel, as shares of the globe.
+    let (mut overrun_ancient, mut overrun_ancient_keeled) = (0.0f64, 0.0f64);
+    let mut unplaced_ancient = 0.0f64;
+    // Rifting, deformed (fresh suture), thin.
+    let mut keel_erosion = [0.0f64; 3];
     for tick in 0..ticks {
+        let before: Vec<(bool, f32, f32)> = {
+            let d = sim.front();
+            (0..sim.mesh.cell_count)
+                .map(|i| (d.crust_type[i] == CONTINENTAL, d.age[i], d.keel[i]))
+                .collect()
+        };
+        let cutoff = (sim.elapsed() - ANCIENT_MYR) as f32;
+        {
+            // Why keels on ancient crust are eroding, by area-Myr.
+            let d = sim.front();
+            for i in 0..sim.mesh.cell_count {
+                if d.crust_type[i] != CONTINENTAL || d.keel[i] <= 0.0 || d.age[i] < cutoff {
+                    continue;
+                }
+                let a = sim.mesh.area(i) / globe * sim.tuning.dt_myr;
+                if d.rift_side[i] != 0 {
+                    keel_erosion[0] += a;
+                } else if d.weakness[i] >= 0.95 {
+                    keel_erosion[1] += a;
+                } else if (d.thickness[i] as f64) < sim.tuning.continental_thickness_threshold {
+                    keel_erosion[2] += a;
+                }
+            }
+        }
         sim.tick();
+        for (i, &(cont, age, keel)) in before.iter().enumerate() {
+            if !cont || age < cutoff {
+                continue;
+            }
+            let a = sim.mesh.area(i) / globe;
+            match sim.advection().overrun[i] {
+                1 => overrun_ancient += a,
+                2 => unplaced_ancient += a,
+                _ => {}
+            }
+            if sim.advection().overrun[i] != 0 && keel >= CRATON_KEEL {
+                overrun_ancient_keeled += a;
+            }
+        }
         rifts_at.push_back(sim.rift_count());
         if rifts_at.len() > RIFT_BURST_TICKS + 1 {
             rifts_at.pop_front();
         }
         rift_burst = rift_burst.max(rifts_at[rifts_at.len() - 1] - rifts_at[0]);
         let now_myr = sim.elapsed();
+        {
+            let adv = sim.advection();
+            made_by_plume += adv.continentalised_by_plume / globe;
+            made_by_arc += adv.continentalised_by_accretion / globe;
+            made_by_piling += adv.continentalised_by_piling / globe;
+            plume_mass_made += adv.plume_created_this_step;
+        }
+        tally_piling(&sim, &mut piling);
         let fresh: Vec<i64> = sim
             .plates()
             .breakups
@@ -915,6 +1130,65 @@ fn main() {
                 a.main_compact,
                 a.main_reach,
                 a.main_cap_reach,
+            );
+            let (craton_count, craton_area, craton_aspect) = cratons(&sim);
+            // Continental crust dating from the first ANCIENT_MYR, as a share
+            // of the globe, and how much of it still has a keel.
+            let (ancient, ancient_keeled) = {
+                let d = sim.front();
+                let cutoff = (sim.elapsed() - ANCIENT_MYR) as f32;
+                let (mut all, mut keeled) = (0.0, 0.0);
+                for i in 0..sim.mesh.cell_count {
+                    if d.crust_type[i] == CONTINENTAL && d.age[i] >= cutoff {
+                        all += sim.mesh.area(i);
+                        if d.keel[i] >= CRATON_KEEL {
+                            keeled += sim.mesh.area(i);
+                        }
+                    }
+                }
+                (all / globe, keeled / globe)
+            };
+            // Plume crust still alive, by the tracer: as continent, as
+            // continent under a keel, and anywhere, as shares of all made.
+            let (plume_alive, plume_keeled, plume_anywhere) = {
+                let d = sim.front();
+                let (mut cont, mut keeled, mut any) = (0.0, 0.0, 0.0);
+                for i in 0..sim.mesh.cell_count {
+                    let m = sim.mesh.area(i) * d.thickness[i] as f64 * d.plume_share[i] as f64;
+                    any += m;
+                    if d.crust_type[i] == CONTINENTAL {
+                        cont += m;
+                        if d.keel[i] >= CRATON_KEEL {
+                            keeled += m;
+                        }
+                    }
+                }
+                let made = plume_mass_made.max(1e-12);
+                (cont / made, keeled / made, any / made)
+            };
+            println!(
+                "era {:>5.0} heat {:.2} plumes {} made_plume {:.3} made_arc {:.3} made_piling {:.3} cratons {} craton_area {:.4} craton_aspect {:.2} craton_share {:.2} \
+                 ancient {:.3} ancient_keeled {:.3} overrun {:.3} unplaced {:.3} lost_keeled {:.3} \
+                 plume_alive {:.3} plume_keeled {:.3} plume_anywhere {:.3} craton_split {:.3}",
+                sim.elapsed(),
+                sim.mantle_excess(),
+                sim.active_plumes(),
+                made_by_plume,
+                made_by_arc,
+                made_by_piling,
+                craton_count,
+                craton_area,
+                craton_aspect,
+                sim.metrics().craton_share,
+                ancient,
+                ancient_keeled,
+                overrun_ancient,
+                unplaced_ancient,
+                overrun_ancient_keeled,
+                plume_alive,
+                plume_keeled,
+                plume_anywhere,
+                split_craton_share(&sim),
             );
             if tick >= settled {
                 series.push(a);
@@ -1128,6 +1402,26 @@ fn main() {
             sim.plates().passive_collapses,
         );
     }
+    println!(
+        "  ancient keels eroding, globe-share Myr: rifting {:.3}, fresh suture {:.3}, thin {:.3}",
+        keel_erosion[0], keel_erosion[1], keel_erosion[2],
+    );
+    let piled: f64 = piling.by_ring.iter().sum::<f64>().max(1e-12);
+    let pct = |x: f64| x / piled * 100.0;
+    println!(
+        "  piled continent by rings from a boundary: {:.0}% on it, {:.0}% 1, {:.0}% 2, {:.0}% 3, {:.0}% 4+; \
+         on it by kind: none {:.0}% convergent {:.0}% divergent {:.0}% transform {:.0}%; beside continent {:.0}%",
+        pct(piling.by_ring[0]),
+        pct(piling.by_ring[1]),
+        pct(piling.by_ring[2]),
+        pct(piling.by_ring[3]),
+        pct(piling.by_ring[4]),
+        pct(piling.by_kind[0]),
+        pct(piling.by_kind[1]),
+        pct(piling.by_kind[2]),
+        pct(piling.by_kind[3]),
+        pct(piling.beside_continent),
+    );
     let (hot, cold): (Vec<&Breakup>, Vec<&Breakup>) =
         breakups.iter().partition(|b| b.heat >= HOT_BREAKUP);
     print_breakups("hot", &hot, sim.elapsed());
