@@ -1200,6 +1200,34 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
     },
     pins,
   );
+  const cohesion = makeLineChart(
+    {
+      title: "Continental cohesion",
+      unit: "%/Myr",
+      series: [
+        { label: "Torn", get: (m) => m.tornContinent },
+        { label: "Rejoined", get: (m) => m.rejoined },
+      ],
+      format: formatRate,
+    },
+    pins,
+  );
+  const coast = makeLineChart(
+    {
+      title: "Coastline share",
+      series: [{ label: "Coast", get: (m) => m.coastShare }],
+      format: formatPercent,
+    },
+    pins,
+  );
+  const crumbs = makeLineChart(
+    {
+      title: "Small landmasses",
+      series: [{ label: "Crumbs", get: (m) => m.smallLandmassCount }],
+      format: formatCount,
+    },
+    pins,
+  );
 
   const tabs: TabView[] = [
     makeTab("overview", "Overview", overview.element, (samples) => {
@@ -1255,9 +1283,19 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
     makeTab(
       "defects",
       "Defects",
-      stack(holes.element, pocketCount.element, pocketArea.element),
+      stack(
+        holes.element,
+        cohesion.element,
+        coast.element,
+        crumbs.element,
+        pocketCount.element,
+        pocketArea.element,
+      ),
       (samples) => {
         holes.update(samples);
+        cohesion.update(samples);
+        coast.update(samples);
+        crumbs.update(samples);
         pocketCount.update(samples);
         pocketArea.update(samples);
       },

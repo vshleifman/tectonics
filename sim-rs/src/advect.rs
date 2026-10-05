@@ -101,6 +101,10 @@ pub struct AdvectionField {
     /// Of `interior_holes`, the area no nearby crust of the plate could fill,
     /// left to open as a rift.
     pub interior_holes_unfilled: f64,
+    /// Continental area left with nowhere to go this step (`overrun == 2`).
+    pub torn_continent: f64,
+    /// Continental area the cohesion pass put back onto its landmass this step.
+    pub rejoined: f64,
 }
 
 impl AdvectionField {
@@ -145,6 +149,8 @@ impl AdvectionField {
             decontinentalised: 0.0,
             interior_holes: 0.0,
             interior_holes_unfilled: 0.0,
+            torn_continent: 0.0,
+            rejoined: 0.0,
         }
     }
 }
@@ -693,6 +699,7 @@ pub fn advect(
     }
 
     // --- Pass 3: dispose of the crust that had nowhere to go -----------------
+    out.torn_continent = 0.0;
     for cell in 0..n {
         if s.claimed[cell] != 0 || src.plate_id[cell] < 0 {
             continue;
@@ -716,6 +723,7 @@ pub fn advect(
                 (mass - eroded) / area(cell)
             } else {
                 out.overrun[cell] = 2;
+                out.torn_continent += area(cell);
                 mass / area(cell)
             };
             add_f32(&mut out.welded[cell], kept);
@@ -1192,6 +1200,12 @@ pub fn advect(
     }
 
     // --- Pass 4c: a continent rifts by stretching, not by melting ------------
+    // Stretching may not thin the flanks past the revert thickness (with a
+    // hair to spare for single-precision rounding), or the rift would punch
+    // ocean holes into the continent beside it.
+    let flank_floor = t
+        .rift_thickness_floor
+        .max(t.continental_revert_thickness + 1e-3);
     for d in 0..n {
         if out.rift_cell[d] == 0 {
             continue;
@@ -1202,7 +1216,7 @@ pub fn advect(
         for k in range(d) {
             let m = nbr[k] as usize;
             if donor(m) {
-                available += (dst.thickness[m] as f64 - t.rift_thickness_floor).max(0.0) * area(m);
+                available += (dst.thickness[m] as f64 - flank_floor).max(0.0) * area(m);
             }
         }
         if available <= 0.0 {
@@ -1215,7 +1229,7 @@ pub fn advect(
             if !(dst.plate_id[m] == plate && dst.crust_type[m] == CONTINENTAL) {
                 continue;
             }
-            let spare = (dst.thickness[m] as f64 - t.rift_thickness_floor).max(0.0) * area(m);
+            let spare = (dst.thickness[m] as f64 - flank_floor).max(0.0) * area(m);
             if spare <= 0.0 {
                 continue;
             }

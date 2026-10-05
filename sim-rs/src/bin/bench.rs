@@ -827,7 +827,8 @@ fn print_continental_budget(sim: &Sim) {
     println!(
         "  {:>6.0} Myr  plates {:>3}  cont area {:5.1}% mass {:5.1}%  mean {:5.1} km  thin {:5.2}%  \
          gain/Myr accretion {:.4}% spreading {:.4}% infill {:.4}% net growth {:.4}% recycled {:.4}%  loss/Myr erosion {:.4}% delamination {:.4}% founder {:.4}%  revert/Myr {:.4}%  \
-         holes/Myr {:.4}% unfilled {:.4}%  pockets {} ({:.2}%)",
+         holes/Myr {:.4}% unfilled {:.4}%  pockets {} ({:.2}%)  \
+         coast {:.1}% small landmasses {}  torn/Myr {:.4}% rejoined/Myr {:.4}%",
         m.elapsed_myr,
         m.plate_count,
         m.continental_area * 100.0,
@@ -847,6 +848,10 @@ fn print_continental_budget(sim: &Sim) {
         m.interior_holes_unfilled * 100.0,
         m.ocean_pocket_count,
         m.ocean_pocket_area * 100.0,
+        m.coast_share * 100.0,
+        m.small_landmass_count,
+        m.torn_continent * 100.0,
+        m.rejoined * 100.0,
     );
 }
 
@@ -914,6 +919,9 @@ fn main() {
             "margin_erosion" => t.margin_erosion = value,
             "basin_infill_rate" => t.basin_infill_rate = value,
             "basin_infill_max_area" => t.basin_infill_max_area = value,
+            "continental_nucleation_thickness" => t.continental_nucleation_thickness = value,
+            "min_continent_area" => t.min_continent_area = value,
+            "cohesion_reach" => t.cohesion_reach = value,
             "continental_area_target" => t.continental_area_target = value,
             "continental_recycling_rate" => t.continental_recycling_rate = value,
             "max_thickening_per_myr" => t.max_thickening_per_myr = value,

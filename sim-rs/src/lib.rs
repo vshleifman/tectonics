@@ -10,6 +10,7 @@
 pub mod advect;
 pub mod boundaries;
 pub mod cell_data;
+pub mod cohesion;
 pub mod craton;
 pub mod crust_lifecycle;
 pub mod elevation;

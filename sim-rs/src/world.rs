@@ -4,6 +4,7 @@
 use crate::advect::{AdvectionField, advect};
 use crate::boundaries::{BoundaryField, classify};
 use crate::cell_data::{CellData, total_crust_mass};
+use crate::cohesion::keep_continents_whole;
 use crate::craton::update_cratons;
 use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins};
 use crate::elevation::apply_elevation;
@@ -165,7 +166,8 @@ impl Sim {
         recycle_continental_margins(mesh, back, dt, advection, t);
         infill_enclosed_basins(mesh, back, dt, advection, scratch, t);
         primordial.update(mesh, back, plates, advection, dt, *elapsed, t);
-        apply_crust_lifecycle(&mesh.areas, back, dt, advection, t);
+        apply_crust_lifecycle(mesh, back, dt, advection, scratch, t);
+        keep_continents_whole(mesh, back, advection, scratch, t);
         track_continental_growth(mesh, back, dt, advection);
         update_cratons(mesh, back, dt, scratch, t);
         lap(6);
@@ -588,28 +590,26 @@ mod tests {
         let pocket = (0..mesh.cell_count)
             .find(|&i| sim.front.plate_id[i] == continent && deep(i))
             .expect("no cell deep inside the continent");
+        // Building the world by hand put crust outside the ledger, so one
+        // tick takes it in before the drift is measured.
+        sim.tick();
+        let drift = sim.mass_drift();
+        let planted =
+            sim.mesh.area(pocket) * (9.0 - sim.front.thickness[pocket] as f64) / sim.initial_mass;
         let d = &mut sim.front;
         d.crust_type[pocket] = OCEANIC;
         d.thickness[pocket] = 9.0;
         d.age[pocket] = 150.0;
         d.density[pocket] = sim.tuning.oceanic_density_old as f32;
-        // Building the world by hand put crust outside the ledger, so the
-        // drift is measured from the first tick on.
-        sim.tick();
-        assert_eq!(sim.front.crust_type[pocket], OCEANIC, "filled in at once");
-        let drift = sim.mass_drift();
-        let ticks = (40.0 / sim.tuning.dt_myr) as usize;
-        for _ in 0..ticks {
-            for p in sim.plates.by_id.values_mut() {
-                p.omega = [0.0; 3];
-            }
-            sim.tick();
+        for p in sim.plates.by_id.values_mut() {
+            p.omega = [0.0; 3];
         }
+        sim.tick();
         assert_eq!(
             sim.front.crust_type[pocket], CONTINENTAL,
-            "trapped ocean never filled"
+            "a pinhole of ocean was not filled at once"
         );
-        let change = sim.mass_drift() - drift;
+        let change = sim.mass_drift() - drift - planted;
         assert!(
             change.abs() < 1e-4,
             "filling in lost or made crust: {change}"

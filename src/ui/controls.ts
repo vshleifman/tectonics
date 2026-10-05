@@ -140,6 +140,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "Thickness at which accreted ocean counts as continent.",
   continentalRevertThickness:
     "Thickness below which continent reverts to ocean.",
+  continentalNucleationThickness:
+    "Thickness at which ocean floor away from any continent turns continental.",
   maxCrustThickness:
     "Thickness a crustal root can carry before it starts to founder.",
   delaminationRate: "How fast crust above that ceiling peels into the mantle.",
@@ -159,6 +161,10 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "How fast a small ocean ringed by continent fills with crust.",
   basinInfillMaxArea:
     "Largest enclosed sea, as a share of the globe, that fills in.",
+  minContinentArea:
+    "Landmasses smaller than this share of the globe rejoin a nearby continent.",
+  cohesionReach:
+    "Rings of cells a stray crumb of continent searches for a landmass to rejoin.",
   continentalAreaTarget:
     "Share of the globe at which continental growth levels off.",
   continentalRecyclingRate:
@@ -633,6 +639,13 @@ const TUNING_GROUP_FIELDS: {
         step: 0.5,
       },
       {
+        key: "continentalNucleationThickness",
+        label: "Continental nucleation",
+        min: 15,
+        max: 40,
+        step: 0.5,
+      },
+      {
         key: "maxCrustThickness",
         label: "Max crust thickness",
         min: 10,
@@ -673,6 +686,20 @@ const TUNING_GROUP_FIELDS: {
         min: 0,
         max: 0.005,
         step: 0.0001,
+      },
+      {
+        key: "minContinentArea",
+        label: "Min continent area",
+        min: 0,
+        max: 0.001,
+        step: 0.00001,
+      },
+      {
+        key: "cohesionReach",
+        label: "Cohesion reach (rings)",
+        min: 0,
+        max: 6,
+        step: 1,
       },
       {
         key: "continentalAreaTarget",

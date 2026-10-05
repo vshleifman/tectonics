@@ -51,6 +51,7 @@ pub struct Tuning {
     pub oceanic_thickness: f64,
     pub continental_thickness_threshold: f64,
     pub continental_revert_thickness: f64,
+    pub continental_nucleation_thickness: f64,
     pub max_crust_thickness: f64,
     pub delamination_rate: f64,
 
@@ -64,6 +65,8 @@ pub struct Tuning {
     pub rift_thickness_floor: f64,
     pub basin_infill_rate: f64,
     pub basin_infill_max_area: f64,
+    pub min_continent_area: f64,
+    pub cohesion_reach: f64,
     pub continental_area_target: f64,
     pub continental_recycling_rate: f64,
     pub craton_min_age: f64,
@@ -159,6 +162,7 @@ impl Default for Tuning {
             oceanic_thickness: 7.0,
             continental_thickness_threshold: 15.0,
             continental_revert_thickness: 10.0,
+            continental_nucleation_thickness: 20.0,
             max_crust_thickness: 60.0,
             delamination_rate: 0.3,
 
@@ -172,6 +176,8 @@ impl Default for Tuning {
             rift_thickness_floor: 2.0,
             basin_infill_rate: 1.0,
             basin_infill_max_area: 0.0005,
+            min_continent_area: 0.00005,
+            cohesion_reach: 2.0,
             continental_area_target: 0.4,
             continental_recycling_rate: 0.0004,
             craton_min_age: 500.0,

@@ -190,6 +190,14 @@ export interface Tuning {
    */
   continentalRevertThickness: number;
   /**
+   * Thickness (km) at which thickened ocean floor with fewer than two
+   * continental neighbours turns continental. Beside an existing continent
+   * the ordinary threshold applies; out in open ocean a new island must pile
+   * up further first, so grid noise does not sprinkle lone cells of continent.
+   * Plume plateaus are exempt.
+   */
+  continentalNucleationThickness: number;
+  /**
    * Thickness (km) a crustal root can carry before it starts to founder. This is
    * the headroom a continent-continent collision has to pile into: set it near
    * the continental threshold and colliding continents cannot thicken, so their
@@ -279,6 +287,20 @@ export interface Tuning {
    * Larger trapped seas, and any touching a plate boundary, are left alone.
    */
   basinInfillMaxArea: number;
+  /**
+   * Share of the globe below which a landmass counts as a stray crumb (a
+   * single cell always does). Each tick, stray continental crust within
+   * {@link cohesionReach} of a larger landmass on its own plate is swapped
+   * back onto that landmass's coast, so the quantised transport cannot shed
+   * continents into trails of dots. Strays with no landmass in reach, such as
+   * young island arcs, are left to grow.
+   */
+  minContinentArea: number;
+  /**
+   * Rings of cells within which stray continental crust looks for a landmass
+   * to rejoin. 0 turns the cohesion pass off.
+   */
+  cohesionReach: number;
   /**
    * Share of the globe at which continental growth levels off, in [0, 1];
    * Earth's is ~0.4. Continental crust goes back into the mantle at active
@@ -555,6 +577,7 @@ export const defaultTuning: Tuning = {
   oceanicThickness: 7,
   continentalThicknessThreshold: 15,
   continentalRevertThickness: 10,
+  continentalNucleationThickness: 20,
   maxCrustThickness: 60,
   delaminationRate: 0.3,
 
@@ -568,6 +591,8 @@ export const defaultTuning: Tuning = {
   riftThicknessFloor: 2,
   basinInfillRate: 1,
   basinInfillMaxArea: 0.0005,
+  minContinentArea: 0.00005,
+  cohesionReach: 2,
   continentalAreaTarget: 0.4,
   continentalRecyclingRate: 0.0004,
   cratonMinAge: 500,

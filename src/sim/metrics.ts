@@ -152,6 +152,28 @@ export interface WorldMetrics {
    */
   interiorHolesUnfilled: number;
   /**
+   * Share of the surface per Myr of continental crust the transport left with
+   * nowhere to go, welded onto whatever moved into its cell.
+   */
+  tornContinent: number;
+  /**
+   * Share of the surface per Myr of stray continental crust the cohesion pass
+   * put back onto the landmass it broke from. Tracking {@link tornContinent}
+   * with no fall in {@link coastShare} means the same crust is being torn off
+   * and put back every step.
+   */
+  rejoined: number;
+  /**
+   * Share of continental area touching ocean, in [0, 1]. Speckled continents
+   * and pock-marked interiors read high; cohesive landmasses low.
+   */
+  coastShare: number;
+  /**
+   * Landmasses that are a single cell or smaller than `minContinentArea` of
+   * the globe: crumbs of continent adrift on their own.
+   */
+  smallLandmassCount: number;
+  /**
    * Bodies of ocean ringed by continent and smaller than about the Caspian.
    * Earth has a handful; a model pock-marking its continents has hundreds.
    */

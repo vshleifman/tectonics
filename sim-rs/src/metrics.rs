@@ -60,6 +60,10 @@ pub struct WorldMetrics {
     pub decontinentalised: f64,
     pub interior_holes: f64,
     pub interior_holes_unfilled: f64,
+    pub torn_continent: f64,
+    pub rejoined: f64,
+    pub coast_share: f64,
+    pub small_landmass_count: usize,
     pub ocean_pocket_count: usize,
     pub continent_count: usize,
     pub largest_continent_share: f64,
@@ -98,6 +102,7 @@ pub fn compute_metrics(
     let dt_myr = t.dt_myr;
     let mut total_area = 0.0;
     let mut continental_area = 0.0;
+    let mut coast_area = 0.0;
     let mut continental_mass = 0.0;
     let mut thin_continental_area = 0.0;
     let mut craton_area = 0.0;
@@ -118,6 +123,12 @@ pub fn compute_metrics(
         total_area += area;
         if data.crust_type[i] == CONTINENTAL {
             continental_area += area;
+            if mesh
+                .nbrs(i)
+                .any(|k| data.crust_type[mesh.nbr[k] as usize] != CONTINENTAL)
+            {
+                coast_area += area;
+            }
             continental_mass += area * data.thickness[i] as f64;
             craton_area += area * data.keel[i] as f64;
             if (data.thickness[i] as f64) < t.continental_thickness_threshold {
@@ -220,7 +231,8 @@ pub fn compute_metrics(
     drives.sort_by(|a, b| b.area_share.total_cmp(&a.area_share));
 
     let (ocean_pocket_count, pocket_area) = ocean_pockets(mesh, data, total_area);
-    let (continent_count, largest_continent) = landmasses(mesh, data, total_area);
+    let (continent_count, largest_continent, small_landmass_count) =
+        landmasses(mesh, data, total_area, t.min_continent_area);
 
     let dt = dt_myr.max(1e-9);
     let per_myr = advection.subducted_this_step / dt;
@@ -293,6 +305,14 @@ pub fn compute_metrics(
         decontinentalised: globe_share_per_myr(advection.decontinentalised),
         interior_holes: globe_share_per_myr(advection.interior_holes),
         interior_holes_unfilled: globe_share_per_myr(advection.interior_holes_unfilled),
+        torn_continent: globe_share_per_myr(advection.torn_continent),
+        rejoined: globe_share_per_myr(advection.rejoined),
+        coast_share: if continental_area > 0.0 {
+            coast_area / continental_area
+        } else {
+            0.0
+        },
+        small_landmass_count,
         ocean_pocket_count,
         continent_count,
         largest_continent_share: if continental_area > 0.0 {
@@ -342,13 +362,18 @@ pub fn compute_metrics(
 }
 
 /// Connected bodies of continental crust, whichever plates they ride on: how
-/// many cover at least [`CONTINENT_AREA`] of the globe, and the area of the
-/// largest.
-fn landmasses(mesh: &Mesh, data: &CellData, total_area: f64) -> (usize, f64) {
+/// many cover at least [`CONTINENT_AREA`] of the globe, the area of the
+/// largest, and how many are single cells or under `small_share` of the globe.
+fn landmasses(
+    mesh: &Mesh,
+    data: &CellData,
+    total_area: f64,
+    small_share: f64,
+) -> (usize, f64, usize) {
     let n = mesh.cell_count;
     let mut seen = vec![false; n];
     let mut stack: Vec<usize> = Vec::new();
-    let (mut count, mut largest) = (0usize, 0.0f64);
+    let (mut count, mut largest, mut small) = (0usize, 0.0f64, 0usize);
     for start in 0..n {
         if seen[start] || data.crust_type[start] != CONTINENTAL {
             continue;
@@ -356,8 +381,10 @@ fn landmasses(mesh: &Mesh, data: &CellData, total_area: f64) -> (usize, f64) {
         seen[start] = true;
         stack.push(start);
         let mut area = 0.0;
+        let mut cells = 0usize;
         while let Some(cell) = stack.pop() {
             area += mesh.area(cell);
+            cells += 1;
             for k in mesh.nbrs(cell) {
                 let m = mesh.nbr[k] as usize;
                 if !seen[m] && data.crust_type[m] == CONTINENTAL {
@@ -369,9 +396,12 @@ fn landmasses(mesh: &Mesh, data: &CellData, total_area: f64) -> (usize, f64) {
         if area >= CONTINENT_AREA * total_area {
             count += 1;
         }
+        if cells == 1 || area < small_share * total_area {
+            small += 1;
+        }
         largest = largest.max(area);
     }
-    (count, largest)
+    (count, largest, small)
 }
 
 /// Bodies of oceanic crust under [`OCEAN_POCKET_AREA`] of the globe, each
