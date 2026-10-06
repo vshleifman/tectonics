@@ -4,8 +4,9 @@
 //! plate is heading for. Plates settle onto it over `motion_response_time`
 //! rather than jumping straight there.
 
-use crate::boundaries::{BoundaryField, CONVERGENT, DIVERGENT};
+use crate::boundaries::{BoundaryField, CONVERGENT};
 use crate::cell_data::{CONTINENTAL, CellData};
+use crate::elevation::thermal_elevation;
 use crate::mantle::MantleFlow;
 use crate::math::{
     Sym3, Vec3, clamp01, cross, dominant_axis, dot, len3, normalise, scale, solve_sym3, sub,
@@ -49,6 +50,7 @@ pub fn update_plate_motion(
     // rides on a soft asthenosphere that lets the deeper flow slide past, and
     // goes where its slabs pull it.
     let carried = t.mantle_flow_coupling;
+    let ridge = t.ridge_weight;
     for i in 0..mesh.cell_count {
         let plate = data.plate_id[i];
         if !live(plate) {
@@ -76,6 +78,30 @@ pub fn update_plate_motion(
             torque[p * 3] += f * (y * u[2] - z * u[1]);
             torque[p * 3 + 1] += f * (z * u[0] - x * u[2]);
             torque[p * 3 + 2] += f * (x * u[1] - y * u[0]);
+        }
+        // Ridge push: ocean lithosphere thickens and sinks as it cools away
+        // from a ridge, and slides down the slope of its own base. A body
+        // force over the whole plate, down the gradient of its cooling depth,
+        // so its pull adds up to the ridge's relief over the plate's oldest
+        // floor rather than coming from the ridge line alone.
+        if ridge > 0.0 && data.crust_type[i] != CONTINENTAL {
+            let depth = thermal_elevation(t, data.age[i] as f64);
+            let mut f = [0.0f64; 3];
+            for nk in mesh.nbrs(i) {
+                let m = mesh.nbr[nk] as usize;
+                let arc = mesh.nbr_arc[nk];
+                if arc < 0 || data.plate_id[m] != plate || data.crust_type[m] == CONTINENTAL {
+                    continue;
+                }
+                let drop = (depth - thermal_elevation(t, data.age[m] as f64))
+                    * mesh.arc_length[arc as usize] as f64;
+                for (axis, fa) in f.iter_mut().enumerate() {
+                    *fa += drop * mesh.chord_dir[nk * 3 + axis] as f64;
+                }
+            }
+            torque[p * 3] += ridge * (y * f[2] - z * f[1]);
+            torque[p * 3 + 1] += ridge * (z * f[0] - x * f[2]);
+            torque[p * 3 + 2] += ridge * (x * f[1] - y * f[0]);
         }
     }
 
@@ -139,31 +165,6 @@ pub fn update_plate_motion(
             let push = t.dome_push * heat * arc_len;
             add_torque(&mut torque, plate_a, a, -1.0, push);
             add_torque(&mut torque, plate_b, a, 1.0, push);
-        }
-
-        if kind == DIVERGENT {
-            // Ridge push: each side slides off the ridge, away from the other,
-            // driven by how far it has subsided below the crest.
-            let relief_a = t.ridge_elevation - data.elevation[cell_a] as f64;
-            if relief_a > 0.0 {
-                add_torque(
-                    &mut torque,
-                    plate_a,
-                    a,
-                    -1.0,
-                    t.ridge_weight * relief_a * arc_len,
-                );
-            }
-            let relief_b = t.ridge_elevation - data.elevation[cell_b] as f64;
-            if relief_b > 0.0 {
-                add_torque(
-                    &mut torque,
-                    plate_b,
-                    a,
-                    1.0,
-                    t.ridge_weight * relief_b * arc_len,
-                );
-            }
         }
 
         // Slab pull, not gated on the boundary converging right now: a slab's

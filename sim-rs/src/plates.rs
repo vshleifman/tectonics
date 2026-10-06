@@ -5,8 +5,8 @@
 //! back into the outcome, so keeping the same order keeps the two comparable.
 
 use crate::cell_data::{CellData, OCEANIC};
-use crate::elevation::baseline_elevation;
-use crate::math::{Vec3, clamp01};
+use crate::elevation::{baseline_elevation, subsidence};
+use crate::math::Vec3;
 use crate::registry::RelabelReport;
 use crate::rng::Rng;
 use crate::tuning::Tuning;
@@ -94,9 +94,9 @@ impl PlateData {
 }
 
 /// Oceanic crust density for an age: young ridge crust is light and densifies
-/// as it cools, saturating at `max_oceanic_age`.
+/// as it cools, along the same curve the sea floor subsides by.
 pub fn oceanic_density_from_age(t: &Tuning, age: f64) -> f64 {
-    let s = clamp01(age / t.max_oceanic_age);
+    let s = subsidence(t, age);
     t.oceanic_density_young + s * (t.oceanic_density_old - t.oceanic_density_young)
 }
 
@@ -122,12 +122,42 @@ pub fn reconcile(plates: &mut PlateData, report: &RelabelReport) {
     }
 }
 
-/// Seed every cell as young oceanic crust with an age drawn per cell, and an
-/// elevation on the isostatic baseline for that age.
-pub fn initialise_crust(t: &Tuning, data: &mut CellData, seed: &str) {
-    for i in 0..data.age.len() {
-        let mut rng = Rng::new(&format!("{seed}:cell:{i}"));
-        let age = rng.next_f64() * t.max_oceanic_age;
+/// Waves summed into the starting age field.
+const AGE_WAVES: usize = 8;
+
+/// Seed every cell as oceanic crust, with an elevation on the isostatic
+/// baseline for its age. Ages vary smoothly over the globe, as a sum of a few
+/// long random waves, so that neighbouring floor is of much the same age as
+/// sea floor laid down at ridges is, rather than noise from cell to cell.
+pub fn initialise_crust(t: &Tuning, centres: &[f32], data: &mut CellData, seed: &str) {
+    let mut rng = Rng::new(&format!("{seed}:ages"));
+    let waves: Vec<(Vec3, f64, f64)> = (0..AGE_WAVES)
+        .map(|_| {
+            let z = 2.0 * rng.next_f64() - 1.0;
+            let phi = 2.0 * std::f64::consts::PI * rng.next_f64();
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            let dir = [r * phi.cos(), r * phi.sin(), z];
+            let wavenumber = 1.0 + 2.0 * rng.next_f64();
+            let phase = 2.0 * std::f64::consts::PI * rng.next_f64();
+            (dir, wavenumber, phase)
+        })
+        .collect();
+    let n = data.age.len();
+    let field: Vec<f64> = (0..n)
+        .map(|i| {
+            let p = [centres[i * 3] as f64, centres[i * 3 + 1] as f64, centres[i * 3 + 2] as f64];
+            waves
+                .iter()
+                .map(|(d, k, phase)| (k * (p[0] * d[0] + p[1] * d[1] + p[2] * d[2]) + phase).cos())
+                .sum()
+        })
+        .collect();
+    let (lo, hi) = field
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| (l.min(x), h.max(x)));
+    let span = (hi - lo).max(1e-12);
+    for i in 0..n {
+        let age = (field[i] - lo) / span * t.max_oceanic_age;
         data.crust_type[i] = OCEANIC;
         data.age[i] = age as f32;
         data.density[i] = oceanic_density_from_age(t, age) as f32;

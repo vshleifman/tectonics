@@ -199,9 +199,14 @@ pub fn apply_crust_lifecycle(
             && (continental_nbrs(i) < mesh.nbrs(i).len()
                 || data.thickness[i] as f64 <= t.oceanic_thickness + 1e-3)
         {
+            // Thinned continent is old, cool lithosphere, not crust fresh
+            // from a ridge; but no older than ocean that has yet to pull, so
+            // a margin that loses its crust does not at once become the side
+            // of a trench that sinks.
+            let age = (data.age[i] as f64).min(t.slab_pull_onset_age);
             data.crust_type[i] = OCEANIC;
-            data.age[i] = 0.0;
-            data.density[i] = t.oceanic_density_young as f32;
+            data.age[i] = age as f32;
+            data.density[i] = oceanic_density_from_age(t, age) as f32;
             data.keel[i] = 0.0;
             decontinentalised += areas[i] as f64;
         }

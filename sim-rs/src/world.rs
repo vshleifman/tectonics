@@ -83,7 +83,7 @@ impl Sim {
             .relabel(&self.raw_labels, count, &mut self.front.plate_id);
         reconcile(&mut self.plates, &report);
         if init_crust {
-            initialise_crust(&self.tuning, &mut self.front, "tectonics");
+            initialise_crust(&self.tuning, &self.mesh.centres, &mut self.front, "tectonics");
             self.initial_mass = total_crust_mass(&self.mesh.areas, &self.front);
             self.advection.live_mass = self.initial_mass;
             self.advection.subducted_total = 0.0;
@@ -97,6 +97,7 @@ impl Sim {
         }
         seed_slabs(&self.mesh, &mut self.front, &self.boundaries, &self.tuning);
         let dt = self.tuning.dt_myr;
+        let eff = effective_tuning(&self.tuning, self.elapsed);
         update_plate_motion(
             &self.mesh,
             &self.front,
@@ -104,7 +105,7 @@ impl Sim {
             &self.boundaries,
             &self.mantle,
             &mut self.scratch,
-            &self.tuning,
+            &eff,
             dt,
         );
         classify(
@@ -388,7 +389,9 @@ mod tests {
                 d.crust_type[i] = crate::cell_data::CONTINENTAL;
                 d.thickness[i] = 35.0;
                 d.density[i] = t.continental_density as f32;
-                d.elevation[i] = t.continent_base as f32;
+                d.elevation[i] =
+                    crate::elevation::baseline_elevation(t, crate::cell_data::CONTINENTAL, 0.0, 35.0)
+                        as f32;
                 d.mantle_heat[i] = heat;
             }
         }
@@ -614,6 +617,211 @@ mod tests {
             change.abs() < 1e-4,
             "filling in lost or made crust: {change}"
         );
+    }
+
+    /// Speed (rad/Myr) toward `e` at the centroid of a hemisphere of ocean
+    /// floor ageing toward `e`, after a few ticks with nothing but ridge push
+    /// to drive it.
+    fn drift_down_the_cooling_slope(ridge_weight: f64) -> f64 {
+        use crate::cell_data::OCEANIC;
+        use crate::math::{cross, dot, normalise};
+        let mut sim = Sim::new(4);
+        sim.tuning.ridge_weight = ridge_weight;
+        sim.tuning.mantle_flow_coupling = 0.0;
+        sim.tuning.slab_initiation_age = 1e9;
+        sim.options.supercontinent_insulation = false;
+        sim.crack_great_circles(1, "ridge push");
+        let n = sim.mesh.cell_count;
+        let id = sim.front.plate_id[0];
+        let mut a = [0.0f64; 3];
+        for i in (0..n).filter(|&i| sim.front.plate_id[i] == id) {
+            let p = read3(&sim.mesh.centres, i);
+            a = [a[0] + p[0], a[1] + p[1], a[2] + p[2]];
+        }
+        let a = normalise(a);
+        let any = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let e = normalise(cross(a, any));
+        let d = &mut sim.front;
+        for i in 0..n {
+            let p = read3(&sim.mesh.centres, i);
+            d.crust_type[i] = OCEANIC;
+            d.thickness[i] = sim.tuning.oceanic_thickness as f32;
+            d.age[i] = (75.0 * (1.0 + dot(p, e))) as f32;
+            d.slab[i] = 0.0;
+            d.mantle_heat[i] = 0.0;
+        }
+        for p in sim.plates.by_id.values_mut() {
+            p.omega = [0.0; 3];
+        }
+        sim.elapsed = 10.0 * sim.tuning.seafloor_flattening_age;
+        for _ in 0..5 {
+            sim.front.slab.fill(0.0);
+            sim.tick();
+        }
+        let omega = sim.plates.by_id[&id].omega;
+        dot(cross(omega, a), e)
+    }
+
+    #[test]
+    fn ridge_push_slides_a_plate_toward_its_old_floor() {
+        let pushed = drift_down_the_cooling_slope(Tuning::default().ridge_weight.max(0.05));
+        let still = drift_down_the_cooling_slope(0.0);
+        assert!(still.abs() < 1e-6, "moved with no ridge push: {still}");
+        assert!(pushed > 1e-4, "ridge push barely moved the plate: {pushed}");
+    }
+
+    #[test]
+    fn ridge_push_comes_in_as_the_starting_sea_floor_is_replaced() {
+        use crate::primordial::effective_tuning;
+        let t = Tuning::default();
+        assert_eq!(effective_tuning(&t, 0.0).ridge_weight, 0.0);
+        let half = effective_tuning(&t, 0.5 * t.seafloor_flattening_age).ridge_weight;
+        assert!((half - 0.5 * t.ridge_weight).abs() < 1e-12);
+        assert_eq!(effective_tuning(&t, 3.0 * t.seafloor_flattening_age).ridge_weight, t.ridge_weight);
+    }
+
+    /// A hemisphere of old continent beside a hemisphere of old ocean, at
+    /// rest with no slabs, its coast thinned as recycling leaves it.
+    fn thinned_coast() -> (Sim, i32, Vec<usize>) {
+        use crate::cell_data::{CONTINENTAL, OCEANIC};
+        let mut sim = Sim::new(4);
+        sim.tuning.mantle_flow_coupling = 0.0;
+        sim.options.supercontinent_insulation = false;
+        sim.crack_great_circles(1, "coast");
+        let n = sim.mesh.cell_count;
+        let continent = sim.front.plate_id[0];
+        let t = sim.tuning.clone();
+        let d = &mut sim.front;
+        for i in 0..n {
+            d.slab[i] = 0.0;
+            d.mantle_heat[i] = 0.0;
+            d.age[i] = 150.0;
+            if d.plate_id[i] == continent {
+                d.crust_type[i] = CONTINENTAL;
+                d.thickness[i] = 35.0;
+                d.density[i] = t.continental_density as f32;
+                d.age[i] = 1000.0;
+            } else {
+                d.crust_type[i] = OCEANIC;
+                d.density[i] = crate::plates::oceanic_density_from_age(&t, 150.0) as f32;
+            }
+        }
+        let coast: Vec<usize> = (0..n)
+            .filter(|&i| {
+                d.plate_id[i] == continent
+                    && sim.mesh.nbrs(i).any(|k| d.plate_id[sim.mesh.nbr[k] as usize] != continent)
+            })
+            .collect();
+        for &i in &coast {
+            d.thickness[i] = t.oceanic_thickness as f32;
+        }
+        for p in sim.plates.by_id.values_mut() {
+            p.omega = [0.0; 3];
+        }
+        (sim, continent, coast)
+    }
+
+    #[test]
+    fn thinned_continent_reverts_to_mature_ocean_not_ridge_crust() {
+        use crate::cell_data::OCEANIC;
+        let (mut sim, _, coast) = thinned_coast();
+        sim.tick();
+        let onset = sim.tuning.slab_pull_onset_age as f32;
+        for &i in &coast {
+            assert_eq!(sim.front.crust_type[i], OCEANIC, "thinned coast at {i} still continent");
+            assert_eq!(sim.front.age[i], onset, "reverted crust at {i} is {} Myr old", sim.front.age[i]);
+        }
+    }
+
+    #[test]
+    fn a_thinned_coast_facing_old_ocean_stays_on_top() {
+        let (mut sim, continent, coast) = thinned_coast();
+        let ticks = (20.0 / sim.tuning.dt_myr) as usize;
+        for _ in 0..ticks {
+            for p in sim.plates.by_id.values_mut() {
+                p.omega = [0.0; 3];
+            }
+            sim.tick();
+        }
+        let d = &sim.front;
+        let mesh = &sim.mesh;
+        let over_coast = coast.iter().filter(|&&i| d.slab[i] > 0.0).count();
+        let over_ocean = (0..mesh.cell_count)
+            .filter(|&i| {
+                d.plate_id[i] != continent
+                    && d.slab[i] > 0.0
+                    && mesh.nbrs(i).any(|k| d.plate_id[mesh.nbr[k] as usize] == continent)
+            })
+            .count();
+        assert!(over_coast > 0, "the old ocean never began to founder");
+        assert_eq!(over_ocean, 0, "the thinned coast went down under the ocean");
+    }
+
+    #[test]
+    fn the_starting_sea_floor_varies_smoothly_in_age() {
+        let mut sim = Sim::new(5);
+        sim.crack_great_circles(4, "smooth");
+        let (d, mesh) = (&sim.front, &sim.mesh);
+        let (mut diff, mut pairs) = (0.0f64, 0usize);
+        for i in 0..mesh.cell_count {
+            for k in mesh.nbrs(i) {
+                diff += (d.age[i] - d.age[mesh.nbr[k] as usize]).abs() as f64;
+                pairs += 1;
+            }
+        }
+        let mean = diff / pairs as f64;
+        // Independent uniform ages would differ by a third of the range.
+        let noise = sim.tuning.max_oceanic_age / 3.0;
+        assert!(mean < 0.1 * noise, "neighbours differ by {mean:.1} Myr on average");
+        let ages: Vec<f32> = d.age.clone();
+        let span = ages.iter().copied().fold(f32::MIN, f32::max) - ages.iter().copied().fold(f32::MAX, f32::min);
+        assert!(span as f64 > 0.9 * sim.tuning.max_oceanic_age, "ages span only {span:.0} Myr");
+    }
+
+    #[test]
+    fn new_sea_floor_inherits_no_weakness() {
+        use crate::math::{cross, normalise, scale};
+        let mut sim = Sim::new(4);
+        sim.tuning.mantle_flow_coupling = 0.0;
+        // A breakup stamps weakness on the margins it leaves, new floor and
+        // all; only what is inherited is under test.
+        sim.tuning.rift_strength = 1e9;
+        sim.crack_great_circles(1, "fresh floor");
+        let n = sim.mesh.cell_count;
+        sim.front.slab.fill(0.0);
+        sim.front.weakness.fill(1.0);
+        let ids: Vec<i32> = sim.plates.by_id.keys().copied().collect();
+        assert_eq!(ids.len(), 2);
+        let centroid = |sim: &Sim, id: i32| {
+            let mut c = [0.0f64; 3];
+            for i in (0..n).filter(|&i| sim.front.plate_id[i] == id) {
+                let p = read3(&sim.mesh.centres, i);
+                c = [c[0] + p[0], c[1] + p[1], c[2] + p[2]];
+            }
+            normalise(c)
+        };
+        // One hemisphere turns about an axis in the boundary's plane, so half
+        // the boundary spreads and the other half closes.
+        let a = centroid(&sim, ids[0]);
+        let any = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let omegas = [
+            (ids[0], scale(normalise(cross(a, any)), 0.02)),
+            (ids[1], [0.0; 3]),
+        ];
+        let mut opened = 0usize;
+        for _ in 0..10 {
+            for (id, w) in &omegas {
+                if let Some(p) = sim.plates.by_id.get_mut(id) {
+                    p.omega = *w;
+                }
+            }
+            sim.tick();
+            for i in (0..n).filter(|&i| sim.advection.rift_cell[i] != 0) {
+                opened += 1;
+                assert_eq!(sim.front.weakness[i], 0.0, "new sea floor at {i} came out weak");
+            }
+        }
+        assert!(opened > 0, "the boundary never spread");
     }
 
     #[test]

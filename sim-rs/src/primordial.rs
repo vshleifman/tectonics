@@ -63,13 +63,18 @@ pub fn mantle_excess(t: &Tuning, elapsed: f64) -> f64 {
     t.primordial_heat * (-elapsed / t.primordial_cooling_time.max(1e-6)).exp()
 }
 
-/// The tuning as a mantle this hot sees it: arcs build less continent.
+/// The tuning as the world sees it `elapsed` Myr in: a hot mantle's arcs
+/// build less continent, and ridge push comes in over the first
+/// `seafloor_flattening_age`. The sea floor a world starts with has ages
+/// that no ridge laid down, so a push down their slopes would steer the
+/// plates by the starting pattern until floor from real ridges replaces it.
 pub fn effective_tuning(t: &Tuning, elapsed: f64) -> Tuning {
     let mut eff = t.clone();
     let excess = mantle_excess(t, elapsed);
     if excess > 0.0 {
         eff.accretion_fraction *= clamp01(1.0 - t.hot_arc_suppression * excess);
     }
+    eff.ridge_weight *= clamp01(elapsed / t.seafloor_flattening_age.max(1e-6));
     eff
 }
 

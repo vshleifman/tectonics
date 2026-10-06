@@ -83,11 +83,12 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   ridgeElevation: "Elevation of young oceanic crust at a mid-ocean ridge.",
   abyssElevation:
     "Elevation of fully cooled oceanic crust on the abyssal plain.",
-  continentBase: "Baseline elevation of unstressed continental crust.",
-  continentThicknessRef:
-    "Continental thickness above which extra crust adds height.",
-  continentThicknessGain:
-    "Height gained per kilometre of crust above the reference thickness.",
+  seafloorFlatteningAge:
+    "Age by which the sea floor has sunk to the abyssal plain, sinking as the square root of age until then.",
+  mantleDensity:
+    "Density of the mantle crust floats on; sets how high a given thickness of crust stands.",
+  continentThermalShare:
+    "How much higher young continent stands than old, as a share of the ocean floor's cooling relief.",
   collisionUplift:
     "Uplift where two continents collide and both sides pile up.",
   arcUplift: "Uplift of the buoyant plate overriding a subduction zone.",
@@ -112,7 +113,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "How long a plate takes to settle onto the motion its forces call for.",
   trenchSuction: "Pull on the overriding plate toward a rolling-back slab.",
   maxTurnRate: "Fastest a plate's heading may swing; zero means no limit.",
-  ridgeWeight: "Push from ridge flanks; zero turns ridge push off.",
+  ridgeWeight:
+    "Push on ocean floor sliding off the ridge as it cools and sinks; zero turns ridge push off.",
   mantleDrag:
     "Drag of the mantle under a plate; with slab pull this sets plate speeds.",
   continentalDrag: "How much harder continental crust drags than oceanic.",
@@ -249,25 +251,25 @@ const TUNING_GROUP_FIELDS: {
         step: 0.1,
       },
       {
-        key: "continentBase",
-        label: "Continent base",
-        min: 0,
-        max: 5,
-        step: 0.1,
+        key: "seafloorFlatteningAge",
+        label: "Sea floor flattening age (Myr)",
+        min: 10,
+        max: 300,
+        step: 5,
       },
       {
-        key: "continentThicknessRef",
-        label: "Continent thickness ref",
-        min: 0,
-        max: 30,
-        step: 0.5,
+        key: "mantleDensity",
+        label: "Mantle density",
+        min: 3.0,
+        max: 3.6,
+        step: 0.01,
       },
       {
-        key: "continentThicknessGain",
-        label: "Continent thickness gain",
+        key: "continentThermalShare",
+        label: "Young continent uplift",
         min: 0,
         max: 1,
-        step: 0.01,
+        step: 0.05,
       },
       {
         key: "collisionUplift",

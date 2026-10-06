@@ -855,6 +855,47 @@ fn print_continental_budget(sim: &Sim) {
     );
 }
 
+/// Continental thickness by area percentile, the share of the globe above sea
+/// level (0 km), and the mean depth of the ocean floor.
+fn print_relief(sim: &Sim) {
+    let d = sim.front();
+    let mut continental: Vec<(f32, f64)> = Vec::new();
+    let (mut globe, mut land, mut ocean, mut depth) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for i in 0..sim.mesh.cell_count {
+        let a = sim.mesh.area(i);
+        globe += a;
+        if d.elevation[i] > 0.0 {
+            land += a;
+        }
+        if d.crust_type[i] == CONTINENTAL {
+            continental.push((d.thickness[i], a));
+        } else {
+            ocean += a;
+            depth += a * d.elevation[i] as f64;
+        }
+    }
+    continental.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f64 = continental.iter().map(|c| c.1).sum();
+    let percentile = |p: f64| {
+        let mut seen = 0.0;
+        for &(h, a) in &continental {
+            seen += a;
+            if seen >= p * total {
+                return h as f64;
+            }
+        }
+        0.0
+    };
+    println!(
+        "  relief: continental thickness p10 {:.1} p50 {:.1} p90 {:.1} km, land above sea level {:.1}%, mean ocean floor {:.2} km",
+        percentile(0.1),
+        percentile(0.5),
+        percentile(0.9),
+        land / globe * 100.0,
+        depth / ocean.max(1e-12),
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let level: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);
@@ -879,6 +920,9 @@ fn main() {
             "slab_initiation_time" => t.slab_initiation_time = value,
             "motion_response_time" => t.motion_response_time = value,
             "ridge_weight" => t.ridge_weight = value,
+            "seafloor_flattening_age" => t.seafloor_flattening_age = value,
+            "mantle_density" => t.mantle_density = value,
+            "continent_thermal_share" => t.continent_thermal_share = value,
             "max_rift_aspect" => t.max_rift_aspect = value,
             "rift_strength" => t.rift_strength = value,
             "dome_push" => t.dome_push = value,
@@ -1430,6 +1474,7 @@ fn main() {
         pct(piling.by_kind[3]),
         pct(piling.beside_continent),
     );
+    print_relief(&sim);
     let (hot, cold): (Vec<&Breakup>, Vec<&Breakup>) =
         breakups.iter().partition(|b| b.heat >= HOT_BREAKUP);
     print_breakups("hot", &hot, sim.elapsed());

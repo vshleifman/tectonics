@@ -679,7 +679,7 @@ pub fn advect(
                 dst.age[d] = 0.0;
                 dst.density[d] = t.rift_density as f32;
                 dst.thickness[d] = 0.0;
-                dst.weakness[d] = src.weakness[d];
+                dst.weakness[d] = 0.0;
                 dst.slab[d] = 0.0;
                 dst.rift_side[d] = 0;
                 dst.keel[d] = 0.0;

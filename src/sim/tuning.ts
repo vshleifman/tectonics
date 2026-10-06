@@ -16,12 +16,31 @@ export interface Tuning {
   ridgeElevation: number;
   /** Deep abyssal plain: where fully cooled oceanic crust sinks. */
   abyssElevation: number;
-  /** Baseline elevation of unstressed continental crust at reference thickness. */
-  continentBase: number;
-  /** Reference continental thickness (km) above which extra crust adds height. */
-  continentThicknessRef: number;
-  /** Height (km) gained per km of continental crust above the reference. */
-  continentThicknessGain: number;
+  /**
+   * Age (Myr) by which the sea floor has subsided all the way to
+   * {@link abyssElevation}. Until then it sinks as the square root of its
+   * age, as a cooling half-space does: fast off the ridge, then ever slower.
+   * Earth's flattens out at around 80-100 Myr. Oceanic density follows the
+   * same curve.
+   */
+  seafloorFlatteningAge: number;
+  /**
+   * Density of the mantle the crust floats on. Every cell's baseline height is
+   * Airy isostasy: a column of crust stands above a column of ordinary ocean
+   * floor by its thickness times how much lighter than the mantle it is, as a
+   * share of the mantle's density. At 3.3 continental crust gains ~0.18 km of
+   * height per km of thickness, and ~35 km of it, old and cool, sits near sea
+   * level; thinner continent is drowned shelf.
+   */
+  mantleDensity: number;
+  /**
+   * How much of the ocean floor's cooling curve continental lithosphere
+   * follows, in [0, 1]. Continental lithosphere is never wholly remade, so
+   * young continent stands only somewhat higher than old, settling as it
+   * ages. Ocean floor turning continental then changes height only by its
+   * change of density, plus this share of how young it is.
+   */
+  continentThermalShare: number;
   /** Uplift gain for a continent-continent collision (both sides pile up). */
   collisionUplift: number;
   /** Uplift gain for the buoyant overriding plate at a subduction zone. */
@@ -102,7 +121,16 @@ export interface Tuning {
    * then cannot follow their slabs, trenches stall and continents dwindle.
    */
   maxTurnRate: number;
-  /** Push per unit length of ridge, per km of flank relief (0 disables). */
+  /**
+   * Ridge push: ocean lithosphere sinks as it cools away from a ridge and
+   * slides down the slope of its own base. A force over every cell of ocean
+   * floor, down the gradient of its cooling depth, per km of that relief; a
+   * plate's total is this times the ridge's height over its oldest floor,
+   * times the ridge's length. It comes in over the first
+   * {@link seafloorFlatteningAge}, while the world's starting sea floor, whose
+   * ages no ridge laid down, is replaced. At 0.05 plates run ~10% faster than
+   * with none; past ~0.1 they outrun their slabs. 0 disables.
+   */
   ridgeWeight: number;
   /**
    * Resistance of the mantle under a plate, per unit area. With slab pull this
@@ -170,11 +198,19 @@ export interface Tuning {
   downwellingMemory: number;
 
   // --- Crust lifecycle & densities (see sim-rs/src/plates.rs, crust_lifecycle.rs) ---
-  /** Oceanic crust ages out to here before being treated as fully cooled (Myr). */
+  /**
+   * Age (Myr) by which oceanic lithosphere has reached its full strength
+   * against rifting, and the range the starting sea floor's ages are drawn
+   * over. Depth and density follow {@link seafloorFlatteningAge} instead.
+   */
   maxOceanicAge: number;
   /** Continental (buoyant) crust density. */
   continentalDensity: number;
-  /** Young ridge oceanic crust density. */
+  /**
+   * Young ridge oceanic crust density, and the density of oceanic crust
+   * itself in isostasy (see {@link mantleDensity}): how deep ocean floor sits
+   * as it cools is the cooling curve's job, not its density's.
+   */
   oceanicDensityYoung: number;
   /** Fully cooled oceanic crust density. */
   oceanicDensityOld: number;
@@ -537,9 +573,9 @@ export interface Tuning {
 export const defaultTuning: Tuning = {
   ridgeElevation: -2.5,
   abyssElevation: -6,
-  continentBase: 0.6,
-  continentThicknessRef: 7,
-  continentThicknessGain: 0.1,
+  seafloorFlatteningAge: 100,
+  mantleDensity: 3.3,
+  continentThermalShare: 0.3,
   collisionUplift: 4,
   arcUplift: 3,
   trenchDeepen: 3.5,
