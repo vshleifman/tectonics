@@ -225,7 +225,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   hotDrip:
     "How much thickened ocean floor drips into a hot mantle instead of becoming continent.",
   activeSpeedEps: "Relative speed below which a boundary counts as inactive.",
-  dtMyr: "Million years of plate motion advanced per simulation tick.",
+  dtMyr:
+    "Million years of plate motion advanced per simulation tick. A tick that would carry a plate more than one cell is split into shorter steps, so larger values cost proportionally more time.",
 };
 
 /**

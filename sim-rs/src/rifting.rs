@@ -949,6 +949,7 @@ fn break_up(
         PlateProps {
             omega,
             pending: 0.0,
+            steps: 0,
         },
     );
     for q in best_start..best_end {

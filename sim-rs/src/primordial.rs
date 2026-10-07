@@ -102,6 +102,7 @@ impl Primordial {
     ) {
         field.plume_in.fill(0.0);
         field.plume_created_this_step = 0.0;
+        field.dripped_this_step = 0.0;
         let excess = mantle_excess(t, elapsed);
         if excess <= 0.0 && self.plumes.is_empty() {
             return;

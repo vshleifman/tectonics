@@ -99,6 +99,7 @@ pub fn update_plate_identity(
             PlateProps {
                 omega,
                 pending: 0.0,
+                steps: 0,
             },
         );
         for q in comp_start[comp]..comp_start[comp + 1] {

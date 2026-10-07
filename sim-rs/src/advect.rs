@@ -153,6 +153,31 @@ impl AdvectionField {
             rejoined: 0.0,
         }
     }
+
+    /// Everything tallied afresh each step, so a tick taken in several steps
+    /// can report its sum.
+    pub fn step_tallies_mut(&mut self) -> [&mut f64; 18] {
+        [
+            &mut self.subducted_this_step,
+            &mut self.created_this_step,
+            &mut self.eroded_this_step,
+            &mut self.delaminated_this_step,
+            &mut self.foundered_this_step,
+            &mut self.continentalised_by_accretion,
+            &mut self.continentalised_by_spreading,
+            &mut self.continentalised_by_infill,
+            &mut self.plume_created_this_step,
+            &mut self.dripped_this_step,
+            &mut self.continentalised_by_plume,
+            &mut self.continentalised_by_piling,
+            &mut self.continental_recycled,
+            &mut self.decontinentalised,
+            &mut self.interior_holes,
+            &mut self.interior_holes_unfilled,
+            &mut self.torn_continent,
+            &mut self.rejoined,
+        ]
+    }
 }
 
 /// A key that sorts ascending by descending `score`, then ascending `index`:
@@ -225,12 +250,20 @@ pub fn advect(
             .min(2.0 * width);
         if props.pending >= width {
             props.pending -= width;
-            s.plate_flag[id as usize] = 1;
+            props.steps = props.steps.wrapping_add(1);
+            s.plate_flag[id as usize] = if props.steps % 2 == 0 { 2 } else { 1 };
         }
     }
     let stepping_flags = std::mem::take(&mut s.plate_flag);
-    let is_stepping =
-        |p: i32| p >= 0 && (p as usize) < stepping_flags.len() && stepping_flags[p as usize] == 1;
+    let flag = |p: i32| {
+        if p >= 0 && (p as usize) < stepping_flags.len() {
+            stepping_flags[p as usize]
+        } else {
+            0
+        }
+    };
+    let is_stepping = |p: i32| flag(p) != 0;
+    let hands_over_ridge = |p: i32| flag(p) == 2;
 
     // --- Where this step carries each cell's crust ---------------------------
     s.forward.fill(-1);
@@ -390,6 +423,11 @@ pub fn advect(
     }
 
     // --- Pass 1b: a locked front stalls the crust behind it ------------------
+    // At a convergent margin the plate that goes down goes down along its
+    // whole length: its ocean is consumed at the trench whatever crust it
+    // meets there, rather than holding up the plate behind it. The front locks
+    // only where the plate rides over but could not take the cell ahead, or
+    // where continent meets a plate it cannot go under.
     s.stalled.fill(0);
     let mut jam_len = 0usize;
     for cell in 0..n {
@@ -402,7 +440,20 @@ pub fn advect(
         if src.plate_id[ahead] == plate || s.new_plate[ahead] == plate {
             continue;
         }
-        if !overrides(cell, ahead) {
+        let held = src.plate_id[ahead];
+        let arc = s.forward_arc[cell];
+        let closing = arc >= 0 && boundaries.arc_kind[arc as usize] == CONVERGENT;
+        let locked = if !closing {
+            overrides(cell, ahead)
+        } else if src.crust_type[cell] == CONTINENTAL {
+            true
+        } else {
+            let rides_over = margins
+                .get(&(plate as i64 * 65536 + held as i64))
+                .is_some_and(|&(mine, theirs)| mine < theirs);
+            rides_over && overrides(cell, ahead)
+        };
+        if !locked {
             continue;
         }
         s.stalled[cell] = 1;
@@ -651,6 +702,45 @@ pub fn advect(
     s.i32a = target_of;
     out.interior_holes = torn;
     out.interior_holes_unfilled = 0.0;
+
+    // --- Pass 2d: a ridge parts its two plates evenly ------------------------
+    // Floor a plate opens along its trailing margin goes by turns to it and to
+    // the plate it is leaving, so the ridge follows at half the plate's speed
+    // rather than staying where the margin was, and each side grows by half
+    // the spreading.
+    let mut owner = std::mem::take(&mut s.i32b);
+    owner.copy_from_slice(&s.new_plate);
+    for d in 0..n {
+        let plate = owner[d];
+        if plate < 0 || s.source_of[d] >= 0 || s.claimed[d] == 0 || !hands_over_ridge(plate) {
+            continue;
+        }
+        let (mut beyond, mut most) = (-1, 0);
+        for k in range(d) {
+            let q = owner[nbr[k] as usize];
+            if q < 0 || q == plate || !s.is_live(q) {
+                continue;
+            }
+            let count = range(d).filter(|&j| owner[nbr[j] as usize] == q).count();
+            if count > most {
+                most = count;
+                beyond = q;
+            }
+        }
+        if beyond < 0 {
+            continue;
+        }
+        let closing = range(d).any(|k| {
+            let arc = mesh.nbr_arc[k];
+            owner[nbr[k] as usize] == beyond
+                && arc >= 0
+                && boundaries.arc_kind[arc as usize] == CONVERGENT
+        });
+        if !closing {
+            s.new_plate[d] = beyond;
+        }
+    }
+    s.i32b = owner;
 
     let copy_cell = |dst: &mut CellData, source: usize, dest: usize| {
         dst.elevation[dest] = src.elevation[source];

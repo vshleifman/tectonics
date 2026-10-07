@@ -19,6 +19,10 @@ pub struct PlateProps {
     pub omega: Vec3,
     /// Displacement (radians) banked but not yet taken as a whole-cell step.
     pub pending: f64,
+    /// Whole-cell steps taken. A ridge sits midway between the plates it
+    /// parts, so every other step a plate hands the floor it opened behind it
+    /// to the plate on the far side.
+    pub steps: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +121,7 @@ pub fn reconcile(plates: &mut PlateData, report: &RelabelReport) {
             PlateProps {
                 omega: omega.unwrap_or([0.0, 0.0, 0.0]),
                 pending: 0.0,
+                steps: 0,
             },
         );
     }

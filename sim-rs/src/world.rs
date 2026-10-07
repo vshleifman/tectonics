@@ -9,7 +9,8 @@ use crate::craton::update_cratons;
 use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins};
 use crate::elevation::apply_elevation;
 use crate::mantle::MantleFlow;
-use crate::math::read3;
+use crate::math::{len3, read3};
+use std::collections::HashMap;
 use crate::mesh::Mesh;
 use crate::metrics::{PlateSummary, WorldMetrics, compute_metrics, summaries};
 use crate::passive_margins::collapse_passive_margins;
@@ -29,6 +30,12 @@ use crate::tuning::{SimOptions, Tuning};
 
 /// Passes timed per tick, in order; matches `PASS_NAMES` on the TypeScript side.
 pub const PASS_COUNT: usize = 9;
+/// Most steps one tick is split into, however fast the plates.
+const MAX_SUBSTEPS: usize = 64;
+/// Share of the globe a plate must cover for its speed to set how finely a
+/// tick is split: a sliver spinning fast is left to lag rather than slow
+/// every tick down.
+const SUBSTEP_MIN_PLATE_SHARE: f64 = 0.002;
 
 pub struct Sim {
     pub mesh: Mesh,
@@ -47,6 +54,7 @@ pub struct Sim {
     initial_mass: f64,
     elapsed: f64,
     timings: [f64; PASS_COUNT],
+    substeps: usize,
 }
 
 impl Sim {
@@ -72,6 +80,7 @@ impl Sim {
             initial_mass: 0.0,
             elapsed: 0.0,
             timings: [0.0; PASS_COUNT],
+            substeps: 1,
             mesh,
         }
     }
@@ -119,7 +128,52 @@ impl Sim {
         count
     }
 
+    /// Advance `dt_myr`. Plates move a whole cell at a time, so a tick that
+    /// would carry a plate further than one cell is taken in enough shorter
+    /// steps that none does.
     pub fn tick(&mut self) {
+        let steps = self.substeps();
+        self.substeps = steps;
+        let dt = self.tuning.dt_myr / steps as f64;
+        self.timings = [0.0; PASS_COUNT];
+        let mut totals = [0.0f64; 18];
+        for _ in 0..steps {
+            self.step(dt);
+            for (sum, x) in totals.iter_mut().zip(self.advection.step_tallies_mut()) {
+                *sum += *x;
+            }
+        }
+        for (x, sum) in self.advection.step_tallies_mut().into_iter().zip(totals) {
+            *x = sum;
+        }
+    }
+
+    /// Steps this tick needs for the fastest plate of any size to move at
+    /// most one cell per step.
+    fn substeps(&self) -> usize {
+        let n = self.mesh.cell_count;
+        let width = (4.0 * std::f64::consts::PI / n as f64).sqrt();
+        let mut cells: HashMap<i32, usize> = HashMap::new();
+        for &p in &self.front.plate_id {
+            *cells.entry(p).or_default() += 1;
+        }
+        let least = (SUBSTEP_MIN_PLATE_SHARE * n as f64).ceil() as usize;
+        let fastest = self
+            .plates
+            .by_id
+            .iter()
+            .filter(|(id, _)| cells.get(id).is_some_and(|&c| c >= least))
+            .map(|(_, p)| len3(p.omega[0], p.omega[1], p.omega[2]))
+            .fold(0.0f64, f64::max);
+        ((fastest * self.tuning.dt_myr / width).ceil() as usize).clamp(1, MAX_SUBSTEPS)
+    }
+
+    /// Steps the last tick was taken in.
+    pub fn last_substeps(&self) -> usize {
+        self.substeps
+    }
+
+    fn step(&mut self, dt: f64) {
         let Sim {
             mesh,
             front,
@@ -139,11 +193,10 @@ impl Sim {
         } = self;
         let eff = effective_tuning(tuning, *elapsed);
         let t = &eff;
-        let dt = t.dt_myr;
         let mut mark = now_ms();
         let mut lap = |pass: usize| {
             let now = now_ms();
-            timings[pass] = now - mark;
+            timings[pass] += now - mark;
             mark = now;
         };
 
@@ -825,6 +878,45 @@ mod tests {
             }
         }
         assert!(opened > 0, "the boundary never spread");
+    }
+
+    #[test]
+    fn a_ridge_shares_its_new_floor_between_both_plates() {
+        use crate::math::{cross, normalise, scale};
+        let mut sim = Sim::new(4);
+        sim.tuning.mantle_flow_coupling = 0.0;
+        sim.tuning.rift_strength = 1e9;
+        sim.crack_great_circles(1, "fresh floor");
+        let n = sim.mesh.cell_count;
+        sim.front.slab.fill(0.0);
+        let ids: Vec<i32> = sim.plates.by_id.keys().copied().collect();
+        let mut a = [0.0f64; 3];
+        for i in (0..n).filter(|&i| sim.front.plate_id[i] == ids[0]) {
+            let p = read3(&sim.mesh.centres, i);
+            a = [a[0] + p[0], a[1] + p[1], a[2] + p[2]];
+        }
+        let a = normalise(a);
+        let any = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        // Only one plate moves; half the boundary spreads behind it.
+        let omega = scale(normalise(cross(a, any)), 0.02);
+        let mut floor = [0usize; 2];
+        for _ in 0..20 {
+            for (id, p) in sim.plates.by_id.iter_mut() {
+                p.omega = if *id == ids[0] { omega } else { [0.0; 3] };
+            }
+            sim.tick();
+            for i in (0..n).filter(|&i| sim.advection.rift_cell[i] != 0) {
+                floor[(sim.front.plate_id[i] != ids[0]) as usize] += 1;
+            }
+        }
+        let total = floor[0] + floor[1];
+        assert!(total > 0, "the boundary never spread");
+        let still = floor[1] as f64 / total as f64;
+        assert!(
+            (0.3..=0.7).contains(&still),
+            "the plate at rest took {:.0}% of the new floor ({floor:?})",
+            still * 100.0
+        );
     }
 
     #[test]

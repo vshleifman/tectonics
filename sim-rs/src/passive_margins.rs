@@ -125,6 +125,7 @@ pub fn collapse_passive_margins(
         PlateProps {
             omega,
             pending: 0.0,
+            steps: 0,
         },
     );
     for q in best.0..best.1 {
