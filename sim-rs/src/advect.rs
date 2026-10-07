@@ -9,7 +9,7 @@ use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, mixed_share};
 use crate::mesh::Mesh;
 use crate::plates::PlateData;
 use crate::scratch::{MAX_NBRS, Scratch};
-use crate::tuning::Tuning;
+use crate::tuning::{CRATON_KEEL, Tuning};
 use std::collections::HashMap;
 
 const MIN_FOOTHOLD: i32 = 2;
@@ -353,6 +353,13 @@ pub fn advect(
             continue;
         }
         if src.crust_type[d] == CONTINENTAL && src.crust_type[cell] != CONTINENTAL {
+            continue;
+        }
+        // Nothing overruns a craton but a deeper-rooted one.
+        if src.crust_type[d] == CONTINENTAL
+            && src.keel[d] >= CRATON_KEEL
+            && src.keel[cell] <= src.keel[d]
+        {
             continue;
         }
         let foothold = range(d)
@@ -894,7 +901,10 @@ pub fn advect(
         };
         // Continental crust welded on brings its age and keel with it, mixed
         // by thickness with the crust already in the cell, so a craton that
-        // loses its cell to the grid is not wiped from the record.
+        // loses its cell to the grid is not wiped from the record. A craton
+        // either side of the weld keeps its keel whole: the younger crust
+        // crumples against it or is underthrust beneath, and does not dilute
+        // its root.
         let continental = (out.welded_continental[d] as f64).min(welded);
         let held_continental = held * continental / welded;
         let stays_continental = dst.crust_type[d] == CONTINENTAL
@@ -905,7 +915,9 @@ pub fn advect(
             let age = out.welded_age[d] as f64 / continental;
             let keel = out.welded_keel[d] as f64 / continental;
             dst.age[d] = ((own * dst.age[d] as f64 + held_continental * age) / total) as f32;
-            dst.keel[d] = ((own * dst.keel[d] as f64 + held_continental * keel) / total) as f32;
+            let mixed = ((own * dst.keel[d] as f64 + held_continental * keel) / total) as f32;
+            let deepest = dst.keel[d].max(keel as f32);
+            dst.keel[d] = if deepest >= CRATON_KEEL { deepest } else { mixed };
         }
         dst.plume_share[d] =
             mixed_share(dst.plume_share[d], dst.thickness[d] as f64, held, welded_tracer);

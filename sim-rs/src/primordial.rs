@@ -1,6 +1,6 @@
-//! The primordial era (opt-in, `primordial_heat` > 0): a young, hot mantle
-//! that makes continent over plumes rather than at arcs, cooling into the
-//! modern regime.
+//! The primordial era (`primordial_heat` > 0, on by default): a young, hot
+//! mantle that makes continent over plumes rather than at arcs, cooling into
+//! the modern regime. Cratonic keels grow only while it lasts (`craton.rs`).
 //!
 //! Early Archean mantle ran some 200-300 C hotter. Plume heads built thick
 //! basaltic plateaus whose hydrated roots melted into the first continental
@@ -285,6 +285,7 @@ mod tests {
     #[test]
     fn a_cold_mantle_raises_nothing() {
         let mut sim = Sim::new(4);
+        sim.tuning.primordial_heat = 0.0;
         sim.crack_great_circles(4, "primordial");
         for _ in 0..30 {
             sim.tick();

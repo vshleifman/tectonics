@@ -165,21 +165,25 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "Largest enclosed sea, as a share of the globe, that fills in.",
   minContinentArea:
     "Landmasses smaller than this share of the globe rejoin a nearby continent.",
+  minCratonArea:
+    "Cratons smaller than this share of the globe rejoin a larger craton nearby.",
   cohesionReach:
-    "Rings of cells a stray crumb of continent searches for a landmass to rejoin.",
+    "Rings of cells a stray crumb of continent or craton searches for a body to rejoin.",
   continentalAreaTarget:
     "Share of the globe at which continental growth levels off.",
   continentalRecyclingRate:
     "Share of continental area recycled per Myr when no target is set.",
   cratonMinAge: "Age continental crust must reach before it can grow a keel.",
   cratonInland: "How far inland crust must lie from the ocean to grow a keel.",
-  cratonGrowthTime: "How long a qualifying interior takes to grow a full keel.",
+  cratonGrowthTime:
+    "How long a qualifying interior takes to grow a full keel while the young mantle is fully hot.",
   cratonDecayTime:
     "How long a keel takes to be lost where its crust is rifted, thinned or crushed.",
-  cratonStrength: "Extra strength a full keel gives against rifting.",
+  cratonStrength:
+    "Extra strength a keel gives against rifting; cratons themselves are never rifted through.",
   cratonKeelGain: "Extra coupling a full keel gives its crust to the mantle.",
   cratonDurability:
-    "How hard cratons are to erode or rift; above ~0.85 they can lock the plates up.",
+    "How hard cratons are to erode; above ~0.85 they can lock the plates up.",
   cratonMergeTime:
     "How long two plates' cratons must stay welded before the plates merge; 0 to never force it.",
   riftStrength:
@@ -210,7 +214,7 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   riftHeatRelease: "Share of mantle heat vented when a plate rifts.",
   minPlateArea: "Smallest fragment that becomes a plate of its own.",
   primordialHeat:
-    "Excess heat of the young mantle; above 0, early continent forms as plume cratons.",
+    "Excess heat of the young mantle; early continent forms as plume cratons, and keels grow only while it lasts.",
   primordialCoolingTime: "How long the young mantle takes to cool off.",
   plumeRate: "Plumes rising per Myr while the mantle is at full heat.",
   plumeRadius: "Radius of the plateau each plume builds.",
@@ -695,6 +699,13 @@ const TUNING_GROUP_FIELDS: {
         min: 0,
         max: 0.001,
         step: 0.00001,
+      },
+      {
+        key: "minCratonArea",
+        label: "Min craton area",
+        min: 0,
+        max: 0.002,
+        step: 0.00005,
       },
       {
         key: "cohesionReach",

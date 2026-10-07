@@ -333,8 +333,17 @@ export interface Tuning {
    */
   minContinentArea: number;
   /**
+   * Share of the globe below which a craton counts as a speck (a single cell
+   * always does). Each tick, a speck within {@link cohesionReach} of a larger
+   * craton on its own plate trades places with the younger continental crust
+   * on that craton's edge, so the quantised transport cannot scatter a craton
+   * into dots through the continent around it.
+   */
+  minCratonArea: number;
+  /**
    * Rings of cells within which stray continental crust looks for a landmass
-   * to rejoin. 0 turns the cohesion pass off.
+   * to rejoin, and a speck of craton for a larger craton. 0 turns both
+   * cohesion passes off.
    */
   cohesionReach: number;
   /**
@@ -371,7 +380,13 @@ export interface Tuning {
    * suture.
    */
   cratonInland: number;
-  /** Myr for a qualifying interior to grow a full keel. */
+  /**
+   * Myr for a qualifying interior to grow a full keel at one unit of the
+   * primordial mantle's excess heat. Growth scales with that heat, so it all
+   * but stops as the mantle cools, as craton formation did after the
+   * Palaeoproterozoic, and slows with the crust's inherited weakness, so the
+   * belts between cratons stay keel-less.
+   */
   cratonGrowthTime: number;
   /**
    * Myr for a keel to be lost where its crust is rifted or thinned, as North
@@ -381,8 +396,11 @@ export interface Tuning {
   cratonDecayTime: number;
   /**
    * Extra strength a full keel gives continental lithosphere against rifting,
-   * on top of its own 1: rifts go around cratons and break continents along
-   * the younger belts between them, so the pieces keep their cores.
+   * on top of its own 1. Craton itself (keel at least half full) is never
+   * rifted through whatever its strength: rifts go around cratons and break
+   * continents along the younger belts between them, so the pieces keep
+   * their cores. This is what keeps lines across cratons from being tried,
+   * and what a keel still too shallow to be craton resists with.
    */
   cratonStrength: number;
   /**
@@ -394,11 +412,10 @@ export interface Tuning {
   /**
    * How hard craton (keel at least half full) is to destroy, in [0, 1].
    * Trench and margin erosion, delamination and loss of keel act on it at
-   * `1 - cratonDurability` of their usual rate, and its interior is
-   * `1 / (1 - cratonDurability)` times harder to rift, though the seams
-   * between cratons are not. Welded plates whose cratons touch are held to a
-   * common motion this firmly. Above ~0.85 cratons accumulate until they lock
-   * the plates up: few plates, ocean floor billions of years old.
+   * `1 - cratonDurability` of their usual rate; resistance to rifting is
+   * {@link cratonStrength}'s alone. Welded plates whose cratons touch are held
+   * to a common motion this firmly. Above ~0.85 cratons accumulate until they
+   * lock the plates up: few plates, ocean floor billions of years old.
    */
   cratonDurability: number;
   /**
@@ -527,12 +544,14 @@ export interface Tuning {
    */
   minPlateArea: number;
 
-  // --- Primordial era (optional; see sim-rs/src/primordial.rs) ---
+  // --- Primordial era (see sim-rs/src/primordial.rs) ---
   /**
    * Excess heat of the young mantle at the start, in [0, 1]; 0 turns the era
    * off. While it lasts, continent is made over plumes as round, keeled
    * cratons, and thickened ocean floor drips back into the mantle rather than
    * piling up into continent. It decays over {@link primordialCoolingTime}.
+   * Keels grow only while it lasts (see {@link cratonGrowthTime}), so with it
+   * at 0 no craton ever forms.
    */
   primordialHeat: number;
   /** Myr for the mantle's excess heat to fall by a factor of e. */
@@ -628,6 +647,7 @@ export const defaultTuning: Tuning = {
   basinInfillRate: 1,
   basinInfillMaxArea: 0.0005,
   minContinentArea: 0.00005,
+  minCratonArea: 0.0003,
   cohesionReach: 2,
   continentalAreaTarget: 0.4,
   continentalRecyclingRate: 0.0004,
@@ -663,7 +683,7 @@ export const defaultTuning: Tuning = {
 
   minPlateArea: 0.0005,
 
-  primordialHeat: 0,
+  primordialHeat: 1,
   primordialCoolingTime: 1000,
   plumeRate: 0.1,
   plumeRadius: 0.08,

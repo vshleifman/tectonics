@@ -42,7 +42,7 @@ use crate::plates::{OpeningRift, PlateData, PlateProps, PlateStress, suture_key}
 use crate::registry::Registry;
 use crate::scratch::Scratch;
 use crate::shape::Moments;
-use crate::tuning::{SimOptions, Tuning};
+use crate::tuning::{CRATON_KEEL, SimOptions, Tuning};
 
 const CUT_BAND: f64 = 0.06;
 const SCAN_BINS: usize = 64;
@@ -156,19 +156,9 @@ pub fn update_rifting(
             continue;
         }
         let stress = plates.stress.get(&id);
-        let Some(rift) = choose_rift(mesh, data, cells, stress, t, o) else {
+        let Some(rift) = pick_rift(mesh, data, cells, area_of[p], min_area, stress, t, o) else {
             continue;
         };
-        lay_out(mesh, data, cells, &rift, t, o);
-        let far_area: f64 = cells
-            .iter()
-            .filter(|&&c| data.rift_side[c as usize] == RIFT_FAR)
-            .map(|&c| mesh.area(c as usize))
-            .sum();
-        if far_area < min_area || area_of[p] - far_area < min_area {
-            clear_sides(data, cells);
-            continue;
-        }
         // Continental lithosphere stretches for a long time before it parts;
         // oceanic lithosphere, once it gives, opens almost at once.
         let zone = zone_of(mesh, data, cells, id);
@@ -195,13 +185,16 @@ pub fn update_rifting(
     s.i32b = cells_by_plate;
 }
 
-/// The cells of plate `id` that border the other side of its rift.
+/// The cells of plate `id` that border the other side of its rift, and are
+/// stretched by it. A rift skirting a craton stretches the younger crust
+/// beside it, never the craton's edge.
 fn zone_of(mesh: &Mesh, data: &CellData, cells: &[i32], id: i32) -> Vec<usize> {
     cells
         .iter()
         .map(|&c| c as usize)
         .filter(|&i| {
-            mesh.nbrs(i).any(|k| {
+            !cratonic(data, i)
+                && mesh.nbrs(i).any(|k| {
                 let m = mesh.nbr[k] as usize;
                 data.plate_id[m] == id && data.rift_side[m] != data.rift_side[i]
             })
@@ -261,15 +254,10 @@ fn insulate(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scratch, t: &
 /// and heat. Oceanic lithosphere thickens as the square root of its age.
 fn lithosphere_strength(t: &Tuning, data: &CellData, i: usize) -> f64 {
     if data.crust_type[i] == CONTINENTAL {
-        // A cratonic keel is cold and stiff; rifts go around it.
-        // Durable cratons are all but unbreakable inside, but the seams
-        // between them stay the place a supercontinent parts: the Atlantic
-        // opened along the sutures that had closed the Iapetus. Inherited
-        // weakness takes the extra strength away again.
-        let keeled = 1.0 + t.craton_strength * data.keel[i] as f64;
-        let durable = 1.0 / t.craton_wear(data.keel[i]).max(0.01) - 1.0;
-        let seam = clamp01(data.weakness[i] as f64);
-        return keeled * (1.0 + durable * (1.0 - seam));
+        // A cratonic keel is cold and stiff; rifts go around it, and break
+        // continents along the weak seams between cratons instead: the
+        // Atlantic opened along the sutures that had closed the Iapetus.
+        return 1.0 + t.craton_strength * data.keel[i] as f64;
     }
     let cooled = clamp01(data.age[i] as f64 / t.max_oceanic_age).sqrt();
     t.oceanic_strength_young + (t.oceanic_strength_old - t.oceanic_strength_young) * cooled
@@ -302,14 +290,19 @@ fn tangent_at(centre: Vec3, v: Vec3) -> Option<Vec3> {
     (len3(u[0], u[1], u[2]) > 1e-6).then(|| normalise(u))
 }
 
-/// The rift that most overcomes the plate's strength, over lines at several
-/// angles to its tension, among those leaving no piece longer than
+/// Choose and lay out the rift that most overcomes the plate's strength, over
+/// lines at several angles to its tension and at every offset across it,
+/// among those that cut through no craton, leave each piece at least
+/// `min_area` of the plate's `plate_area`, and leave no piece longer than
 /// `max_rift_aspect` times its width, or at least rounder than the plate was.
-/// `None` if no such line gives.
-fn choose_rift(
+/// `None`, with no sides laid out, if no such line gives.
+#[allow(clippy::too_many_arguments)]
+fn pick_rift(
     mesh: &Mesh,
-    data: &CellData,
+    data: &mut CellData,
     cells: &[i32],
+    plate_area: f64,
+    min_area: f64,
     stress: Option<&PlateStress>,
     t: &Tuning,
     o: &SimOptions,
@@ -335,7 +328,7 @@ fn choose_rift(
         })
         .collect();
 
-    let mut best: Option<(f64, Rift)> = None;
+    let mut found: Vec<(f64, Rift)> = Vec::new();
     for k in 0..RIFT_ANGLES {
         let angle = k as f64 * std::f64::consts::PI / RIFT_ANGLES as f64;
         let (sin, cos) = angle.sin_cos();
@@ -344,17 +337,29 @@ fn choose_rift(
             cos * u[1] + sin * v[1],
             cos * u[2] + sin * v[2],
         ];
-        let Some(cut) = best_cut(mesh, cells, &weighted, axis, pull * cos * cos, t) else {
-            continue;
-        };
-        let excess = cut.excess;
-        if excess < 0.0 || best.as_ref().is_some_and(|(e, _)| *e >= excess) {
+        for cut in cuts(mesh, cells, &weighted, axis, pull * cos * cos, t) {
+            found.push((
+                cut.excess,
+                Rift {
+                    axis,
+                    offset: cut.offset,
+                },
+            ));
+        }
+    }
+    // Stable, so of equal lines the first angle tried, and the most central
+    // line at it, still come first.
+    found.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let cratons = Cratons::of(mesh, data, cells);
+    for (_, rift) in found {
+        if cratons.crossed_by(mesh, cells, &rift) {
             continue;
         }
         let (mut near, mut far) = (Moments::default(), Moments::default());
         for &cell in cells {
             let i = cell as usize;
-            if along(mesh, i, axis) > cut.offset {
+            if along(mesh, i, rift.axis) > rift.offset {
                 far.add(mesh, i);
             } else {
                 near.add(mesh, i);
@@ -364,15 +369,22 @@ fn choose_rift(
         if pieces > t.max_rift_aspect && pieces >= parent_aspect {
             continue;
         }
-        best = Some((
-            excess,
-            Rift {
-                axis,
-                offset: cut.offset,
-            },
-        ));
+        if !lay_out(mesh, data, cells, &rift, &cratons, t, o) {
+            clear_sides(data, cells);
+            continue;
+        }
+        let far_area: f64 = cells
+            .iter()
+            .filter(|&&c| data.rift_side[c as usize] == RIFT_FAR)
+            .map(|&c| mesh.area(c as usize))
+            .sum();
+        if far_area < min_area || plate_area - far_area < min_area {
+            clear_sides(data, cells);
+            continue;
+        }
+        return Some(rift);
     }
-    best.map(|(_, rift)| rift)
+    None
 }
 
 #[inline]
@@ -403,23 +415,22 @@ fn spread_tension(mesh: &Mesh, cells: &[i32], axis: Vec3, pull: f64) -> f64 {
     pull * (hi - lo) / area.max(1e-12)
 }
 
-/// The line across the plate perpendicular to `axis` that most overcomes its
-/// strength, scanned over bins and kept clear of the ends. `weighted` holds
-/// each cell's area and its heat and strength times that area; `pull` is the
-/// opposed slab pull resolved onto `axis`. Lines that do equally well go to
-/// the one nearest the middle.
-fn best_cut(
+/// The lines across the plate perpendicular to `axis` that overcome its
+/// strength, scanned over bins and kept clear of the ends, from the middle
+/// outwards. `weighted` holds each cell's area and its heat and strength
+/// times that area; `pull` is the opposed slab pull resolved onto `axis`.
+fn cuts(
     mesh: &Mesh,
     cells: &[i32],
     weighted: &[[f64; 3]],
     axis: Vec3,
     pull: f64,
     t: &Tuning,
-) -> Option<Cut> {
+) -> Vec<Cut> {
     let (lo, hi) = extent(mesh, cells, axis);
     let span = hi - lo;
     if !span.is_finite() || span <= 1e-6 {
-        return None;
+        return Vec::new();
     }
     let mut area_bin = [0.0f64; SCAN_BINS];
     let mut heat_bin = [0.0f64; SCAN_BINS];
@@ -447,7 +458,7 @@ fn best_cut(
             middle - k.div_ceil(2)
         }
     });
-    let mut best: Option<Cut> = None;
+    let mut found = Vec::new();
     for centre in from_middle {
         let (mut weight, mut heat, mut strength) = (0.0, 0.0, 0.0);
         for b in centre.saturating_sub(half)..=(centre + half).min(SCAN_BINS - 1) {
@@ -460,14 +471,14 @@ fn best_cut(
         }
         let drive = tension + t.insulation_drive * heat / weight;
         let excess = drive - t.rift_strength * strength / weight;
-        if best.as_ref().is_none_or(|b| excess > b.excess) {
-            best = Some(Cut {
+        if excess >= 0.0 {
+            found.push(Cut {
                 offset: lo + span * (centre as f64 + 0.5) / SCAN_BINS as f64,
                 excess,
             });
         }
     }
-    best
+    found
 }
 
 /// A band cell waiting to be claimed by one side of a rift as it is laid out.
@@ -501,21 +512,101 @@ impl Ord for Grow {
     }
 }
 
+/// Whether a cell is craton, which no rift may run through.
+fn cratonic(data: &CellData, i: usize) -> bool {
+    data.crust_type[i] == CONTINENTAL && data.keel[i] >= CRATON_KEEL
+}
+
+/// A plate's cratons: each connected body of craton cells on it.
+struct Cratons {
+    /// Cells of every craton, one craton's after another's.
+    members: Vec<usize>,
+    /// Where each craton's cells start in `members`, and one past the last.
+    starts: Vec<usize>,
+    /// The craton each cell is in, -1 for none.
+    of: Vec<i32>,
+}
+
+impl Cratons {
+    fn of(mesh: &Mesh, data: &CellData, cells: &[i32]) -> Cratons {
+        let mut of = vec![-1i32; mesh.cell_count];
+        let (mut members, mut starts) = (Vec::new(), Vec::new());
+        for &cell in cells {
+            let first = cell as usize;
+            if !cratonic(data, first) || of[first] >= 0 {
+                continue;
+            }
+            let id = starts.len() as i32;
+            starts.push(members.len());
+            of[first] = id;
+            members.push(first);
+            let mut head = members.len() - 1;
+            while head < members.len() {
+                let c = members[head];
+                head += 1;
+                for k in mesh.nbrs(c) {
+                    let m = mesh.nbr[k] as usize;
+                    if of[m] < 0 && data.plate_id[m] == data.plate_id[c] && cratonic(data, m) {
+                        of[m] = id;
+                        members.push(m);
+                    }
+                }
+            }
+        }
+        starts.push(members.len());
+        Cratons { members, starts, of }
+    }
+
+    fn count(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    fn cells(&self, c: usize) -> &[usize] {
+        &self.members[self.starts[c]..self.starts[c + 1]]
+    }
+
+    /// Whether `rift` cuts clean across a craton, reaching out of the band
+    /// it may wander in on both sides, so it could only open through it.
+    fn crossed_by(&self, mesh: &Mesh, cells: &[i32], rift: &Rift) -> bool {
+        if self.count() == 0 {
+            return false;
+        }
+        let (lo, hi) = extent(mesh, cells, rift.axis);
+        let band = wander_band(lo, hi);
+        (0..self.count()).any(|c| {
+            let (mut near, mut far) = (false, false);
+            for &m in self.cells(c) {
+                let d = along(mesh, m, rift.axis) - rift.offset;
+                near |= d < -band;
+                far |= d > band;
+            }
+            near && far
+        })
+    }
+}
+
+fn wander_band(lo: f64, hi: f64) -> f64 {
+    (WANDER_BAND * (hi - lo)).max(1e-9)
+}
+
 /// Mark which side of `rift` each of the plate's cells lies on. Well clear of
 /// the line that is simply which side of it the cell is. Within `WANDER_BAND`
 /// of it the two sides grow in from the band's edges, strongest lithosphere
 /// first, so the weakest cells near the line are the last reached and the
-/// sides meet along them.
+/// sides meet along them. A craton goes whole to whichever side reaches it
+/// first, so the rift skirts it; `false` if the line cuts clean across one,
+/// with no way round it within the band.
 fn lay_out(
     mesh: &Mesh,
     data: &mut CellData,
     cells: &[i32],
     rift: &Rift,
+    cratons: &Cratons,
     t: &Tuning,
     o: &SimOptions,
-) {
+) -> bool {
     let (lo, hi) = extent(mesh, cells, rift.axis);
-    let band = (WANDER_BAND * (hi - lo)).max(1e-9);
+    let band = wander_band(lo, hi);
     let offset_of = |i: usize| along(mesh, i, rift.axis) - rift.offset;
     let side_of = |d: f64| if d > 0.0 { RIFT_FAR } else { RIFT_NEAR };
     for &cell in cells {
@@ -523,11 +614,32 @@ fn lay_out(
         let d = offset_of(i);
         data.rift_side[i] = if d.abs() > band { side_of(d) } else { 0 };
     }
+
+    let craton = |c: usize| cratons.cells(c);
+    let craton_of = &cratons.of;
+    let claim = |data: &mut CellData, c: usize, side: u8| {
+        for &m in craton(c) {
+            data.rift_side[m] = side;
+        }
+    };
+    for c in 0..cratons.count() {
+        let (mut near, mut far) = (false, false);
+        for &m in craton(c) {
+            near |= data.rift_side[m] == RIFT_NEAR;
+            far |= data.rift_side[m] == RIFT_FAR;
+        }
+        if near && far {
+            return false;
+        }
+        if near || far {
+            claim(data, c, if near { RIFT_NEAR } else { RIFT_FAR });
+        }
+    }
+
     let priority = |data: &CellData, i: usize| -> f32 {
         let straight = STRAIGHTNESS * (1.0 - offset_of(i).abs() / band);
         (straight - cell_strength(t, data, i, o)) as f32
     };
-
     let mut heap = BinaryHeap::new();
     for &cell in cells {
         let i = cell as usize;
@@ -550,24 +662,41 @@ fn lay_out(
         if data.rift_side[cell] != 0 {
             continue;
         }
-        data.rift_side[cell] = side;
-        for k in mesh.nbrs(cell) {
-            let m = mesh.nbr[k] as usize;
-            if data.rift_side[m] == 0 && data.plate_id[m] == data.plate_id[cell] {
-                heap.push(Grow {
-                    priority: priority(data, m),
-                    cell: m,
-                    side,
-                });
+        let reached: &[usize] = match craton_of[cell] {
+            c if c >= 0 => {
+                claim(data, c as usize, side);
+                craton(c as usize)
+            }
+            _ => {
+                data.rift_side[cell] = side;
+                std::slice::from_ref(&cell)
+            }
+        };
+        for &r in reached {
+            for k in mesh.nbrs(r) {
+                let m = mesh.nbr[k] as usize;
+                if data.rift_side[m] == 0 && data.plate_id[m] == data.plate_id[r] {
+                    heap.push(Grow {
+                        priority: priority(data, m),
+                        cell: m,
+                        side,
+                    });
+                }
             }
         }
     }
     for &cell in cells {
         let i = cell as usize;
-        if data.rift_side[i] == 0 {
-            data.rift_side[i] = side_of(offset_of(i));
+        if data.rift_side[i] != 0 {
+            continue;
+        }
+        let side = side_of(offset_of(i));
+        match craton_of[i] {
+            c if c >= 0 => claim(data, c as usize, side),
+            _ => data.rift_side[i] = side,
         }
     }
+    true
 }
 
 fn clear_sides(data: &mut CellData, cells: &[i32]) {
@@ -833,8 +962,11 @@ fn break_up(
             if data.plate_id[m] == new_id {
                 continue;
             }
-            data.weakness[cell] = data.weakness[cell].max(margin);
-            data.weakness[m] = data.weakness[m].max(margin);
+            for c in [cell, m] {
+                if !cratonic(data, c) {
+                    data.weakness[c] = data.weakness[c].max(margin);
+                }
+            }
         }
     }
     clear_sides(data, cells);
@@ -878,11 +1010,13 @@ mod tests {
             axis: [1.0, 0.0, 0.0],
             offset: 0.0,
         };
+        let cratons = Cratons::of(&mesh, &data, &cap);
         lay_out(
             &mesh,
             &mut data,
             &cap,
             &rift,
+            &cratons,
             &Tuning::default(),
             &SimOptions::default(),
         );
@@ -919,11 +1053,13 @@ mod tests {
             axis: [1.0, 0.0, 0.0],
             offset: 0.1,
         };
+        let cratons = Cratons::of(&mesh, &data, &cap);
         lay_out(
             &mesh,
             &mut data,
             &cap,
             &rift,
+            &cratons,
             &Tuning::default(),
             &SimOptions::default(),
         );

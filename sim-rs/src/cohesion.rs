@@ -17,7 +17,7 @@ use crate::advect::AdvectionField;
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::mesh::Mesh;
 use crate::scratch::Scratch;
-use crate::tuning::Tuning;
+use crate::tuning::{CRATON_KEEL, Tuning};
 
 const VISITED: u8 = 1;
 
@@ -192,6 +192,149 @@ pub fn keep_continents_whole(
     field.rejoined = rejoined;
 }
 
+fn cratonic(data: &CellData, i: usize) -> bool {
+    data.crust_type[i] == CONTINENTAL && data.keel[i] >= CRATON_KEEL
+}
+
+/// Keeping cratons whole, as `keep_continents_whole` keeps continents whole.
+/// A craton is one rigid body, but the quantised transport and the crust
+/// lifecycle shuffle cells within a continent, and would scatter its keel
+/// into specks through the younger crust around it.
+///
+/// Each tick, a craton smaller than `min_craton_area` of the globe looks up to
+/// `cohesion_reach` rings across its own plate's continental crust for a
+/// larger craton (by area, then by order found), and trades each of its cells
+/// with the nearest younger continental crust on that craton's edge. Specks
+/// with no larger craton in reach are left alone; the largest of a scatter of
+/// specks gathers the rest, so even a field of them clumps together.
+pub fn keep_cratons_whole(mesh: &Mesh, data: &mut CellData, s: &mut Scratch, t: &Tuning) -> f64 {
+    let reach = t.cohesion_reach.max(0.0).round() as usize;
+    if reach == 0 {
+        return 0.0;
+    }
+    let n = mesh.cell_count;
+    let globe: f64 = mesh.areas.iter().map(|&a| a as f64).sum();
+    let small_area = t.min_craton_area.max(0.0) * globe;
+
+    // Cratons, joined across plates like landmasses.
+    let label = &mut s.i32a;
+    label.fill(-1);
+    let stack = &mut s.queue;
+    let mut area_of: Vec<f64> = Vec::new();
+    let mut strays: Vec<usize> = Vec::new();
+    for start in 0..n {
+        if label[start] >= 0 || !cratonic(data, start) {
+            continue;
+        }
+        let id = area_of.len() as i32;
+        label[start] = id;
+        stack[0] = start as i32;
+        let (mut head, mut tail) = (0usize, 1usize);
+        let mut area = 0.0f64;
+        while head < tail {
+            let cell = stack[head] as usize;
+            head += 1;
+            area += mesh.area(cell);
+            for k in mesh.nbrs(cell) {
+                let m = mesh.nbr[k] as usize;
+                if label[m] < 0 && cratonic(data, m) {
+                    label[m] = id;
+                    stack[tail] = m as i32;
+                    tail += 1;
+                }
+            }
+        }
+        area_of.push(area);
+        if tail == 1 || area < small_area {
+            strays.extend(stack[..tail].iter().map(|&c| c as usize));
+        }
+    }
+    if strays.is_empty() {
+        return 0.0;
+    }
+    strays.sort_unstable();
+    // Which of two cratons the other should join: the larger, then the first.
+    let rank = |c: i32| (area_of[c as usize], -c);
+
+    let mark = &mut s.u8a;
+    mark.fill(0);
+    let mut touched: Vec<usize> = Vec::new();
+    let mut ring: Vec<usize> = Vec::new();
+    let mut next_ring: Vec<usize> = Vec::new();
+    let mut gathered = 0.0f64;
+    for &stray in &strays {
+        let plate = data.plate_id[stray];
+        let own = label[stray];
+        if plate < 0 || own < 0 || !cratonic(data, stray) {
+            continue;
+        }
+        let joins = |label: &[i32], m: usize| {
+            let other = label[m];
+            other >= 0 && other != own && rank(other) > rank(own)
+        };
+        // An earlier trade may already have joined it up.
+        if mesh.nbrs(stray).any(|k| joins(label, mesh.nbr[k] as usize)) {
+            continue;
+        }
+
+        mark[stray] = VISITED;
+        touched.push(stray);
+        ring.clear();
+        ring.push(stray);
+        let mut slot: Option<(usize, i32)> = None;
+        for _ in 0..reach {
+            next_ring.clear();
+            for &cell in &ring {
+                for k in mesh.nbrs(cell) {
+                    let m = mesh.nbr[k] as usize;
+                    if mark[m] != 0
+                        || data.plate_id[m] != plate
+                        || data.crust_type[m] != CONTINENTAL
+                    {
+                        continue;
+                    }
+                    mark[m] = VISITED;
+                    touched.push(m);
+                    next_ring.push(m);
+                }
+            }
+            for &c in &next_ring {
+                if cratonic(data, c) {
+                    continue;
+                }
+                let best = mesh
+                    .nbrs(c)
+                    .map(|k| mesh.nbr[k] as usize)
+                    .filter(|&m| joins(label, m))
+                    .map(|m| label[m])
+                    .max_by(|&a, &b| rank(a).partial_cmp(&rank(b)).unwrap());
+                if let Some(target) = best
+                    && slot.is_none_or(|(at, was)| {
+                        (rank(target), std::cmp::Reverse(c)) > (rank(was), std::cmp::Reverse(at))
+                    })
+                {
+                    slot = Some((c, target));
+                }
+            }
+            if slot.is_some() || next_ring.is_empty() {
+                break;
+            }
+            std::mem::swap(&mut ring, &mut next_ring);
+        }
+        for &c in &touched {
+            mark[c] = 0;
+        }
+        touched.clear();
+
+        let Some((slot, target)) = slot else { continue };
+        swap_crust(mesh, data, stray, slot);
+        label[slot] = target;
+        label[stray] = -1;
+        gathered += mesh.area(slot);
+    }
+    gathered
+}
+
 #[cfg(test)]
 mod tests {
     use super::keep_continents_whole;
@@ -335,6 +478,55 @@ mod tests {
         keep_continents_whole(mesh, &mut data, &mut field, &mut s, &Tuning::default());
         assert_eq!(data.crust_type[a], OCEANIC, "rejoined on the plate margin");
         assert_eq!(data.crust_type[b], CONTINENTAL, "did not rejoin away from it");
+    }
+
+    #[test]
+    fn a_speck_of_craton_rejoins_the_craton_beside_it() {
+        let sim = Sim::new(4);
+        let mesh = &sim.mesh;
+        let (mut data, _) = island(mesh, 0, 1);
+        // Rings in from the island's centre: a craton over the inner two.
+        let mut ring_of = vec![usize::MAX; mesh.cell_count];
+        let mut ring = vec![0usize];
+        ring_of[0] = 0;
+        for r in 1..=3 {
+            let mut next = Vec::new();
+            for &c in &ring {
+                for k in mesh.nbrs(c) {
+                    let m = mesh.nbr[k] as usize;
+                    if ring_of[m] == usize::MAX {
+                        ring_of[m] = r;
+                        next.push(m);
+                    }
+                }
+            }
+            next.sort_unstable();
+            ring = next;
+        }
+        for i in 0..mesh.cell_count {
+            if ring_of[i] <= 1 {
+                data.keel[i] = 1.0;
+            }
+        }
+        let speck = ring[0];
+        data.keel[speck] = 0.8;
+        data.age[speck] = 3000.0;
+        let before = total_crust_mass(&mesh.areas, &data);
+        let mut s = Scratch::new(mesh.cell_count);
+        let gathered = super::keep_cratons_whole(mesh, &mut data, &mut s, &Tuning::default());
+
+        assert!(gathered > 0.0, "nothing gathered");
+        assert_eq!(data.keel[speck], 0.0, "the speck stayed put");
+        let joined = (0..mesh.cell_count)
+            .find(|&i| ring_of[i] == 2 && data.keel[i] == 0.8)
+            .expect("the speck did not land on the craton's edge");
+        assert_eq!(data.age[joined], 3000.0);
+        assert!(
+            mesh.nbrs(joined).any(|k| ring_of[mesh.nbr[k] as usize] <= 1),
+            "landed off the craton"
+        );
+        let after = total_crust_mass(&mesh.areas, &data);
+        assert!((after - before).abs() < 1e-6 * before, "mass {before} -> {after}");
     }
 
     #[test]

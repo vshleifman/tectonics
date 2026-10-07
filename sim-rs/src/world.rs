@@ -4,7 +4,7 @@
 use crate::advect::{AdvectionField, advect};
 use crate::boundaries::{BoundaryField, classify};
 use crate::cell_data::{CellData, total_crust_mass};
-use crate::cohesion::keep_continents_whole;
+use crate::cohesion::{keep_continents_whole, keep_cratons_whole};
 use crate::craton::update_cratons;
 use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins};
 use crate::elevation::apply_elevation;
@@ -170,7 +170,8 @@ impl Sim {
         apply_crust_lifecycle(mesh, back, dt, advection, scratch, t);
         keep_continents_whole(mesh, back, advection, scratch, t);
         track_continental_growth(mesh, back, dt, advection);
-        update_cratons(mesh, back, dt, scratch, t);
+        update_cratons(mesh, back, dt, *elapsed, scratch, t);
+        keep_cratons_whole(mesh, back, scratch, t);
         lap(6);
         apply_elevation(&mesh.arc_cells, back, dt, boundaries, t);
         lap(7);
@@ -324,6 +325,7 @@ mod tests {
     /// the last `window` Myr.
     fn continental_area_after(target: f64, myr: f64, window: f64) -> Vec<f64> {
         let mut sim = Sim::new(4);
+        sim.tuning.primordial_heat = 0.0;
         sim.tuning.continental_area_target = target;
         sim.crack_great_circles(4, "growth");
         let ticks = (myr / sim.tuning.dt_myr) as usize;
@@ -374,6 +376,7 @@ mod tests {
     fn hot_continent(tune: impl FnOnce(&mut Tuning)) -> Sim {
         let mut sim = Sim::new(4);
         sim.tuning.mantle_flow_coupling = 0.0;
+        sim.tuning.primordial_heat = 0.0;
         tune(&mut sim.tuning);
         sim.crack_great_circles(1, "dome");
         let continent = sim.front.plate_id[0];
@@ -833,6 +836,9 @@ mod tests {
         // Recycling would eat the coast back to the cratons, which it spares.
         sim.tuning.continental_area_target = 0.0;
         sim.tuning.continental_recycling_rate = 0.0;
+        // The hot mantle that grows keels, without plumes raising keeled
+        // plateaus of their own along the coast.
+        sim.tuning.plume_rate = 0.0;
         sim.crack_great_circles(1, "craton");
         let continent = sim.front.plate_id[0];
         let d = &mut sim.front;

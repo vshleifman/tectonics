@@ -731,9 +731,10 @@ fn split_craton_share(sim: &Sim) -> f64 {
     if total > 0.0 { split / total } else { 0.0 }
 }
 
-/// Connected cratons: how many, their mean area (share of the globe), and
+/// Connected cratons: how many, their mean area (share of the globe), the
+/// share of all craton area in specks too small to count, and
 /// their area-weighted mean aspect.
-fn cratons(sim: &Sim) -> (usize, f64, f64) {
+fn cratons(sim: &Sim) -> (usize, f64, f64, f64) {
     let mesh = &sim.mesh;
     let d = sim.front();
     let n = mesh.cell_count;
@@ -741,6 +742,7 @@ fn cratons(sim: &Sim) -> (usize, f64, f64) {
     let is = |i: usize| d.crust_type[i] == CONTINENTAL && d.keel[i] >= CRATON_KEEL;
     let mut seen = vec![false; n];
     let (mut groups, mut areas) = (Vec::new(), Vec::new());
+    let (mut all, mut specks) = (0.0, 0.0);
     for start in 0..n {
         if seen[start] || !is(start) {
             continue;
@@ -760,17 +762,21 @@ fn cratons(sim: &Sim) -> (usize, f64, f64) {
                 }
             }
         }
+        all += area;
         if area >= MIN_CRATON_SHARE * globe {
             groups.push(m);
             areas.push(area);
+        } else {
+            specks += area;
         }
     }
+    let speckled = if all > 0.0 { specks / all } else { 0.0 };
     if groups.is_empty() {
-        return (0, 0.0, 0.0);
+        return (0, 0.0, 0.0, speckled);
     }
     let (aspect, _) = shape_summary(&groups, &areas);
     let mean = areas.iter().sum::<f64>() / areas.len() as f64 / globe;
-    (groups.len(), mean, aspect)
+    (groups.len(), mean, aspect, speckled)
 }
 
 fn len(v: [f64; 3]) -> f64 {
@@ -965,6 +971,7 @@ fn main() {
             "basin_infill_max_area" => t.basin_infill_max_area = value,
             "continental_nucleation_thickness" => t.continental_nucleation_thickness = value,
             "min_continent_area" => t.min_continent_area = value,
+            "min_craton_area" => t.min_craton_area = value,
             "cohesion_reach" => t.cohesion_reach = value,
             "continental_area_target" => t.continental_area_target = value,
             "continental_recycling_rate" => t.continental_recycling_rate = value,
@@ -1183,7 +1190,7 @@ fn main() {
                 a.main_reach,
                 a.main_cap_reach,
             );
-            let (craton_count, craton_area, craton_aspect) = cratons(&sim);
+            let (craton_count, craton_area, craton_aspect, craton_specks) = cratons(&sim);
             // Continental crust dating from the first ANCIENT_MYR, as a share
             // of the globe, and how much of it still has a keel.
             let (ancient, ancient_keeled) = {
@@ -1221,7 +1228,7 @@ fn main() {
             println!(
                 "era {:>5.0} heat {:.2} plumes {} made_plume {:.3} made_arc {:.3} made_piling {:.3} cratons {} craton_area {:.4} craton_aspect {:.2} craton_share {:.2} \
                  ancient {:.3} ancient_keeled {:.3} overrun {:.3} unplaced {:.3} lost_keeled {:.3} \
-                 plume_alive {:.3} plume_keeled {:.3} plume_anywhere {:.3} craton_split {:.3}",
+                 plume_alive {:.3} plume_keeled {:.3} plume_anywhere {:.3} craton_split {:.3} craton_specks {:.2}",
                 sim.elapsed(),
                 sim.mantle_excess(),
                 sim.active_plumes(),
@@ -1241,6 +1248,7 @@ fn main() {
                 plume_keeled,
                 plume_anywhere,
                 split_craton_share(&sim),
+                craton_specks,
             );
             if tick >= settled {
                 series.push(a);
