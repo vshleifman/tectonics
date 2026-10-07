@@ -6,10 +6,10 @@ use crate::boundaries::{BoundaryField, classify};
 use crate::cell_data::{CellData, total_crust_mass};
 use crate::cohesion::{keep_continents_whole, keep_cratons_whole};
 use crate::craton::update_cratons;
-use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins};
+use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins, lay_new_floor};
 use crate::elevation::apply_elevation;
 use crate::mantle::MantleFlow;
-use crate::math::{len3, read3};
+use crate::math::read3;
 use std::collections::HashMap;
 use crate::mesh::Mesh;
 use crate::metrics::{PlateSummary, WorldMetrics, compute_metrics, summaries};
@@ -32,10 +32,17 @@ use crate::tuning::{SimOptions, Tuning};
 pub const PASS_COUNT: usize = 9;
 /// Most steps one tick is split into, however fast the plates.
 const MAX_SUBSTEPS: usize = 64;
-/// Share of the globe a plate must cover for its speed to set how finely a
-/// tick is split: a sliver spinning fast is left to lag rather than slow
-/// every tick down.
-const SUBSTEP_MIN_PLATE_SHARE: f64 = 0.002;
+/// Share of the globe whose plates must keep up when a tick is split: the
+/// few small plates spinning faster than the rest lag at a cell a step rather
+/// than slow every tick down.
+const SUBSTEP_PLATE_SHARE: f64 = 0.95;
+
+/// Add the time since `mark` to `pass`, and restart the clock.
+fn lap(timings: &mut [f64; PASS_COUNT], mark: &mut f64, pass: usize) {
+    let now = now_ms();
+    timings[pass] += now - *mark;
+    *mark = now;
+}
 
 pub struct Sim {
     pub mesh: Mesh,
@@ -129,43 +136,53 @@ impl Sim {
     }
 
     /// Advance `dt_myr`. Plates move a whole cell at a time, so a tick that
-    /// would carry a plate further than one cell is taken in enough shorter
-    /// steps that none does.
+    /// would carry a plate further than one cell moves them in enough shorter
+    /// steps that none does. Only the transport needs the finer steps: the
+    /// forces, rifting and the life of the crust act over the whole tick.
     pub fn tick(&mut self) {
+        self.timings = [0.0; PASS_COUNT];
+        self.drive_plates();
         let steps = self.substeps();
         self.substeps = steps;
-        let dt = self.tuning.dt_myr / steps as f64;
-        self.timings = [0.0; PASS_COUNT];
-        let mut totals = [0.0f64; 18];
-        for _ in 0..steps {
-            self.step(dt);
-            for (sum, x) in totals.iter_mut().zip(self.advection.step_tallies_mut()) {
-                *sum += *x;
-            }
+        let moved = self.move_plates(steps);
+        for x in self.advection.step_tallies_mut() {
+            *x = 0.0;
         }
-        for (x, sum) in self.advection.step_tallies_mut().into_iter().zip(totals) {
-            *x = sum;
+        self.evolve_crust();
+        for (x, sum) in self.advection.step_tallies_mut().into_iter().zip(moved) {
+            *x += sum;
         }
     }
 
-    /// Steps this tick needs for the fastest plate of any size to move at
-    /// most one cell per step.
-    fn substeps(&self) -> usize {
+    /// Steps this tick needs for the plates covering `SUBSTEP_PLATE_SHARE` of
+    /// the globe, slowest first, to move at most one cell per step.
+    fn substeps(&mut self) -> usize {
         let n = self.mesh.cell_count;
         let width = (4.0 * std::f64::consts::PI / n as f64).sqrt();
         let mut cells: HashMap<i32, usize> = HashMap::new();
         for &p in &self.front.plate_id {
             *cells.entry(p).or_default() += 1;
         }
-        let least = (SUBSTEP_MIN_PLATE_SHARE * n as f64).ceil() as usize;
-        let fastest = self
+        let s = &mut self.scratch;
+        s.pack_plates(&self.plates);
+        s.pack_surface_speeds(&self.mesh, &self.front.plate_id);
+        let mut by_speed: Vec<(f64, usize)> = self
             .plates
             .by_id
-            .iter()
-            .filter(|(id, _)| cells.get(id).is_some_and(|&c| c >= least))
-            .map(|(_, p)| len3(p.omega[0], p.omega[1], p.omega[2]))
-            .fold(0.0f64, f64::max);
-        ((fastest * self.tuning.dt_myr / width).ceil() as usize).clamp(1, MAX_SUBSTEPS)
+            .keys()
+            .map(|id| (s.plate_speed[*id as usize], *cells.get(id).unwrap_or(&0)))
+            .collect();
+        by_speed.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let covered = (SUBSTEP_PLATE_SHARE * n as f64).ceil() as usize;
+        let (mut seen, mut speed) = (0usize, 0.0f64);
+        for (v, c) in by_speed {
+            speed = v;
+            seen += c;
+            if seen >= covered {
+                break;
+            }
+        }
+        ((speed * self.tuning.dt_myr / width).ceil() as usize).clamp(1, MAX_SUBSTEPS)
     }
 
     /// Steps the last tick was taken in.
@@ -173,65 +190,87 @@ impl Sim {
         self.substeps
     }
 
-    fn step(&mut self, dt: f64) {
+    /// The forces on the plates over the coming tick, and the boundaries and
+    /// welds they make.
+    fn drive_plates(&mut self) {
+        let t = &effective_tuning(&self.tuning, self.elapsed);
+        let dt = t.dt_myr;
+        let Sim { mesh, front, plates, boundaries, mantle, scratch, options, timings, .. } = self;
+        let mut mark = now_ms();
+        update_slabs(mesh, front, boundaries, scratch, t, dt);
+        mantle.update(mesh, front, boundaries, dt, t);
+        update_plate_motion(mesh, front, plates, boundaries, mantle, scratch, t, dt);
+        lap(timings, &mut mark, 0);
+        classify(mesh, front, plates, boundaries, scratch, t);
+        lap(timings, &mut mark, 1);
+        update_sutures(mesh, front, plates, boundaries, dt, scratch, t, options);
+        lap(timings, &mut mark, 2);
+    }
+
+    /// Carry the crust through the tick in `steps` equal steps, laying fresh
+    /// floor in the gaps each opens. Returns the steps' tallies, summed.
+    fn move_plates(&mut self, steps: usize) -> [f64; 18] {
+        let t = &effective_tuning(&self.tuning, self.elapsed);
+        let dt = t.dt_myr / steps as f64;
+        let Sim { mesh, front, back, plates, boundaries, advection, scratch, timings, .. } = self;
+        let mut mark = now_ms();
+        let mut moved = [0.0f64; 18];
+        for step in 0..steps {
+            for x in advection.step_tallies_mut() {
+                *x = 0.0;
+            }
+            advect(mesh, front, back, plates, dt, boundaries, advection, scratch, t);
+            lay_new_floor(mesh, back, advection, -((step + 1) as f64) * dt, t);
+            for (sum, x) in moved.iter_mut().zip(advection.step_tallies_mut()) {
+                *sum += *x;
+            }
+            // Advection writes every field of every cell, so the buffers trade.
+            std::mem::swap(front, back);
+            if step + 1 < steps {
+                classify(mesh, front, plates, boundaries, scratch, t);
+            }
+        }
+        lap(timings, &mut mark, 3);
+        moved
+    }
+
+    /// Everything that happens to the crust over the tick but its transport.
+    fn evolve_crust(&mut self) {
+        let t = &effective_tuning(&self.tuning, self.elapsed);
+        let dt = t.dt_myr;
         let Sim {
             mesh,
             front,
-            back,
             plates,
             registry,
             boundaries,
             advection,
-            mantle,
             scratch,
             primordial,
-            tuning,
             options,
             timings,
             elapsed,
             ..
         } = self;
-        let eff = effective_tuning(tuning, *elapsed);
-        let t = &eff;
         let mut mark = now_ms();
-        let mut lap = |pass: usize| {
-            let now = now_ms();
-            timings[pass] += now - mark;
-            mark = now;
-        };
-
-        update_slabs(mesh, front, boundaries, scratch, t, dt);
-        mantle.update(mesh, front, boundaries, dt, t);
-        update_plate_motion(mesh, front, plates, boundaries, mantle, scratch, t, dt);
-        lap(0);
+        update_plate_identity(mesh, front, plates, registry, scratch, t);
+        lap(timings, &mut mark, 4);
+        update_rifting(mesh, front, plates, dt, registry, scratch, t, options);
+        collapse_passive_margins(mesh, front, plates, registry, scratch, t);
+        lap(timings, &mut mark, 5);
+        recycle_continental_margins(mesh, front, dt, advection, t);
+        infill_enclosed_basins(mesh, front, dt, advection, scratch, t);
+        primordial.update(mesh, front, plates, advection, dt, *elapsed, t);
+        apply_crust_lifecycle(mesh, front, dt, advection, scratch, t);
+        keep_continents_whole(mesh, front, advection, scratch, t);
+        track_continental_growth(mesh, front, dt, advection);
+        update_cratons(mesh, front, dt, *elapsed, scratch, t);
+        keep_cratons_whole(mesh, front, scratch, t);
+        lap(timings, &mut mark, 6);
+        apply_elevation(&mesh.arc_cells, front, dt, boundaries, t);
+        lap(timings, &mut mark, 7);
         classify(mesh, front, plates, boundaries, scratch, t);
-        lap(1);
-        update_sutures(mesh, front, plates, boundaries, dt, scratch, t, options);
-        lap(2);
-        advect(
-            mesh, front, back, plates, dt, boundaries, advection, scratch, t,
-        );
-        lap(3);
-        update_plate_identity(mesh, back, plates, registry, scratch, t);
-        lap(4);
-        update_rifting(mesh, back, plates, dt, registry, scratch, t, options);
-        collapse_passive_margins(mesh, back, plates, registry, scratch, t);
-        lap(5);
-        recycle_continental_margins(mesh, back, dt, advection, t);
-        infill_enclosed_basins(mesh, back, dt, advection, scratch, t);
-        primordial.update(mesh, back, plates, advection, dt, *elapsed, t);
-        apply_crust_lifecycle(mesh, back, dt, advection, scratch, t);
-        keep_continents_whole(mesh, back, advection, scratch, t);
-        track_continental_growth(mesh, back, dt, advection);
-        update_cratons(mesh, back, dt, *elapsed, scratch, t);
-        keep_cratons_whole(mesh, back, scratch, t);
-        lap(6);
-        apply_elevation(&mesh.arc_cells, back, dt, boundaries, t);
-        lap(7);
-        // Advection writes every field of every cell, so the buffers trade.
-        std::mem::swap(front, back);
-        classify(mesh, front, plates, boundaries, scratch, t);
-        lap(8);
+        lap(timings, &mut mark, 8);
         *elapsed += dt;
     }
 
@@ -326,6 +365,38 @@ impl Sim {
         summaries(&self.mesh, &self.front, &self.plates)
     }
 
+    /// A hash of every cell field, every plate's motion and the mass ledger:
+    /// two runs that agree on it made the same world, bit for bit.
+    pub fn fingerprint(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        let mut eat = |x: u64| hash = (hash ^ x).wrapping_mul(0x0000_0100_0000_01b3);
+        let d = &self.front;
+        for field in [
+            &d.elevation,
+            &d.age,
+            &d.density,
+            &d.thickness,
+            &d.weakness,
+            &d.mantle_heat,
+            &d.slab,
+            &d.keel,
+            &d.plume_share,
+        ] {
+            field.iter().for_each(|x| eat(x.to_bits() as u64));
+        }
+        d.plate_id.iter().for_each(|&x| eat(x as u32 as u64));
+        d.crust_type.iter().chain(&d.rift_side).for_each(|&x| eat(x as u64));
+        for (&id, p) in &self.plates.by_id {
+            eat(id as u32 as u64);
+            p.omega.iter().for_each(|x| eat(x.to_bits()));
+        }
+        let a = &self.advection;
+        for x in [a.live_mass, a.subducted_total, a.created_total, self.elapsed] {
+            eat(x.to_bits());
+        }
+        hash
+    }
+
     /// Crack every arc whose two cells lie on opposite sides of one of
     /// `planes` random great circles, then build the world on the resulting
     /// plates. A stand-in for the TypeScript crack walk, for native tests and
@@ -361,6 +432,53 @@ impl Sim {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A level 5 world after `ticks`, run on a pool of `threads`, at a tick
+    /// long enough to be split into several steps.
+    #[cfg(feature = "parallel")]
+    fn run_on(threads: usize, ticks: usize) -> Sim {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let mut sim = Sim::new(5);
+            sim.tuning.dt_myr = 6.0;
+            sim.crack_great_circles(5, "threads");
+            for _ in 0..ticks {
+                sim.tick();
+            }
+            sim
+        })
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn the_world_is_the_same_on_one_thread_and_on_four() {
+        let (one, four) = (run_on(1, 40), run_on(4, 40));
+        assert!(one.last_substeps() > 1, "every tick was a single step");
+        let (a, b) = (&one.front, &four.front);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (name, x, y) in [
+            ("elevation", &a.elevation, &b.elevation),
+            ("age", &a.age, &b.age),
+            ("density", &a.density, &b.density),
+            ("thickness", &a.thickness, &b.thickness),
+            ("weakness", &a.weakness, &b.weakness),
+            ("mantle heat", &a.mantle_heat, &b.mantle_heat),
+            ("slab", &a.slab, &b.slab),
+            ("keel", &a.keel, &b.keel),
+            ("plume share", &a.plume_share, &b.plume_share),
+        ] {
+            assert!(bits(x) == bits(y), "{name} differs");
+        }
+        assert!(a.plate_id == b.plate_id, "plates differ");
+        assert!(a.crust_type == b.crust_type, "crust types differ");
+        assert!(a.rift_side == b.rift_side, "rift sides differ");
+        assert_eq!(one.live_mass().to_bits(), four.live_mass().to_bits());
+        assert_eq!(one.mass_drift().to_bits(), four.mass_drift().to_bits());
+        assert_eq!(one.fingerprint(), four.fingerprint());
+    }
 
     #[test]
     fn mass_ledger_closes() {

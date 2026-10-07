@@ -31,6 +31,8 @@ export interface Controls {
   setCellCount: (count: number) => void;
   setPlateCount: (count: number) => void;
   setFps: (fps: number) => void;
+  /** The simulation build running the world, shown with the timings. */
+  setEngine: (engine: string) => void;
   /** Worker ms per tick, and main-thread ms to apply each snapshot. */
   setTimings: (simMs: number, uiMs: number) => void;
   setMassReadout: (liveMass: number, drift: number) => void;
@@ -1357,6 +1359,7 @@ export const createControls = (
     fontSize: "11px",
   } satisfies Partial<CSSStyleDeclaration>);
   timingEl.textContent = "Sim: -- ms/tick · UI: -- ms";
+  let engineLabel = "--";
 
   viewSelect.addEventListener("change", () => {
     store.set({ viewMode: viewSelect.value as ViewMode });
@@ -1593,8 +1596,12 @@ export const createControls = (
     setFps: (fps: number) => {
       fpsEl.textContent = `FPS: ${fps.toFixed(0)}`;
     },
+    setEngine: (engine: string) => {
+      engineLabel = engine;
+    },
     setTimings: (simMs: number, uiMs: number) => {
-      timingEl.textContent = `Sim: ${simMs.toFixed(1)} ms/tick · UI: ${uiMs.toFixed(1)} ms`;
+      const sim = `Sim (${engineLabel}): ${simMs.toFixed(1)} ms/tick`;
+      timingEl.textContent = `${sim} · UI: ${uiMs.toFixed(1)} ms`;
     },
     setMassReadout: (liveMass: number, drift: number) => {
       const driftPct = (drift * 100).toFixed(3);

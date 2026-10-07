@@ -4,6 +4,7 @@
 use crate::boundaries::{BoundaryField, CONVERGENT, DIVERGENT, NONE};
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::math::clamp01;
+use crate::par;
 use crate::tuning::Tuning;
 
 /// How far cooling lithosphere of this age has subsided from the ridge crest
@@ -79,17 +80,13 @@ pub fn apply_elevation(
     }
 
     let relax = clamp01(t.relax_rate * dt_myr);
-    for i in 0..data.elevation.len() {
-        let base = baseline_elevation(
-            t,
-            data.crust_type[i],
-            data.age[i] as f64,
-            data.thickness[i] as f64,
-        );
-        let e = data.elevation[i] as f64;
+    let (crust_type, age, thickness) = (&data.crust_type, &data.age, &data.thickness);
+    par::for_each_mut(&mut data.elevation, |i, elevation| {
+        let base = baseline_elevation(t, crust_type[i], age[i] as f64, thickness[i] as f64);
+        let e = *elevation as f64;
         let e = (e + (base - e) * relax).clamp(t.elevation_min, t.elevation_max);
-        data.elevation[i] = e as f32;
-    }
+        *elevation = e as f32;
+    });
 }
 
 #[cfg(test)]

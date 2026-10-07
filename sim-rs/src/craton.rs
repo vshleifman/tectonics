@@ -31,6 +31,7 @@
 
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::mesh::Mesh;
+use crate::par;
 use crate::primordial::mantle_excess;
 use crate::scratch::Scratch;
 use crate::tuning::Tuning;
@@ -89,42 +90,45 @@ pub fn update_cratons(
     // A craton's crust is of ordinary continental thickness or more; crust
     // that has only just crossed the continental threshold has no root.
     let thick_enough = 2.0 * t.continental_thickness_threshold;
-    for i in 0..n {
-        if data.crust_type[i] != CONTINENTAL {
-            data.keel[i] = 0.0;
-            continue;
+    let hops = &*hops;
+    let (crust_type, thickness, weakness) = (&data.crust_type, &data.thickness, &data.weakness);
+    let (rift_side, age) = (&data.rift_side, &data.age);
+    par::for_each_mut(&mut data.keel, |i, keel| {
+        if crust_type[i] != CONTINENTAL {
+            *keel = 0.0;
+            return;
         }
-        let h = data.thickness[i] as f64;
-        let weak = data.weakness[i];
+        let h = thickness[i] as f64;
+        let weak = weakness[i];
         // A well-rooted craton is rigid: a collision against it deforms the
         // younger crust around it, not its core, which is why orogens wrap
         // cratons rather than cut through them. Only rifting and thinning
         // reach the keel itself.
-        let crushed = weak >= DEFORMED && data.keel[i] < RIGID_KEEL;
+        let crushed = weak >= DEFORMED && *keel < RIGID_KEEL;
         // Every cell of a rifting plate carries the side it is on; only the
         // rift itself, where the sides meet or the new ocean has opened,
         // is being stretched. Rifts skirt cratons (see `rifting.rs`), so it
         // is only a keel still too shallow to be one that a rift can wear.
-        let side = data.rift_side[i];
+        let side = rift_side[i];
         let rifted = side != 0
-            && data.keel[i] < RIGID_KEEL
+            && *keel < RIGID_KEEL
             && ((hops[i] >= 0 && hops[i] as f64 * spacing < t.craton_inland)
                 || mesh.nbrs(i).any(|k| {
-                    let m = data.rift_side[mesh.nbr[k] as usize];
+                    let m = rift_side[mesh.nbr[k] as usize];
                     m != 0 && m != side
                 }));
         if rifted || crushed || h < t.continental_thickness_threshold {
-            let wear = (erode as f64 * t.craton_wear(data.keel[i])) as f32;
-            data.keel[i] = (data.keel[i] - wear).max(0.0);
-            continue;
+            let wear = (erode as f64 * t.craton_wear(*keel)) as f32;
+            *keel = (*keel - wear).max(0.0);
+            return;
         }
         if grow <= 0.0 {
-            continue;
+            return;
         }
         // Never the coastal cell itself, however coarse the mesh.
         let inland = hops[i] < 0 || (hops[i] > 1 && hops[i] as f64 * spacing >= t.craton_inland);
-        if inland && weak < QUIET && h >= thick_enough && data.age[i] as f64 >= t.craton_min_age {
-            data.keel[i] = (data.keel[i] + grow * (1.0 - weak)).min(1.0);
+        if inland && weak < QUIET && h >= thick_enough && age[i] as f64 >= t.craton_min_age {
+            *keel = (*keel + grow * (1.0 - weak)).min(1.0);
         }
-    }
+    });
 }

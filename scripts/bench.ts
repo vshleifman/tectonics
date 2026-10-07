@@ -11,7 +11,7 @@ import {
   parseBenchSpec,
   runBench,
 } from "../src/bench/benchScenario";
-import { initSync } from "../src/sim-wasm/pkg/tectonics_sim.js";
+import { initSync, World } from "../src/sim-wasm/pkg/tectonics_sim.js";
 import { WasmWorld } from "../src/sim-wasm/WasmWorld";
 
 const [specText = "", out] = process.argv.slice(2);
@@ -22,6 +22,10 @@ const bytes = readFileSync(
 );
 const { memory } = initSync({ module: bytes });
 
-const result = runBench("wasm", (level) => new WasmWorld(level, memory), spec);
+const result = runBench(
+  "wasm",
+  (level) => new WasmWorld(level, memory, World),
+  spec,
+);
 console.log(describeBench(result));
 if (out) writeFileSync(out, JSON.stringify(result, null, 1));

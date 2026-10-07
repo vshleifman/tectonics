@@ -240,7 +240,11 @@ const applyViewMode = (): void => {
 };
 
 /** A new world's geometry has arrived: rebuild everything drawn from it. */
-const onMesh = (arrays: ConstructorParameters<typeof ArrayCellMesh>[0]) => {
+const onMesh = (
+  arrays: ConstructorParameters<typeof ArrayCellMesh>[0],
+  _generation: number,
+  engine: string,
+) => {
   if (cellRenderer) {
     scene.remove(cellRenderer.object3D);
     cellRenderer.dispose();
@@ -253,6 +257,7 @@ const onMesh = (arrays: ConstructorParameters<typeof ArrayCellMesh>[0]) => {
   seedCount = 0;
   showSeedOverlay = true;
   ui.setCellCount(cellMesh.cellCount);
+  ui.setEngine(engine);
   applyViewMode();
   applyShowPlates();
 };

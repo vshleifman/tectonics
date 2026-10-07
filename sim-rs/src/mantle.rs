@@ -25,6 +25,7 @@ use crate::boundaries::{BoundaryField, CONVERGENT};
 use crate::cell_data::CellData;
 use crate::math::Vec3;
 use crate::mesh::Mesh;
+use crate::par;
 use crate::slabs::subduction;
 use crate::tuning::Tuning;
 
@@ -119,23 +120,25 @@ impl MantleFlow {
         dt_myr: f64,
         t: &Tuning,
     ) {
-        self.flux.fill(0.0);
-        for a in 0..mesh.arc_count() {
+        let site_of = &self.site_of;
+        let sinking = par::filter_map(mesh.arc_count(), |a| {
             if boundaries.arc_kind[a] != CONVERGENT {
-                continue;
+                return None;
             }
             let (ca, cb) = (mesh.arc_cells[a * 2], mesh.arc_cells[a * 2 + 1]);
             if ca < 0 || cb < 0 {
-                continue;
+                return None;
             }
             let closing = (boundaries.arc_closing[a] as f64).max(0.0);
             if closing <= 0.0 {
-                continue;
+                return None;
             }
-            let Some(sub) = subduction(mesh, data, ca as usize, cb as usize, t) else {
-                continue;
-            };
-            self.flux[self.site_of[sub.down] as usize] += closing * mesh.arc_length[a] as f64;
+            let sub = subduction(mesh, data, ca as usize, cb as usize, t)?;
+            Some((site_of[sub.down], closing * mesh.arc_length[a] as f64))
+        });
+        self.flux.fill(0.0);
+        for (site, flux) in sinking {
+            self.flux[site as usize] += flux;
         }
         let blend = if t.downwelling_memory > 0.0 {
             (dt_myr / t.downwelling_memory).min(1.0)
@@ -150,11 +153,13 @@ impl MantleFlow {
         // long-lived supercontinent from downwelling to upwelling.
         self.source.fill(0.0);
         if t.upwelling_gain > 0.0 {
-            for i in 0..mesh.cell_count {
+            let site_of = &self.site_of;
+            let rising = par::filter_map(mesh.cell_count, |i| {
                 let heat = data.mantle_heat[i] as f64;
-                if heat > 0.0 {
-                    self.source[self.site_of[i] as usize] += t.upwelling_gain * heat * mesh.area(i);
-                }
+                (heat > 0.0).then(|| (site_of[i], t.upwelling_gain * heat * mesh.area(i)))
+            });
+            for (site, up) in rising {
+                self.source[site as usize] += up;
             }
         }
         self.flow();
@@ -167,16 +172,17 @@ impl MantleFlow {
         let near = (NEAR_SITES * spacing).min(std::f64::consts::PI);
         let floor = near.sin().powi(2);
         let per_sink = 1.0 / (4.0 * std::f64::consts::PI);
-        for i in 0..count {
-            let p = self.sites[i];
+        let (sites, sink, source) = (&self.sites, &self.sink, &self.source);
+        par::fill_costly(&mut self.wind, |i| {
+            let p = sites[i];
             let mut u = [0.0f64; 3];
-            for (j, (&down, &up)) in self.sink.iter().zip(&self.source).enumerate() {
+            for (j, (&down, &up)) in sink.iter().zip(source).enumerate() {
                 // Net sink: negative over an upwelling, which flows outward.
                 let q = down - up;
                 if q == 0.0 || j == i {
                     continue;
                 }
-                let s = self.sites[j];
+                let s = sites[j];
                 let cos = p[0] * s[0] + p[1] * s[1] + p[2] * s[2];
                 // Toward the sink along the surface, unnormalised: its length
                 // is sin d.
@@ -188,8 +194,8 @@ impl MantleFlow {
                 u[1] += w * toward[1];
                 u[2] += w * toward[2];
             }
-            self.wind[i] = u;
-        }
+            u
+        });
     }
 }
 

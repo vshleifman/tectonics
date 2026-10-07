@@ -38,6 +38,7 @@ use std::collections::BinaryHeap;
 use crate::cell_data::{CONTINENTAL, CellData, RIFT_FAR, RIFT_NEAR};
 use crate::math::{Vec3, clamp01, cross, dot, len3, normalise, rotate};
 use crate::mesh::Mesh;
+use crate::par;
 use crate::plates::{OpeningRift, PlateData, PlateProps, PlateStress, suture_key};
 use crate::registry::Registry;
 use crate::scratch::Scratch;
@@ -87,9 +88,7 @@ pub fn update_rifting(
 ) {
     // Weakness heals, but barely.
     let keep = (-dt_myr / t.weakness_decay_time.max(1e-6)).exp();
-    for w in data.weakness.iter_mut() {
-        *w = (*w as f64 * keep) as f32;
-    }
+    par::for_each_mut(&mut data.weakness, |_, w| *w = (*w as f64 * keep) as f32);
     if o.supercontinent_insulation {
         insulate(mesh, data, dt_myr, s, t);
     }
@@ -131,11 +130,12 @@ pub fn update_rifting(
     // Rifts on plates that are gone, and the marks of rifts that are.
     let by_id = &plates.by_id;
     plates.opening.retain(|id, _| by_id.contains_key(id));
-    for i in 0..n {
-        if data.rift_side[i] != 0 && !plates.opening.contains_key(&data.plate_id[i]) {
-            data.rift_side[i] = 0;
+    let (opening, plate_id) = (&plates.opening, &data.plate_id);
+    par::for_each_mut(&mut data.rift_side, |i, side| {
+        if *side != 0 && !opening.contains_key(&plate_id[i]) {
+            *side = 0;
         }
-    }
+    });
     s.u8b.fill(0);
 
     // A rift must leave pieces of `min_area` when it starts. By the time it
@@ -234,8 +234,9 @@ fn insulate(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scratch, t: &
         }
     }
     let spacing = (4.0 * std::f64::consts::PI / n as f64).sqrt();
-    for i in 0..n {
-        let rate = if data.crust_type[i] == CONTINENTAL {
+    let (hops, crust_type) = (&*hops, &data.crust_type);
+    par::for_each_mut(&mut data.mantle_heat, |i, heat| {
+        let rate = if crust_type[i] == CONTINENTAL {
             // A world with no ocean left is all interior.
             let inland = if hops[i] < 0 || t.insulation_reach <= 0.0 {
                 1.0
@@ -246,8 +247,8 @@ fn insulate(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scratch, t: &
         } else {
             -t.insulation_cooling
         };
-        data.mantle_heat[i] = clamp01(data.mantle_heat[i] as f64 + rate * dt_myr) as f32;
-    }
+        *heat = clamp01(*heat as f64 + rate * dt_myr) as f32;
+    });
 }
 
 /// Strength of a cell's lithosphere relative to continental, before weakness

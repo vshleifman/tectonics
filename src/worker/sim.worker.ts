@@ -7,7 +7,7 @@ import {
 import { copyMeshArrays } from "../mesh/ArrayCellMesh";
 import { Plates } from "../plates/Plates";
 import type { SimWorld } from "../sim/SimWorld";
-import { loadWorldFactory } from "./engines";
+import { loadEngine } from "./engines";
 import {
   bufferList,
   meshBufferList,
@@ -172,8 +172,8 @@ const handle = async (cmd: SimCommand): Promise<void> => {
       stopLoop();
       world?.dispose();
       world = null;
-      const create = await loadWorldFactory();
-      const next = create(cmd.level);
+      const engine = await loadEngine();
+      const next = engine.create(cmd.level);
       next.setTuning(cmd.tuning);
       next.setSimOptions(cmd.options);
       plates = new Plates(next.mesh);
@@ -186,7 +186,10 @@ const handle = async (cmd: SimCommand): Promise<void> => {
       pool.length = 0;
       for (let i = 0; i < POOL_SIZE; i++) pool.push(allocateBuffers(next));
       const mesh = copyMeshArrays(next.mesh.arrays);
-      post({ type: "meshReady", generation, mesh }, meshBufferList(mesh));
+      post(
+        { type: "meshReady", generation, mesh, engine: engine.label },
+        meshBufferList(mesh),
+      );
       faultsChanged = true;
       statsDue = true;
       publish();
@@ -242,8 +245,8 @@ const handle = async (cmd: SimCommand): Promise<void> => {
 };
 
 const bench = async (spec: BenchSpec): Promise<void> => {
-  const create = await loadWorldFactory();
-  const result = runBench("wasm", create, spec);
+  const engine = await loadEngine();
+  const result = runBench(engine.label, engine.create, spec);
   console.log(describeBench(result));
   post({ type: "benchResult", result });
 };

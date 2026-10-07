@@ -9,6 +9,7 @@ use crate::boundaries::{BoundaryField, CONVERGENT, DIVERGENT};
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::math::clamp01;
 use crate::mesh::Mesh;
+use crate::par;
 use crate::plates::suture_key;
 use crate::scratch::Scratch;
 use crate::tuning::Tuning;
@@ -134,24 +135,20 @@ pub fn update_slabs(
 
     // Which way each plate pair's existing trenches dip, by arc length, so a
     // new stretch of trench joins them rather than dipping the other way.
-    let mut dip: HashMap<i64, f64> = HashMap::new();
-    for a in 0..mesh.arc_count() {
-        let Some((ca, cb)) = margin(mesh, data, a) else {
-            continue;
-        };
+    let dips = par::filter_map(mesh.arc_count(), |a| {
+        let (ca, cb) = margin(mesh, data, a)?;
         if established(mesh, data, ca) <= trace && established(mesh, data, cb) <= trace {
-            continue;
+            return None;
         }
-        let Some(sub) = subduction(mesh, data, ca, cb, t) else {
-            continue;
-        };
+        let sub = subduction(mesh, data, ca, cb, t)?;
         let (pa, pb) = (data.plate_id[ca], data.plate_id[cb]);
         let len = mesh.arc_length[a] as f64;
-        *dip.entry(suture_key(pa, pb)).or_insert(0.0) += if data.plate_id[sub.over] == pa.min(pb) {
-            len
-        } else {
-            -len
-        };
+        let vote = if data.plate_id[sub.over] == pa.min(pb) { len } else { -len };
+        Some((suture_key(pa, pb), vote))
+    });
+    let mut dip: HashMap<i64, f64> = HashMap::new();
+    for (key, vote) in dips {
+        *dip.entry(key).or_insert(0.0) += vote;
     }
     let initiate = |ca: usize, cb: usize| -> usize {
         let (pa, pb) = (data.plate_id[ca], data.plate_id[cb]);
@@ -168,19 +165,13 @@ pub fn update_slabs(
     };
 
     let founder_rate = full / t.slab_initiation_time.max(1e-6);
-    let growth = &mut scratch.f32a;
-    growth.fill(0.0);
-    for a in 0..mesh.arc_count() {
+    let rates = par::filter_map(mesh.arc_count(), |a| {
         let kind = boundaries.arc_kind[a];
         if kind == DIVERGENT {
-            continue;
+            return None;
         }
-        let Some((ca, cb)) = margin(mesh, data, a) else {
-            continue;
-        };
-        let Some(sub) = subduction_with(mesh, data, ca, cb, t, initiate) else {
-            continue;
-        };
+        let (ca, cb) = margin(mesh, data, a)?;
+        let sub = subduction_with(mesh, data, ca, cb, t, initiate)?;
         let closing = if kind == CONVERGENT {
             (boundaries.arc_closing[a] as f64).max(0.0)
         } else {
@@ -195,15 +186,20 @@ pub fn update_slabs(
         } else {
             founder_rate * slab_pull(t, age)
         };
-        let rate = (closing + founder) as f32;
-        growth[sub.over] = growth[sub.over].max(rate);
+        Some((sub.over, (closing + founder) as f32))
+    });
+    let growth = &mut scratch.f32a;
+    growth.fill(0.0);
+    for (over, rate) in rates {
+        growth[over] = growth[over].max(rate);
     }
 
     let keep = (-dt_myr / t.slab_decay_time.max(1e-6)).exp();
-    for i in 0..mesh.cell_count {
-        let slab = (data.slab[i] as f64 * keep + growth[i] as f64 * dt_myr).min(full);
-        data.slab[i] = if slab < trace { 0.0 } else { slab as f32 };
-    }
+    let growth = &*growth;
+    par::for_each_mut(&mut data.slab, |i, slab| {
+        let grown = (*slab as f64 * keep + growth[i] as f64 * dt_myr).min(full);
+        *slab = if grown < trace { 0.0 } else { grown as f32 };
+    });
 }
 
 /// Give every margin that has no slab yet a full one, so a freshly cracked

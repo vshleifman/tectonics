@@ -3,8 +3,9 @@
 //! simulation and was checked against it metric for metric before that was
 //! removed.
 //!
-//! Per-cell passes are written as plain index loops with no ordering
-//! dependency where the algorithm allows, so they can move to rayon later.
+//! Per-cell passes with no ordering dependency run through [`par`], which
+//! spreads them over every core with the `parallel` feature on, giving the
+//! same world whatever the thread count.
 #![allow(clippy::needless_range_loop)]
 
 pub mod advect;
@@ -18,6 +19,7 @@ pub mod mantle;
 pub mod math;
 pub mod mesh;
 pub mod metrics;
+pub mod par;
 pub mod passive_margins;
 pub mod plate_forces;
 pub mod plate_lifecycle;
@@ -37,6 +39,24 @@ pub mod world;
 
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
+
+/// `initThreadPool(threads)` on the JavaScript side: starts the rayon pool's
+/// web workers. Must be awaited before the first world is built.
+#[cfg(all(feature = "parallel", target_arch = "wasm32"))]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
+/// Threads the simulation's passes run on: 1 without the `parallel` feature.
+#[wasm_bindgen]
+pub fn thread_count() -> u32 {
+    #[cfg(feature = "parallel")]
+    {
+        rayon::current_num_threads() as u32
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        1
+    }
+}
 
 /// A world, as seen from JavaScript. Mesh getters copy (they are read once per
 /// world); per-tick fields are exposed as pointers into WASM memory, which the

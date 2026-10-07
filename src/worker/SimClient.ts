@@ -31,8 +31,11 @@ export const platesFromOmegas = (omegas: Float64Array): PlateVelocities => {
 };
 
 export interface SimClientHandlers {
-  /** A new world's mesh, sent once per rebuild before its first snapshot. */
-  onMesh: (mesh: MeshArrays, generation: number) => void;
+  /**
+   * A new world's mesh, sent once per rebuild before its first snapshot, with
+   * the simulation build running it.
+   */
+  onMesh: (mesh: MeshArrays, generation: number, engine: string) => void;
   /** The latest world state; valid until the next snapshot arrives. */
   onSnapshot: (snapshot: Snapshot) => void;
   onBench?: (result: BenchResult) => void;
@@ -116,7 +119,7 @@ export class SimClient {
       case "meshReady":
         this.generation = reply.generation;
         this.latest = null;
-        this.handlers.onMesh(reply.mesh, reply.generation);
+        this.handlers.onMesh(reply.mesh, reply.generation, reply.engine);
         return;
       case "snapshot": {
         const snapshot = reply.snapshot;

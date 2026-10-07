@@ -59,7 +59,13 @@ export interface Snapshot {
 }
 
 export type SimReply =
-  | { type: "meshReady"; generation: number; mesh: MeshArrays }
+  | {
+      type: "meshReady";
+      generation: number;
+      mesh: MeshArrays;
+      /** The simulation build running the world, for display. */
+      engine: string;
+    }
   | { type: "snapshot"; snapshot: Snapshot }
   | { type: "benchResult"; result: BenchResult }
   | { type: "error"; message: string };

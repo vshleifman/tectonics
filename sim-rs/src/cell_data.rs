@@ -70,9 +70,6 @@ pub fn mixed_share(current: f32, before: f64, added: f64, share: f64) -> f32 {
 
 /// Total live crust mass: the sum of `area * thickness` over every cell.
 pub fn total_crust_mass(areas: &[f32], data: &CellData) -> f64 {
-    areas
-        .iter()
-        .zip(&data.thickness)
-        .map(|(&a, &t)| a as f64 * t as f64)
-        .sum()
+    let thickness = &data.thickness;
+    crate::par::sum(areas.len(), |i| areas[i] as f64 * thickness[i] as f64)
 }

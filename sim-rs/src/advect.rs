@@ -7,8 +7,9 @@
 use crate::boundaries::{BoundaryField, CONVERGENT};
 use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, mixed_share};
 use crate::mesh::Mesh;
+use crate::par::{self, Disjoint};
 use crate::plates::PlateData;
-use crate::scratch::{MAX_NBRS, Scratch};
+use crate::scratch::{MAX_NBRS, PackedPlates, Scratch};
 use crate::tuning::{CRATON_KEEL, Tuning};
 use std::collections::HashMap;
 
@@ -235,19 +236,16 @@ pub fn advect(
     let mut eroded_this_step = 0.0f64;
     let mut delaminated_this_step = 0.0f64;
     let mut foundered_this_step = 0.0f64;
-
-    // Mantle heat belongs to the mantle, not the crust, so it stays put.
-    dst.mantle_heat.copy_from_slice(&src.mantle_heat);
-
     let width = (4.0 * std::f64::consts::PI / n as f64).sqrt();
 
     // --- Quantised rigid motion ----------------------------------------------
+    // A plate steps when its fastest-moving crust has gone a cell.
     s.pack_plates(plates);
+    s.pack_surface_speeds(mesh, &src.plate_id);
     s.plate_flag.fill(0);
     for (&id, props) in plates.by_id.iter_mut() {
-        let w = props.omega;
-        props.pending = (props.pending + (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt() * dt_myr)
-            .min(2.0 * width);
+        props.pending =
+            (props.pending + s.plate_speed[id as usize] * dt_myr).min(2.0 * width);
         if props.pending >= width {
             props.pending -= width;
             props.steps = props.steps.wrapping_add(1);
@@ -264,17 +262,16 @@ pub fn advect(
     };
     let is_stepping = |p: i32| flag(p) != 0;
     let hands_over_ridge = |p: i32| flag(p) == 2;
+    let packed = PackedPlates::of(&s.plate_omega, &s.plate_live);
 
     // --- Where this step carries each cell's crust ---------------------------
-    s.forward.fill(-1);
-    s.forward_arc.fill(-1);
     let c = &mesh.centres;
-    for cell in 0..n {
+    par::fill_pair(&mut s.forward, &mut s.forward_arc, |cell| {
         let plate = src.plate_id[cell];
-        if !is_stepping(plate) || !s.is_live(plate) {
-            continue;
+        if !is_stepping(plate) || !packed.is_live(plate) {
+            return (-1, -1);
         }
-        let w = s.omega(plate);
+        let w = packed.omega(plate);
         let (px, py, pz) = (
             c[cell * 3] as f64,
             c[cell * 3 + 1] as f64,
@@ -285,7 +282,7 @@ pub fn advect(
         let vz = w[0] * py - w[1] * px;
         let speed = (vx * vx + vy * vy + vz * vz).sqrt();
         if speed == 0.0 {
-            continue;
+            return (-1, -1);
         }
         let mut best = -1;
         let mut best_arc = -1;
@@ -301,9 +298,8 @@ pub fn advect(
                 best_arc = mesh.nbr_arc[k];
             }
         }
-        s.forward[cell] = best;
-        s.forward_arc[cell] = best_arc;
-    }
+        (best, best_arc)
+    });
 
     // Does `a`'s crust ride over `b`'s when the two meet? Between ocean floors
     // the younger, more buoyant one does. Between continents the craton does:
@@ -347,36 +343,34 @@ pub fn advect(
         }
     };
 
-    let mut contacts = 0usize;
-    let mut margins: HashMap<i64, (f64, f64)> = HashMap::new();
-    for cell in 0..n {
+    // Crust heading across a convergent margin into another plate's cell, in
+    // cell order.
+    let contacts: Vec<(usize, usize)> = par::filter_map(n, |cell| {
         let plate = src.plate_id[cell];
         let d = s.forward[cell];
         if plate < 0 || d < 0 {
-            continue;
+            return None;
         }
         let d = d as usize;
         let held = src.plate_id[d];
         if held < 0 || held == plate {
-            continue;
+            return None;
         }
         let arc = s.forward_arc[cell];
         if arc < 0 || boundaries.arc_kind[arc as usize] != CONVERGENT {
-            continue;
+            return None;
         }
-        s.from_cell[contacts] = cell as i32;
-        s.onto_cell[contacts] = d as i32;
-        contacts += 1;
-        let tally = margins
-            .entry(plate as i64 * 65536 + held as i64)
-            .or_insert((0.0, 0.0));
+        Some((cell, d))
+    });
+    let mut margins: HashMap<i64, (f64, f64)> = HashMap::new();
+    for &(cell, d) in &contacts {
+        let key = src.plate_id[cell] as i64 * 65536 + src.plate_id[d] as i64;
+        let tally = margins.entry(key).or_insert((0.0, 0.0));
         tally.0 += buoyancy(cell);
         tally.1 += buoyancy(d);
     }
 
-    for i in 0..contacts {
-        let cell = s.from_cell[i] as usize;
-        let d = s.onto_cell[i] as usize;
+    for &(cell, d) in &contacts {
         let plate = src.plate_id[cell];
         let Some(&(mine, theirs)) = margins.get(&(plate as i64 * 65536 + src.plate_id[d] as i64))
         else {
@@ -428,17 +422,15 @@ pub fn advect(
     // meets there, rather than holding up the plate behind it. The front locks
     // only where the plate rides over but could not take the cell ahead, or
     // where continent meets a plate it cannot go under.
-    s.stalled.fill(0);
-    let mut jam_len = 0usize;
-    for cell in 0..n {
+    let locked = par::filter_map(n, |cell| {
         let plate = src.plate_id[cell];
         let ahead = s.forward[cell];
         if plate < 0 || ahead < 0 {
-            continue;
+            return None;
         }
         let ahead = ahead as usize;
         if src.plate_id[ahead] == plate || s.new_plate[ahead] == plate {
-            continue;
+            return None;
         }
         let held = src.plate_id[ahead];
         let arc = s.forward_arc[cell];
@@ -453,39 +445,25 @@ pub fn advect(
                 .is_some_and(|&(mine, theirs)| mine < theirs);
             rides_over && overrides(cell, ahead)
         };
-        if !locked {
-            continue;
-        }
+        locked.then_some(cell)
+    });
+    s.stalled.fill(0);
+    let mut jam_len = 0usize;
+    for cell in locked {
         s.stalled[cell] = 1;
         s.queue[jam_len] = cell as i32;
         jam_len += 1;
     }
-    s.behind_start.fill(0);
-    for cell in 0..n {
-        let f = s.forward[cell];
-        if f >= 0 {
-            s.behind_start[f as usize + 1] += 1;
-        }
-    }
-    for i in 0..n {
-        s.behind_start[i + 1] += s.behind_start[i];
-    }
-    s.fill.copy_from_slice(&s.behind_start[..n]);
-    for cell in 0..n {
-        let f = s.forward[cell];
-        if f >= 0 {
-            let f = f as usize;
-            s.behind[s.fill[f] as usize] = cell as i32;
-            s.fill[f] += 1;
-        }
-    }
+    // Crust heading into a stalled cell is held up behind it. What heads into
+    // a cell is always beside it, so the jam spreads neighbour by neighbour.
     let mut head = 0;
     while head < jam_len {
         let tc = s.queue[head] as usize;
         head += 1;
-        for k in s.behind_start[tc] as usize..s.behind_start[tc + 1] as usize {
-            let b = s.behind[k] as usize;
-            if s.stalled[b] != 0 || src.plate_id[b] != src.plate_id[tc] {
+        for k in range(tc) {
+            let b = nbr[k] as usize;
+            let heading_in = s.forward[b] == tc as i32 && src.plate_id[b] == src.plate_id[tc];
+            if !heading_in || s.stalled[b] != 0 {
                 continue;
             }
             s.stalled[b] = 1;
@@ -495,70 +473,85 @@ pub fn advect(
     }
 
     // --- Pass 2: transport, as an exact permutation --------------------------
-    s.source_of.fill(-1);
-    s.claimed.fill(0);
+    // Each destination writes only its own slots, and the keys of those with
+    // candidates come back in cell order.
+    let keys = {
+        let source_of = Disjoint::new(&mut s.source_of);
+        let claimed = Disjoint::new(&mut s.claimed);
+        let cand = Disjoint::new(&mut s.cand);
+        let cand_count = Disjoint::new(&mut s.cand_count);
+        let (forward, new_plate, stalled) = (&s.forward, &s.new_plate, &s.stalled);
+        par::filter_map(n, |d| {
+            // Safety: iteration `d` alone touches index `d` of `source_of`,
+            // `claimed` and `cand_count`, and `cand`'s slots for `d`.
+            unsafe {
+                source_of.set(d, -1);
+                claimed.set(d, 0);
+            }
+            let plate = new_plate[d];
+            if plate < 0 {
+                return None;
+            }
+            let keeps_own = src.plate_id[d] == plate;
+            if !is_stepping(plate) || (stalled[d] != 0 && keeps_own) {
+                if keeps_own {
+                    unsafe {
+                        source_of.set(d, d as i32);
+                        claimed.set(d, 1);
+                    }
+                }
+                return None;
+            }
+            if !packed.is_live(plate) {
+                return None;
+            }
+            let w = packed.omega(plate);
+            let (px, py, pz) = (c[d * 3] as f64, c[d * 3 + 1] as f64, c[d * 3 + 2] as f64);
+            let vx = w[1] * pz - w[2] * py;
+            let vy = w[2] * px - w[0] * pz;
+            let vz = w[0] * py - w[1] * px;
+            let speed = (vx * vx + vy * vy + vz * vz).sqrt();
+            let inv = if speed == 0.0 { 0.0 } else { -1.0 / speed };
+            let mut cands = [0i32; MAX_NBRS];
+            let mut scores = [0.0f32; MAX_NBRS];
+            let mut count = 0usize;
+            for k in range(d) {
+                let src_cell = nbr[k];
+                if src.plate_id[src_cell as usize] != plate {
+                    continue;
+                }
+                let score = (chord[k * 3] as f64 * vx
+                    + chord[k * 3 + 1] as f64 * vy
+                    + chord[k * 3 + 2] as f64 * vz)
+                    * inv
+                    + if forward[src_cell as usize] == d as i32 {
+                        2.0
+                    } else {
+                        0.0
+                    };
+                let mut i = count;
+                while i > 0 && (scores[i - 1] as f64) < score {
+                    cands[i] = cands[i - 1];
+                    scores[i] = scores[i - 1];
+                    i -= 1;
+                }
+                cands[i] = src_cell;
+                scores[i] = score as f32;
+                count += 1;
+            }
+            unsafe {
+                cand_count.set(d, count as i32);
+                for (i, &cell) in cands[..count].iter().enumerate() {
+                    cand.set(d * MAX_NBRS + i, cell);
+                }
+            }
+            (count > 0).then(|| descending_key(scores[0], d as u32))
+        })
+    };
     s.order.clear();
-    for d in 0..n {
-        let plate = s.new_plate[d];
-        if plate < 0 {
-            continue;
-        }
-        if !is_stepping(plate) {
-            if src.plate_id[d] == plate {
-                s.source_of[d] = d as i32;
-                s.claimed[d] = 1;
-            }
-            continue;
-        }
-        if s.stalled[d] != 0 && src.plate_id[d] == plate {
-            s.source_of[d] = d as i32;
-            s.claimed[d] = 1;
-            continue;
-        }
-        if !s.is_live(plate) {
-            continue;
-        }
-        let w = s.omega(plate);
-        let (px, py, pz) = (c[d * 3] as f64, c[d * 3 + 1] as f64, c[d * 3 + 2] as f64);
-        let vx = w[1] * pz - w[2] * py;
-        let vy = w[2] * px - w[0] * pz;
-        let vz = w[0] * py - w[1] * px;
-        let speed = (vx * vx + vy * vy + vz * vz).sqrt();
-        let inv = if speed == 0.0 { 0.0 } else { -1.0 / speed };
-        let base = d * MAX_NBRS;
-        let mut count = 0usize;
-        for k in range(d) {
-            let src_cell = nbr[k];
-            if src.plate_id[src_cell as usize] != plate {
-                continue;
-            }
-            let score = (chord[k * 3] as f64 * vx
-                + chord[k * 3 + 1] as f64 * vy
-                + chord[k * 3 + 2] as f64 * vz)
-                * inv
-                + if s.forward[src_cell as usize] == d as i32 {
-                    2.0
-                } else {
-                    0.0
-                };
-            let mut i = count;
-            while i > 0 && (s.cand_score[base + i - 1] as f64) < score {
-                s.cand[base + i] = s.cand[base + i - 1];
-                s.cand_score[base + i] = s.cand_score[base + i - 1];
-                i -= 1;
-            }
-            s.cand[base + i] = src_cell;
-            s.cand_score[base + i] = score as f32;
-            count += 1;
-        }
-        s.cand_count[d] = count as i32;
-        if count == 0 {
-            continue;
-        }
-        s.order.push(descending_key(s.cand_score[base], d as u32));
-    }
+    s.order.extend_from_slice(&keys);
     // Best-aligned pairs first; ties by cell index, as a stable sort would.
-    s.order.sort_unstable();
+    par::sort_unstable(&mut s.order);
     for q in 0..s.order.len() {
         let d = (s.order[q] & 0xffff_ffff) as usize;
         let base = d * MAX_NBRS;
@@ -638,7 +631,7 @@ pub fn advect(
             continue;
         }
         torn += area(start);
-        let w = s.omega(plate);
+        let w = packed.omega(plate);
         let mut hole = Some(start);
         chain.clear();
         for _ in 0..HOLE_CHAIN_LIMIT {
@@ -709,16 +702,17 @@ pub fn advect(
     // rather than staying where the margin was, and each side grows by half
     // the spreading.
     let mut owner = std::mem::take(&mut s.i32b);
-    owner.copy_from_slice(&s.new_plate);
-    for d in 0..n {
+    par::copy(&mut owner, &s.new_plate);
+    let (source_of, claimed) = (&s.source_of, &s.claimed);
+    par::for_each_mut(&mut s.new_plate, |d, new_plate| {
         let plate = owner[d];
-        if plate < 0 || s.source_of[d] >= 0 || s.claimed[d] == 0 || !hands_over_ridge(plate) {
-            continue;
+        if plate < 0 || source_of[d] >= 0 || claimed[d] == 0 || !hands_over_ridge(plate) {
+            return;
         }
         let (mut beyond, mut most) = (-1, 0);
         for k in range(d) {
             let q = owner[nbr[k] as usize];
-            if q < 0 || q == plate || !s.is_live(q) {
+            if q < 0 || q == plate || !packed.is_live(q) {
                 continue;
             }
             let count = range(d).filter(|&j| owner[nbr[j] as usize] == q).count();
@@ -728,7 +722,7 @@ pub fn advect(
             }
         }
         if beyond < 0 {
-            continue;
+            return;
         }
         let closing = range(d).any(|k| {
             let arc = mesh.nbr_arc[k];
@@ -737,63 +731,78 @@ pub fn advect(
                 && boundaries.arc_kind[arc as usize] == CONVERGENT
         });
         if !closing {
-            s.new_plate[d] = beyond;
+            *new_plate = beyond;
         }
-    }
+    });
     s.i32b = owner;
 
-    let copy_cell = |dst: &mut CellData, source: usize, dest: usize| {
-        dst.elevation[dest] = src.elevation[source];
-        dst.plate_id[dest] = src.plate_id[source];
-        dst.crust_type[dest] = src.crust_type[source];
-        dst.age[dest] = src.age[source];
-        dst.density[dest] = src.density[source];
-        dst.weakness[dest] = src.weakness[source];
-        dst.slab[dest] = src.slab[source];
-        dst.rift_side[dest] = src.rift_side[source];
-        dst.keel[dest] = src.keel[source];
-        dst.plume_share[dest] = src.plume_share[source];
-        dst.thickness[dest] = if source == dest {
-            src.thickness[source]
-        } else {
-            (src.thickness[source] as f64 * area(source) / area(dest)) as f32
-        };
-    };
-
-    for d in 0..n {
-        let plate = s.new_plate[d];
-        if plate < 0 {
-            copy_cell(dst, d, d);
-            continue;
-        }
-        let source = s.source_of[d];
-        if source < 0 {
-            if s.claimed[d] != 0 {
-                // Leave an empty rift placeholder for the crust lifecycle.
-                dst.elevation[d] = 0.0;
-                dst.plate_id[d] = plate;
-                dst.crust_type[d] = OCEANIC;
-                dst.age[d] = 0.0;
-                dst.density[d] = t.rift_density as f32;
-                dst.thickness[d] = 0.0;
-                dst.weakness[d] = 0.0;
-                dst.slab[d] = 0.0;
-                dst.rift_side[d] = 0;
-                dst.keel[d] = 0.0;
-                dst.plume_share[d] = 0.0;
-                out.rift_cell[d] = 1;
-            } else {
-                copy_cell(dst, d, d);
-                dst.plate_id[d] = plate;
-                s.claimed[d] = 1;
-                out.winner[d] = d as i32;
+    // Where each destination's crust comes from: a source cell, itself, or
+    // `RIFT` for an empty placeholder left for the crust lifecycle.
+    const RIFT: i32 = -1;
+    let mut from = std::mem::take(&mut s.i32a);
+    {
+        let from = Disjoint::new(&mut from);
+        let claimed = Disjoint::new(&mut s.claimed);
+        let winner = Disjoint::new(&mut out.winner);
+        let rift_cell = Disjoint::new(&mut out.rift_cell);
+        let (new_plate, source_of) = (&s.new_plate, &s.source_of);
+        par::for_each(n, |d| {
+            let source = source_of[d];
+            // Safety: iteration `d` alone touches index `d` of each.
+            unsafe {
+                if new_plate[d] < 0 {
+                    from.set(d, d as i32);
+                } else if source >= 0 {
+                    from.set(d, source);
+                    winner.set(d, source);
+                } else if claimed.get(d) != 0 {
+                    from.set(d, RIFT);
+                    rift_cell.set(d, 1);
+                } else {
+                    from.set(d, d as i32);
+                    claimed.set(d, 1);
+                    winner.set(d, d as i32);
+                }
             }
-            continue;
-        }
-        copy_cell(dst, source as usize, d);
-        dst.plate_id[d] = plate;
-        out.winner[d] = source;
+        });
     }
+    // Every field is gathered from where its crust came from. Mantle heat
+    // belongs to the mantle, not the crust, so it is never moved.
+    let gather = |out: &mut [f32], field: &[f32], rift: f32| {
+        par::fill(out, |d| match from[d] {
+            RIFT => rift,
+            f => field[f as usize],
+        });
+    };
+    gather(&mut dst.elevation, &src.elevation, 0.0);
+    gather(&mut dst.age, &src.age, 0.0);
+    gather(&mut dst.density, &src.density, t.rift_density as f32);
+    gather(&mut dst.weakness, &src.weakness, 0.0);
+    gather(&mut dst.slab, &src.slab, 0.0);
+    gather(&mut dst.keel, &src.keel, 0.0);
+    gather(&mut dst.plume_share, &src.plume_share, 0.0);
+    par::fill(&mut dst.crust_type, |d| match from[d] {
+        RIFT => OCEANIC,
+        f => src.crust_type[f as usize],
+    });
+    par::fill(&mut dst.rift_side, |d| match from[d] {
+        RIFT => 0,
+        f => src.rift_side[f as usize],
+    });
+    par::fill(&mut dst.thickness, |d| match from[d] {
+        RIFT => 0.0,
+        f if f as usize == d => src.thickness[d],
+        f => {
+            let f = f as usize;
+            (src.thickness[f] as f64 * area(f) / area(d)) as f32
+        }
+    });
+    par::fill(&mut dst.plate_id, |d| match s.new_plate[d] {
+        p if p < 0 => src.plate_id[d],
+        p => p,
+    });
+    par::copy(&mut dst.mantle_heat, &src.mantle_heat);
+    s.i32a = from;
 
     // --- Pass 3: dispose of the crust that had nowhere to go -----------------
     out.torn_continent = 0.0;
@@ -857,71 +866,100 @@ pub fn advect(
     let max_gain = t.max_thickening_per_myr * dt_myr;
     let mut surplus = std::mem::take(&mut s.f32a);
     let mut next = std::mem::take(&mut s.f32b);
-    let mut headroom = std::mem::take(&mut s.f32c);
     let mut incoming = std::mem::take(&mut s.f32d);
     surplus.fill(0.0);
+    // Cells holding surplus, in order, and the cells it went to this round.
+    let mut active: Vec<usize> = Vec::new();
+    let mut touched: Vec<usize> = Vec::new();
     // `margin_eroded` is reused after the strip as remaining accretion this
-    // cell may still absorb at the thickening cap.
-    for d in 0..n {
-        // A cratonic keel is too deep and buoyant for the trench to scrape.
-        let eroded_h = out.margin_eroded[d] as f64
-            * (1.0 - dst.keel[d] as f64)
-            * t.craton_wear(dst.keel[d]);
-        if eroded_h > 0.0 && out.rift_cell[d] == 0 {
-            let available = (dst.thickness[d] as f64 - t.rift_thickness_floor).max(0.0);
-            let take = eroded_h.min(available);
-            add_f32(&mut dst.thickness[d], -take);
-            eroded_this_step += take * area(d);
-            subducted_this_step += take * area(d);
+    // cell may still absorb at the thickening cap. Each cell sees only its
+    // own slots; what it strips and whether it has surplus come back in cell
+    // order.
+    let gains = {
+        let thickness = Disjoint::new(&mut dst.thickness);
+        let plume_share = Disjoint::new(&mut dst.plume_share);
+        let margin_eroded = Disjoint::new(&mut out.margin_eroded);
+        let surplus = Disjoint::new(&mut surplus);
+        let (keel, rift_cell, accreted) = (&dst.keel, &out.rift_cell, &out.accreted);
+        par::chunks(n, |cells| {
+            let (mut stripped, mut held) = (Vec::new(), Vec::new());
+            // Safety: iteration `d` alone touches index `d` of each.
+            for d in cells {
+                unsafe {
+                    // A cratonic keel is too deep and buoyant for the trench
+                    // to scrape.
+                    let eroded_h = margin_eroded.get(d) as f64
+                        * (1.0 - keel[d] as f64)
+                        * t.craton_wear(keel[d]);
+                    if eroded_h > 0.0 && rift_cell[d] == 0 {
+                        let h = thickness.get(d) as f64;
+                        let available = (h - t.rift_thickness_floor).max(0.0);
+                        let take = eroded_h.min(available);
+                        thickness.set(d, (h - take) as f32);
+                        stripped.push(take * area(d));
+                    }
+                    let room = if rift_cell[d] != 0 { 0.0 } else { max_gain as f32 };
+                    margin_eroded.set(d, room);
+                    let acc = accreted[d] as f64;
+                    if acc <= 0.0 {
+                        continue;
+                    }
+                    let h = thickness.get(d) as f64;
+                    let cap_room = if rift_cell[d] != 0 {
+                        0.0
+                    } else {
+                        (thickness_cap - h).max(0.0)
+                    };
+                    let take = acc.min(room as f64).min(cap_room);
+                    plume_share.set(d, mixed_share(plume_share.get(d), h, take, 0.0));
+                    thickness.set(d, (h + take) as f32);
+                    margin_eroded.set(d, (room as f64 - take) as f32);
+                    let left = (acc - take) as f32;
+                    surplus.set(d, left);
+                    if left > 0.0 {
+                        held.push(d);
+                    }
+                }
+            }
+            (stripped, held)
+        })
+    };
+    for (stripped, held) in gains {
+        for mass in stripped {
+            eroded_this_step += mass;
+            subducted_this_step += mass;
         }
-        out.margin_eroded[d] = if out.rift_cell[d] != 0 {
-            0.0
-        } else {
-            max_gain as f32
-        };
-        let acc = out.accreted[d] as f64;
-        if acc <= 0.0 {
-            continue;
-        }
-        let cap_room = if out.rift_cell[d] != 0 {
-            0.0
-        } else {
-            (thickness_cap - dst.thickness[d] as f64).max(0.0)
-        };
-        let take = acc.min(out.margin_eroded[d] as f64).min(cap_room);
-        dst.plume_share[d] = mixed_share(dst.plume_share[d], dst.thickness[d] as f64, take, 0.0);
-        add_f32(&mut dst.thickness[d], take);
-        out.margin_eroded[d] = (out.margin_eroded[d] as f64 - take) as f32;
-        surplus[d] = (acc - take) as f32;
+        active.extend(held);
     }
 
+    // Surplus only ever sits at a few cells along margins, so each round
+    // visits those, in order, and the cells they hand it to, rather than the
+    // whole globe. `incoming` and `next` are kept clear between rounds.
+    let accreting_room = |dst: &CellData, rift_cell: &[u8], eroded: &[f32], m: usize| -> f64 {
+        if rift_cell[m] != 0 {
+            0.0
+        } else {
+            (thickness_cap - dst.thickness[m] as f64)
+                .max(0.0)
+                .min(eroded[m] as f64) as f32 as f64
+        }
+    };
+    incoming.fill(0.0);
+    next.fill(0.0);
     for _round in 0..PLACEMENT_ROUNDS {
-        if !surplus.iter().any(|&x| x > 0.0) {
+        if active.is_empty() {
             break;
         }
-        for d in 0..n {
-            headroom[d] = if out.rift_cell[d] != 0 {
-                0.0
-            } else {
-                (thickness_cap - dst.thickness[d] as f64)
-                    .max(0.0)
-                    .min(out.margin_eroded[d] as f64) as f32
-            };
-        }
-        incoming.fill(0.0);
-        next.fill(0.0);
-        for d in 0..n {
+        touched.clear();
+        for &d in &active {
             let have = surplus[d] as f64;
-            if have <= 0.0 {
-                continue;
-            }
             let own = dst.plate_id[d];
             let accepts = |m: usize| dst.plate_id[m] == own && out.rift_cell[m] == 0;
             let mut room = 0.0f64;
             for k in range(d) {
                 let m = nbr[k] as usize;
                 if accepts(m) {
-                    room += headroom[m] as f64;
+                    room += accreting_room(dst, &out.rift_cell, &out.margin_eroded, m);
                 }
             }
             let crowded = room <= 0.0;
@@ -929,7 +967,7 @@ pub fn advect(
                 if crowded {
                     1.0 / (1.0 + dst.thickness[m] as f64)
                 } else {
-                    headroom[m] as f64
+                    accreting_room(dst, &out.rift_cell, &out.margin_eroded, m)
                 }
             };
             let mut weight = 0.0f64;
@@ -953,14 +991,20 @@ pub fn advect(
                     continue;
                 }
                 add_f32(&mut incoming[m], have * (w / weight) * area(d) / area(m));
+                if s.u8a[m] == 0 {
+                    s.u8a[m] = 1;
+                    touched.push(m);
+                }
             }
         }
-        for d in 0..n {
+        for &d in &touched {
+            s.u8a[d] = 0;
             let inc = incoming[d] as f64;
+            incoming[d] = 0.0;
             if inc == 0.0 {
                 continue;
             }
-            let place = inc.min(headroom[d] as f64);
+            let place = inc.min(accreting_room(dst, &out.rift_cell, &out.margin_eroded, d));
             dst.plume_share[d] =
                 mixed_share(dst.plume_share[d], dst.thickness[d] as f64, place, 0.0);
             add_f32(&mut dst.thickness[d], place);
@@ -968,74 +1012,95 @@ pub fn advect(
             add_f32(&mut next[d], inc - place);
         }
         std::mem::swap(&mut surplus, &mut next);
-    }
-    for d in 0..n {
-        if surplus[d] > 0.0 {
-            foundered_this_step += surplus[d] as f64 * area(d);
-            subducted_this_step += surplus[d] as f64 * area(d);
-            surplus[d] = 0.0;
+        for &d in &active {
+            next[d] = 0.0;
         }
+        active.extend_from_slice(&touched);
+        active.retain(|&d| surplus[d] > 0.0);
+        active.sort_unstable();
+        active.dedup();
     }
+    for &d in &active {
+        foundered_this_step += surplus[d] as f64 * area(d);
+        subducted_this_step += surplus[d] as f64 * area(d);
+        surplus[d] = 0.0;
+    }
+    active.clear();
 
     out.spill_share.fill(0.0);
-    for d in 0..n {
-        let welded = out.welded[d] as f64;
-        if welded == 0.0 {
-            continue;
-        }
-        let welded_tracer = (out.welded_share[d] as f64 / welded).clamp(0.0, 1.0);
-        let held = if out.rift_cell[d] != 0 {
+    let spilling = {
+        let age = Disjoint::new(&mut dst.age);
+        let keel = Disjoint::new(&mut dst.keel);
+        let plume_share = Disjoint::new(&mut dst.plume_share);
+        let thickness = Disjoint::new(&mut dst.thickness);
+        let surplus = Disjoint::new(&mut surplus);
+        let spill_share = Disjoint::new(&mut out.spill_share);
+        let crust_type = &dst.crust_type;
+        par::filter_map(n, |d| {
+            let welded = out.welded[d] as f64;
+            if welded == 0.0 {
+                return None;
+            }
+            // Safety: iteration `d` alone touches index `d` of each.
+            unsafe {
+                let welded_tracer = (out.welded_share[d] as f64 / welded).clamp(0.0, 1.0);
+                let h = thickness.get(d);
+                let held = if out.rift_cell[d] != 0 {
+                    0.0
+                } else {
+                    welded.min((thickness_cap - h as f64).max(0.0))
+                };
+                // Continental crust welded on brings its age and keel with
+                // it, mixed by thickness with the crust already in the cell,
+                // so a craton that loses its cell to the grid is not wiped
+                // from the record. A craton either side of the weld keeps its
+                // keel whole: the younger crust crumples against it or is
+                // underthrust beneath, and does not dilute its root.
+                let continental = (out.welded_continental[d] as f64).min(welded);
+                let held_continental = held * continental / welded;
+                let stays_continental = crust_type[d] == CONTINENTAL
+                    || h as f64 + held >= t.continental_thickness_threshold;
+                if held_continental > 0.0 && stays_continental {
+                    let own = h.max(0.0) as f64 + (held - held_continental);
+                    let total = own + held_continental;
+                    let welded_age = out.welded_age[d] as f64 / continental;
+                    let welded_keel = out.welded_keel[d] as f64 / continental;
+                    let mixed_age =
+                        (own * age.get(d) as f64 + held_continental * welded_age) / total;
+                    age.set(d, mixed_age as f32);
+                    let k = keel.get(d);
+                    let mixed = ((own * k as f64 + held_continental * welded_keel) / total) as f32;
+                    let deepest = k.max(welded_keel as f32);
+                    keel.set(d, if deepest >= CRATON_KEEL { deepest } else { mixed });
+                }
+                plume_share.set(d, mixed_share(plume_share.get(d), h as f64, held, welded_tracer));
+                thickness.set(d, (h as f64 + held) as f32);
+                let left = (welded - held) as f32;
+                surplus.set(d, left);
+                spill_share.set(d, ((welded - held) * welded_tracer) as f32);
+                (left > 0.0).then_some(d)
+            }
+        })
+    };
+    active.extend(spilling);
+
+    // As above; the plume tracer travels with the crust in `spill_share`.
+    let welding_room = |dst: &CellData, rift_cell: &[u8], m: usize| -> f64 {
+        if rift_cell[m] != 0 {
             0.0
         } else {
-            welded.min((thickness_cap - dst.thickness[d] as f64).max(0.0))
-        };
-        // Continental crust welded on brings its age and keel with it, mixed
-        // by thickness with the crust already in the cell, so a craton that
-        // loses its cell to the grid is not wiped from the record. A craton
-        // either side of the weld keeps its keel whole: the younger crust
-        // crumples against it or is underthrust beneath, and does not dilute
-        // its root.
-        let continental = (out.welded_continental[d] as f64).min(welded);
-        let held_continental = held * continental / welded;
-        let stays_continental = dst.crust_type[d] == CONTINENTAL
-            || dst.thickness[d] as f64 + held >= t.continental_thickness_threshold;
-        if held_continental > 0.0 && stays_continental {
-            let own = dst.thickness[d].max(0.0) as f64 + (held - held_continental);
-            let total = own + held_continental;
-            let age = out.welded_age[d] as f64 / continental;
-            let keel = out.welded_keel[d] as f64 / continental;
-            dst.age[d] = ((own * dst.age[d] as f64 + held_continental * age) / total) as f32;
-            let mixed = ((own * dst.keel[d] as f64 + held_continental * keel) / total) as f32;
-            let deepest = dst.keel[d].max(keel as f32);
-            dst.keel[d] = if deepest >= CRATON_KEEL { deepest } else { mixed };
+            (thickness_cap - dst.thickness[m] as f64).max(0.0) as f32 as f64
         }
-        dst.plume_share[d] =
-            mixed_share(dst.plume_share[d], dst.thickness[d] as f64, held, welded_tracer);
-        add_f32(&mut dst.thickness[d], held);
-        surplus[d] = (welded - held) as f32;
-        out.spill_share[d] = ((welded - held) * welded_tracer) as f32;
-    }
-
+    };
+    out.spill_share_in.fill(0.0);
+    out.spill_share_next.fill(0.0);
     for round in 0..PLACEMENT_ROUNDS {
-        if !surplus.iter().any(|&x| x > 0.0) {
+        if active.is_empty() {
             break;
         }
-        for d in 0..n {
-            headroom[d] = if out.rift_cell[d] != 0 {
-                0.0
-            } else {
-                (thickness_cap - dst.thickness[d] as f64).max(0.0) as f32
-            };
-        }
-        incoming.fill(0.0);
-        next.fill(0.0);
-        out.spill_share_in.fill(0.0);
-        out.spill_share_next.fill(0.0);
-        for d in 0..n {
+        touched.clear();
+        for &d in &active {
             let have = surplus[d] as f64;
-            if have <= 0.0 {
-                continue;
-            }
             let tracer = (out.spill_share[d] as f64 / have).clamp(0.0, 1.0);
             let own = dst.plate_id[d];
             let accepts = |m: usize| dst.plate_id[m] == own && out.rift_cell[m] == 0;
@@ -1043,7 +1108,7 @@ pub fn advect(
             for k in range(d) {
                 let m = nbr[k] as usize;
                 if accepts(m) {
-                    room += headroom[m] as f64;
+                    room += welding_room(dst, &out.rift_cell, m);
                 }
             }
             let crowded = room <= 0.0;
@@ -1051,7 +1116,7 @@ pub fn advect(
                 if crowded {
                     1.0 / (1.0 + dst.thickness[m] as f64)
                 } else {
-                    headroom[m] as f64
+                    welding_room(dst, &out.rift_cell, m)
                 }
             };
             let mut weight = 0.0f64;
@@ -1078,19 +1143,27 @@ pub fn advect(
                 let moved = have * (w / weight) * area(d) / area(m);
                 add_f32(&mut incoming[m], moved);
                 add_f32(&mut out.spill_share_in[m], moved * tracer);
+                if s.u8a[m] == 0 {
+                    s.u8a[m] = 1;
+                    touched.push(m);
+                }
             }
         }
         let last = round == PLACEMENT_ROUNDS - 1;
-        for d in 0..n {
+        for &d in &touched {
+            s.u8a[d] = 0;
             let inc = incoming[d] as f64;
+            let carried = out.spill_share_in[d] as f64;
+            incoming[d] = 0.0;
+            out.spill_share_in[d] = 0.0;
             if inc == 0.0 {
                 continue;
             }
-            let tracer = (out.spill_share_in[d] as f64 / inc).clamp(0.0, 1.0);
+            let tracer = (carried / inc).clamp(0.0, 1.0);
             let place = if last {
                 inc
             } else {
-                inc.min(headroom[d] as f64)
+                inc.min(welding_room(dst, &out.rift_cell, d))
             };
             dst.plume_share[d] =
                 mixed_share(dst.plume_share[d], dst.thickness[d] as f64, place, tracer);
@@ -1100,14 +1173,20 @@ pub fn advect(
         }
         std::mem::swap(&mut surplus, &mut next);
         std::mem::swap(&mut out.spill_share, &mut out.spill_share_next);
-    }
-    for d in 0..n {
-        if surplus[d] > 0.0 {
-            let tracer = (out.spill_share[d] / surplus[d]).clamp(0.0, 1.0) as f64;
-            dst.plume_share[d] =
-                mixed_share(dst.plume_share[d], dst.thickness[d] as f64, surplus[d] as f64, tracer);
-            add_f32(&mut dst.thickness[d], surplus[d] as f64);
+        for &d in &active {
+            next[d] = 0.0;
+            out.spill_share_next[d] = 0.0;
         }
+        active.extend_from_slice(&touched);
+        active.retain(|&d| surplus[d] > 0.0);
+        active.sort_unstable();
+        active.dedup();
+    }
+    for &d in &active {
+        let tracer = (out.spill_share[d] / surplus[d]).clamp(0.0, 1.0) as f64;
+        dst.plume_share[d] =
+            mixed_share(dst.plume_share[d], dst.thickness[d] as f64, surplus[d] as f64, tracer);
+        add_f32(&mut dst.thickness[d], surplus[d] as f64);
     }
 
     // --- Pass 4a: thickened crust spreads under its own weight ---------------
@@ -1176,15 +1255,24 @@ pub fn advect(
     // --- Pass 4d: an over-thick root founders, slowly ------------------------
     let shed_per_step = (t.delamination_rate * dt_myr).max(0.0);
     if shed_per_step > 0.0 {
-        for d in 0..n {
-            let over = dst.thickness[d] as f64 - thickness_cap;
-            if over <= 0.0 {
-                continue;
+        let keel = &dst.keel;
+        let thickness = Disjoint::new(&mut dst.thickness);
+        let shed = par::filter_map(n, |d| {
+            // Safety: iteration `d` alone touches index `d`.
+            unsafe {
+                let h = thickness.get(d) as f64;
+                let over = h - thickness_cap;
+                if over <= 0.0 {
+                    return None;
+                }
+                let shed = over.min(shed_per_step * t.craton_wear(keel[d]));
+                thickness.set(d, (h - shed) as f32);
+                Some(shed * area(d))
             }
-            let shed = over.min(shed_per_step * t.craton_wear(dst.keel[d]));
-            add_f32(&mut dst.thickness[d], -shed);
-            subducted_this_step += shed * area(d);
-            delaminated_this_step += shed * area(d);
+        });
+        for mass in shed {
+            subducted_this_step += mass;
+            delaminated_this_step += mass;
         }
     }
 
@@ -1354,36 +1442,55 @@ pub fn advect(
     }
 
     // --- Pass 4b: the front has flexural strength ----------------------------
-    let labels = &mut s.i32a;
-    for _ in 0..2 {
-        labels.copy_from_slice(&dst.plate_id);
-        for d in 0..n {
-            let own = labels[d];
-            if own < 0 {
+    // A cell all but surrounded by another plate joins it, in two rounds that
+    // each read the plates as the round before left them. Only a cell beside
+    // one that joined in the first round can join in the second.
+    let joins = |plate_id: &[i32], d: usize| -> Option<i32> {
+        let own = plate_id[d];
+        if own < 0 {
+            return None;
+        }
+        let mut best_plate = -1;
+        let mut best_count = 0;
+        for k in range(d) {
+            let p = plate_id[nbr[k] as usize];
+            if p < 0 || p == own {
                 continue;
             }
-            let mut best_plate = -1;
-            let mut best_count = 0;
-            for k in range(d) {
-                let p = labels[nbr[k] as usize];
-                if p < 0 || p == own {
-                    continue;
-                }
-                let count = range(d).filter(|&j| labels[nbr[j] as usize] == p).count();
-                if count > best_count {
-                    best_count = count;
-                    best_plate = p;
-                }
-            }
-            if best_count >= 4 {
-                dst.plate_id[d] = best_plate;
+            let count = range(d).filter(|&j| plate_id[nbr[j] as usize] == p).count();
+            if count > best_count {
+                best_count = count;
+                best_plate = p;
             }
         }
+        (best_count >= 4).then_some(best_plate)
+    };
+    let first = par::filter_map(n, |d| joins(&dst.plate_id, d).map(|p| (d, p)));
+    for &(d, p) in &first {
+        dst.plate_id[d] = p;
+    }
+    let mut beside: Vec<usize> = Vec::new();
+    for &(d, _) in &first {
+        for cell in std::iter::once(d).chain(range(d).map(|k| nbr[k] as usize)) {
+            if s.u8a[cell] == 0 {
+                s.u8a[cell] = 1;
+                beside.push(cell);
+            }
+        }
+    }
+    let second: Vec<(usize, i32)> = beside
+        .iter()
+        .filter_map(|&d| joins(&dst.plate_id, d).map(|p| (d, p)))
+        .collect();
+    for &d in &beside {
+        s.u8a[d] = 0;
+    }
+    for &(d, p) in &second {
+        dst.plate_id[d] = p;
     }
 
     s.f32a = surplus;
     s.f32b = next;
-    s.f32c = headroom;
     s.f32d = incoming;
     s.plate_flag = stepping_flags;
 

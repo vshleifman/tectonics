@@ -7,6 +7,7 @@ use crate::advect::AdvectionField;
 use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, total_crust_mass};
 use crate::elevation::baseline_elevation;
 use crate::mesh::Mesh;
+use crate::par::{self, Disjoint};
 use crate::plates::oceanic_density_from_age;
 use crate::scratch::Scratch;
 use crate::tuning::Tuning;
@@ -135,6 +136,27 @@ pub fn infill_enclosed_basins(
     field.continentalised_by_infill = infilled;
 }
 
+/// Lay fresh ocean floor in the gaps a step of transport opened, booked as
+/// created mass. Ages are brought up to date once a tick, by
+/// [`apply_crust_lifecycle`], so floor laid partway through a tick is given
+/// `age` short of zero by the rest of the tick still to come.
+pub fn lay_new_floor(mesh: &Mesh, data: &mut CellData, field: &mut AdvectionField, age: f64, t: &Tuning) {
+    let gaps = par::filter_map(mesh.cell_count, |i| (field.rift_cell[i] != 0).then_some(i));
+    let elevation = baseline_elevation(t, OCEANIC, 0.0, t.oceanic_thickness) as f32;
+    let mut created = 0.0f64;
+    for i in gaps {
+        data.crust_type[i] = OCEANIC;
+        data.age[i] = age as f32;
+        data.plume_share[i] = 0.0;
+        data.density[i] = t.oceanic_density_young as f32;
+        data.thickness[i] = t.oceanic_thickness as f32;
+        data.elevation[i] = elevation;
+        created += mesh.area(i) * t.oceanic_thickness;
+    }
+    field.created_this_step = created;
+    field.created_total += created;
+}
+
 /// Crust type flips look at the neighbours, so grid noise cannot speckle a
 /// continent: continent only reverts to ocean on its coast (or once thinned to
 /// no more than ocean floor, as recycling leaves it), and ocean floor
@@ -150,74 +172,93 @@ pub fn apply_crust_lifecycle(
     t: &Tuning,
 ) {
     let areas = &mesh.areas;
-    let mut created = 0.0f64;
     let (mut by_accretion, mut by_spreading, mut decontinentalised) = (0.0f64, 0.0f64, 0.0f64);
     let (mut by_plume, mut by_piling) = (0.0f64, 0.0f64);
     field.piled.fill(0);
     let was = &mut s.u8b;
-    for i in 0..areas.len() {
-        was[i] = (data.crust_type[i] == CONTINENTAL && field.rift_cell[i] == 0) as u8;
-    }
+    par::fill(was, |i| (data.crust_type[i] == CONTINENTAL && field.rift_cell[i] == 0) as u8);
+    let was = &*was;
     let continental_nbrs = |i: usize| mesh.nbrs(i).filter(|&k| was[mesh.nbr[k] as usize] != 0).count();
-    for i in 0..areas.len() {
-        if field.rift_cell[i] != 0 {
-            data.crust_type[i] = OCEANIC;
-            data.age[i] = 0.0;
-            data.plume_share[i] = 0.0;
-            data.density[i] = t.oceanic_density_young as f32;
-            data.thickness[i] = t.oceanic_thickness as f32;
-            data.elevation[i] = baseline_elevation(t, OCEANIC, 0.0, t.oceanic_thickness) as f32;
-            created += areas[i] as f64 * t.oceanic_thickness;
-            continue;
-        }
-        data.age[i] = (data.age[i] as f64 + dt_myr) as f32;
-        if data.crust_type[i] == OCEANIC {
-            let h = data.thickness[i] as f64;
-            let nucleates = h >= t.continental_thickness_threshold
-                && (field.plume_in[i] > 0.0
-                    || h >= t.continental_nucleation_thickness
-                    || continental_nbrs(i) >= 2);
-            if nucleates {
-                data.crust_type[i] = CONTINENTAL;
-                data.density[i] = t.continental_density as f32;
-                // Whichever brought in more this step gets the credit; crust
-                // spilled from a full arc cell counts as accretion.
-                if field.plume_in[i] > field.accreted[i].max(field.spread_in[i]) {
-                    by_plume += areas[i] as f64;
-                } else if field.accreted[i] <= 0.0 && field.spread_in[i] <= 0.0 {
-                    by_piling += areas[i] as f64;
-                    field.piled[i] = 1;
-                } else if field.spread_in[i] > field.accreted[i] {
-                    by_spreading += areas[i] as f64;
-                } else {
-                    by_accretion += areas[i] as f64;
-                }
-            } else {
-                data.density[i] = oceanic_density_from_age(t, data.age[i] as f64) as f32;
-            }
-        } else if (data.thickness[i] as f64) < t.continental_revert_thickness
-            && (continental_nbrs(i) < mesh.nbrs(i).len()
-                || data.thickness[i] as f64 <= t.oceanic_thickness + 1e-3)
-        {
-            // Thinned continent is old, cool lithosphere, not crust fresh
-            // from a ridge; but no older than ocean that has yet to pull, so
-            // a margin that loses its crust does not at once become the side
-            // of a trench that sinks.
-            let age = (data.age[i] as f64).min(t.slab_pull_onset_age);
-            data.crust_type[i] = OCEANIC;
-            data.age[i] = age as f32;
-            data.density[i] = oceanic_density_from_age(t, age) as f32;
-            data.keel[i] = 0.0;
-            decontinentalised += areas[i] as f64;
-        }
+    // Each cell's flip, in cell order, for the tallies.
+    enum Flip {
+        Plume,
+        Piling,
+        Spreading,
+        Accretion,
+        Reverted,
     }
-    field.created_this_step = created;
+    let flips = {
+        let age = Disjoint::new(&mut data.age);
+        let crust_type = Disjoint::new(&mut data.crust_type);
+        let density = Disjoint::new(&mut data.density);
+        let keel = Disjoint::new(&mut data.keel);
+        let piled = Disjoint::new(&mut field.piled);
+        let thickness = &data.thickness;
+        let (plume_in, accreted, spread_in) = (&field.plume_in, &field.accreted, &field.spread_in);
+        par::filter_map(areas.len(), |i| {
+            // Safety: iteration `i` alone touches index `i` of each.
+            let flip = unsafe {
+                let aged = (age.get(i) as f64 + dt_myr) as f32;
+                age.set(i, aged);
+                let h = thickness[i] as f64;
+                if crust_type.get(i) == OCEANIC {
+                    let nucleates = h >= t.continental_thickness_threshold
+                        && (plume_in[i] > 0.0
+                            || h >= t.continental_nucleation_thickness
+                            || continental_nbrs(i) >= 2);
+                    if !nucleates {
+                        density.set(i, oceanic_density_from_age(t, aged as f64) as f32);
+                        return None;
+                    }
+                    crust_type.set(i, CONTINENTAL);
+                    density.set(i, t.continental_density as f32);
+                    // Whichever brought in more this step gets the credit;
+                    // crust spilled from a full arc cell counts as accretion.
+                    Some(if plume_in[i] > accreted[i].max(spread_in[i]) {
+                        Flip::Plume
+                    } else if accreted[i] <= 0.0 && spread_in[i] <= 0.0 {
+                        piled.set(i, 1);
+                        Flip::Piling
+                    } else if spread_in[i] > accreted[i] {
+                        Flip::Spreading
+                    } else {
+                        Flip::Accretion
+                    })
+                } else if h < t.continental_revert_thickness
+                    && (continental_nbrs(i) < mesh.nbrs(i).len() || h <= t.oceanic_thickness + 1e-3)
+                {
+                    // Thinned continent is old, cool lithosphere, not crust
+                    // fresh from a ridge; but no older than ocean that has yet
+                    // to pull, so a margin that loses its crust does not at
+                    // once become the side of a trench that sinks.
+                    let reverted = (aged as f64).min(t.slab_pull_onset_age);
+                    crust_type.set(i, OCEANIC);
+                    age.set(i, reverted as f32);
+                    density.set(i, oceanic_density_from_age(t, reverted) as f32);
+                    keel.set(i, 0.0);
+                    Some(Flip::Reverted)
+                } else {
+                    None
+                }
+            };
+            flip.map(|flip| (i, flip))
+        })
+    };
+    for (i, flip) in flips {
+        let tally = match flip {
+            Flip::Plume => &mut by_plume,
+            Flip::Piling => &mut by_piling,
+            Flip::Spreading => &mut by_spreading,
+            Flip::Accretion => &mut by_accretion,
+            Flip::Reverted => &mut decontinentalised,
+        };
+        *tally += areas[i] as f64;
+    }
     field.continentalised_by_accretion = by_accretion;
     field.continentalised_by_spreading = by_spreading;
     field.continentalised_by_plume = by_plume;
     field.continentalised_by_piling = by_piling;
     field.decontinentalised = decontinentalised;
-    field.created_total += created;
     field.live_mass = total_crust_mass(areas, data);
-    was.fill(0);
+    s.u8b.fill(0);
 }

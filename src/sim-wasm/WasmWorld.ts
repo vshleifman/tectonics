@@ -3,12 +3,19 @@ import type { PlateSummary } from "../plates/PlateData";
 import type { WorldMetrics } from "../sim/metrics";
 import type { MassReadout, SimWorld, WorldFields } from "../sim/SimWorld";
 import type { SimOptions, Tuning } from "../sim/tuning";
-import { World } from "./pkg/tectonics_sim.js";
+import type { World } from "./pkg/tectonics_sim.js";
+
+/**
+ * The `World` class of either build, single-threaded (`pkg`) or threaded
+ * (`pkg-threads`): the two export the same API.
+ */
+export type WorldClass = typeof World;
 
 /**
  * The Rust simulation behind the {@link SimWorld} interface. Per-tick fields
  * are views straight into WASM memory, rebuilt on every call because the front
- * buffer changes with each tick and a memory growth would detach old views.
+ * buffer changes with each tick and a memory growth would detach old views (or,
+ * for the threaded build's shared memory, leave them short of the new end).
  */
 export class WasmWorld implements SimWorld {
   readonly mesh: ArrayCellMesh;
@@ -17,8 +24,9 @@ export class WasmWorld implements SimWorld {
   constructor(
     level: number,
     private readonly memory: WebAssembly.Memory,
+    WorldOf: WorldClass,
   ) {
-    const w = new World(level);
+    const w = new WorldOf(level);
     this.world = w;
     this.mesh = new ArrayCellMesh({
       cellCount: w.cell_count(),

@@ -1,6 +1,8 @@
 //! Native benchmark for profiling outside the browser:
 //! `cargo run --release --bin bench -- <level> <ticks> [planes] [name=value ...]`,
-//! where each `name=value` overrides a tuning field (snake_case).
+//! where each `name=value` overrides a tuning field (snake_case), and
+//! `threads=N` sets how many threads the passes run on when built with
+//! `--features parallel`.
 //!
 //! Plates come from great-circle cracks rather than the TypeScript crack walk,
 //! so the numbers are for profiling the passes, not for parity with the
@@ -907,6 +909,23 @@ fn main() {
     let level: u32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(8);
     let ticks: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(50);
     let planes: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
+    // `threads=N` sizes the pool the passes run on (with `--features
+    // parallel`); rayon's default is one per core.
+    let threads = args
+        .iter()
+        .skip(4)
+        .find_map(|a| a.strip_prefix("threads=")?.parse::<usize>().ok());
+    #[cfg(feature = "parallel")]
+    if let Some(threads) = threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .expect("thread pool already started");
+    }
+    #[cfg(not(feature = "parallel"))]
+    if threads.is_some_and(|t| t != 1) {
+        eprintln!("threads= needs --features parallel; running on one thread");
+    }
 
     let start = Instant::now();
     let mut sim = Sim::new(level);
@@ -915,11 +934,15 @@ fn main() {
         let Some((name, value)) = arg.split_once('=') else {
             continue;
         };
+        if name == "threads" {
+            continue;
+        }
         let Ok(value) = value.parse::<f64>() else {
             continue;
         };
         let t = &mut sim.tuning;
         match name {
+            "dt_myr" => t.dt_myr = value,
             "slab_weight" => t.slab_weight = value,
             "slab_full_length" => t.slab_full_length = value,
             "slab_decay_time" => t.slab_decay_time = value,
@@ -1040,6 +1063,7 @@ fn main() {
     let mut unplaced_ancient = 0.0f64;
     // Rifting, deformed (fresh suture), thin.
     let mut keel_erosion = [0.0f64; 3];
+    let mut total_steps = 0usize;
     for tick in 0..ticks {
         let before: Vec<(bool, f32, f32)> = {
             let d = sim.front();
@@ -1066,6 +1090,7 @@ fn main() {
             }
         }
         sim.tick();
+        total_steps += sim.last_substeps();
         for (i, &(cont, age, keel)) in before.iter().enumerate() {
             if !cont || age < cutoff {
                 continue;
@@ -1335,11 +1360,15 @@ fn main() {
     let per_tick = run.elapsed().as_secs_f64() * 1000.0 / ticks.max(1) as f64;
 
     let m = sim.metrics();
+    let steps_per_tick = total_steps as f64 / ticks.max(1) as f64;
     println!(
-        "level {level} ({} cells): build {:.0} ms, seed {:.0} ms, {per_tick:.2} ms/tick",
+        "level {level} ({} cells), {} thread(s): build {:.0} ms, seed {:.0} ms, {per_tick:.2} ms/tick, {steps_per_tick:.1} steps/tick, {:.2} ms/step, fingerprint {:016x}",
         sim.mesh.cell_count,
+        tectonics_sim::thread_count(),
         built.as_secs_f64() * 1000.0,
         seeded.as_secs_f64() * 1000.0,
+        per_tick / steps_per_tick.max(1.0),
+        sim.fingerprint(),
     );
     let passes: Vec<String> = PASS_NAMES
         .iter()

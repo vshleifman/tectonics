@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "build:wasm": "wasm-pack build sim-rs --target web --release --out-dir ../src/sim-wasm/pkg",
-    "dev": "npm run build:wasm && vite",
-    "build": "npm run build:wasm && tsc && vite build",
+    "build:wasm:threads": "sh scripts/build-wasm-threads.sh",
+    "dev": "npm run build:wasm && npm run build:wasm:threads && vite",
+    "build": "npm run build:wasm && npm run build:wasm:threads && tsc && vite build",
     "bench": "node --max-old-space-size=8192 --import tsx scripts/bench.ts",
     "bench:compare": "node --import tsx scripts/compare.ts",
     "test:rs": "cargo test --manifest-path sim-rs/Cargo.toml --release",
