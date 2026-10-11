@@ -5,7 +5,8 @@
 //! back into the outcome, so keeping the same order keeps the two comparable.
 
 use crate::cell_data::{CellData, OCEANIC};
-use crate::elevation::{baseline_elevation, subsidence};
+use crate::elevation::baseline_elevation;
+use crate::lithosphere::ocean_lithosphere;
 use crate::math::Vec3;
 use crate::registry::RelabelReport;
 use crate::rng::Rng;
@@ -97,13 +98,6 @@ impl PlateData {
     }
 }
 
-/// Oceanic crust density for an age: young ridge crust is light and densifies
-/// as it cools, along the same curve the sea floor subsides by.
-pub fn oceanic_density_from_age(t: &Tuning, age: f64) -> f64 {
-    let s = subsidence(t, age);
-    t.oceanic_density_young + s * (t.oceanic_density_old - t.oceanic_density_young)
-}
-
 /// Bring per-plate properties in line with a relabel: retired plates go, split
 /// fragments inherit their parent's motion, genuinely new plates start at rest.
 pub fn reconcile(plates: &mut PlateData, report: &RelabelReport) {
@@ -165,7 +159,8 @@ pub fn initialise_crust(t: &Tuning, centres: &[f32], data: &mut CellData, seed: 
         let age = (field[i] - lo) / span * t.max_oceanic_age;
         data.crust_type[i] = OCEANIC;
         data.age[i] = age as f32;
-        data.density[i] = oceanic_density_from_age(t, age) as f32;
+        data.density[i] = t.oceanic_density as f32;
+        data.lithosphere[i] = ocean_lithosphere(t, age) as f32;
         data.thickness[i] = t.oceanic_thickness as f32;
         data.elevation[i] = baseline_elevation(t, OCEANIC, age, t.oceanic_thickness) as f32;
         data.slab[i] = 0.0;

@@ -1033,6 +1033,7 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
           earth: EARTH.continentalArea,
         },
         { label: "Thin", get: (m) => m.thinContinentalArea },
+        { label: "Above sea level", get: (m) => m.landArea },
       ],
       format: formatPercent,
     },
@@ -1104,6 +1105,83 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
       series: [
         { label: "Mantle heat", get: (m) => m.mantleExcess },
         { label: "Plumes", get: (m) => m.activePlumes },
+      ],
+      format: formatNumber,
+    },
+    pins,
+  );
+  const heatBudget = makeLineChart(
+    {
+      title: "Heat budget",
+      unit: "TW",
+      series: [
+        {
+          label: "Surface loss",
+          get: (m) => m.surfaceHeatTw,
+          earth: EARTH.surfaceHeatTw,
+        },
+        {
+          label: "Radioactive",
+          get: (m) => m.radiogenicTw,
+          earth: EARTH.radiogenicHeatTw,
+        },
+        { label: "Core", get: (m) => m.coreHeatTw },
+      ],
+      format: formatNumber,
+    },
+    pins,
+  );
+  const interiorTemperature = makeLineChart(
+    {
+      title: "Interior temperature",
+      unit: "K",
+      series: [
+        { label: "Mantle", get: (m) => m.mantleTemp },
+        { label: "Core", get: (m) => m.coreTemp },
+      ],
+      format: formatNumber,
+    },
+    pins,
+  );
+  const mantleCooling = makeLineChart(
+    {
+      title: "Mantle cooling",
+      unit: "K/Gyr",
+      series: [{ label: "Cooling", get: (m) => m.mantleCooling }],
+      format: formatNumber,
+    },
+    pins,
+  );
+  const upperMantle = makeLineChart(
+    {
+      title: "Upper-mantle anomaly",
+      unit: "K",
+      series: [
+        { label: "Hottest", get: (m) => m.mantleAnomalyMax },
+        { label: "Coolest", get: (m) => m.mantleAnomalyMin },
+      ],
+      format: formatNumber,
+    },
+    pins,
+  );
+  const lowerMantle = makeLineChart(
+    {
+      title: "Lower-mantle slab piles",
+      series: [
+        { label: "Piled (globe areas)", get: (m) => m.pileMass },
+        { label: "Plume focus (peak/mean)", get: (m) => m.plumeWeightPeak },
+      ],
+      format: formatNumber,
+    },
+    pins,
+  );
+  const dynamicTopography = makeLineChart(
+    {
+      title: "Dynamic topography",
+      unit: "km",
+      series: [
+        { label: "Highest lift", get: (m) => m.dynTopoHigh },
+        { label: "Deepest drag", get: (m) => m.dynTopoLow },
       ],
       format: formatNumber,
     },
@@ -1253,10 +1331,31 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
     makeTab(
       "budget",
       "Continental budget",
-      stack(growth.element, loss.element, primordial.element),
+      stack(growth.element, loss.element),
       (samples) => {
         growth.update(samples);
         loss.update(samples);
+      },
+    ),
+    makeTab(
+      "heat",
+      "Heat budget",
+      stack(
+        heatBudget.element,
+        interiorTemperature.element,
+        mantleCooling.element,
+        upperMantle.element,
+        lowerMantle.element,
+        dynamicTopography.element,
+        primordial.element,
+      ),
+      (samples) => {
+        heatBudget.update(samples);
+        interiorTemperature.update(samples);
+        mantleCooling.update(samples);
+        upperMantle.update(samples);
+        lowerMantle.update(samples);
+        dynamicTopography.update(samples);
         primordial.update(samples);
       },
     ),

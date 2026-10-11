@@ -28,6 +28,10 @@ pub struct CellData {
     /// [0, 1]: the deep, cold, buoyant root of an ancient continental core.
     /// Travels with crust.
     pub keel: Vec<f32>,
+    /// Thickness (km) of the cold mantle lid beneath the crust: grows as the
+    /// square root of ocean floor's age, deepest under a keel, thinned over a
+    /// rift or a plume. Travels with crust.
+    pub lithosphere: Vec<f32>,
     /// Share of the cell's crust, by mass, that a primordial plume made, in
     /// [0, 1]: a tracer for where crust came from. It travels with the crust,
     /// mixes by mass wherever crust is added, and is untouched by removal, so
@@ -52,6 +56,7 @@ impl CellData {
             slab: vec![0.0; n],
             rift_side: vec![0; n],
             keel: vec![0.0; n],
+            lithosphere: vec![0.0; n],
             plume_share: vec![0.0; n],
         }
     }

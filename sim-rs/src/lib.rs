@@ -15,6 +15,8 @@ pub mod cohesion;
 pub mod craton;
 pub mod crust_lifecycle;
 pub mod elevation;
+pub mod heat;
+pub mod lithosphere;
 pub mod mantle;
 pub mod math;
 pub mod mesh;
@@ -180,6 +182,33 @@ impl World {
 
     pub fn keel_ptr(&self) -> *const f32 {
         self.sim.front().keel.as_ptr()
+    }
+
+    /// Thickness (km) of the mantle lid beneath each cell.
+    pub fn lithosphere_ptr(&self) -> *const f32 {
+        self.sim.front().lithosphere.as_ptr()
+    }
+
+    /// Heat flow out through each cell (mW/m^2), as of the last tick.
+    pub fn heat_flow_ptr(&self) -> *const f32 {
+        self.sim.heat().heat_flow.as_ptr()
+    }
+
+    /// Upper-mantle temperature beneath each cell (K), above or below the
+    /// planet's mantle temperature, as of the last tick.
+    pub fn mantle_temp_ptr(&self) -> *const f32 {
+        self.sim.mantle().cell_temps().as_ptr()
+    }
+
+    /// Slab piled in the lower mantle beneath each cell, as a share of the
+    /// area over it, as of the last tick.
+    pub fn lower_slab_ptr(&self) -> *const f32 {
+        self.sim.mantle().cell_piles().as_ptr()
+    }
+
+    /// Dynamic topography (km) over each cell, as of the last tick.
+    pub fn dyn_topo_ptr(&self) -> *const f32 {
+        self.sim.dyn_topo().as_ptr()
     }
 
     pub fn cell_kind_ptr(&self) -> *const u8 {

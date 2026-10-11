@@ -5,6 +5,7 @@
 use crate::advect::AdvectionField;
 use crate::boundaries::{BoundaryField, CONVERGENT, DIVERGENT, TRANSFORM};
 use crate::cell_data::{CONTINENTAL, CellData};
+use crate::elevation::column_buoyancy;
 use crate::math::{Vec3, cross, dot, len3, normalise};
 use crate::mesh::Mesh;
 use crate::plates::PlateData;
@@ -52,6 +53,28 @@ pub struct WorldMetrics {
     pub dripped: f64,
     pub mantle_excess: f64,
     pub active_plumes: usize,
+    pub surface_heat_tw: f64,
+    pub radiogenic_tw: f64,
+    pub core_heat_tw: f64,
+    pub mantle_temp: f64,
+    pub core_temp: f64,
+    /// Kelvin per Gyr the mantle is cooling by; negative warming.
+    pub mantle_cooling: f64,
+    /// Coolest and hottest upper-mantle site (K about the mantle's
+    /// temperature), and the mean over the globe.
+    pub mantle_anomaly_min: f64,
+    pub mantle_anomaly_max: f64,
+    pub mantle_anomaly_mean: f64,
+    /// Slab piled in the lower mantle, as a multiple of the globe's area.
+    pub pile_mass: f64,
+    /// Largest mantle site's plume weight over the mean: 1 for plumes rising
+    /// anywhere alike.
+    pub plume_weight_peak: f64,
+    /// Lowest and highest dynamic topography over any cell (km).
+    pub dyn_topo_low: f64,
+    pub dyn_topo_high: f64,
+    /// Share of the globe standing above sea level (0 km).
+    pub land_area: f64,
     pub continental_recycled: f64,
     pub continental_growth: f64,
     pub continental_eroded: f64,
@@ -102,6 +125,7 @@ pub fn compute_metrics(
     let dt_myr = t.dt_myr;
     let mut total_area = 0.0;
     let mut continental_area = 0.0;
+    let mut land_area = 0.0;
     let mut coast_area = 0.0;
     let mut continental_mass = 0.0;
     let mut thin_continental_area = 0.0;
@@ -121,6 +145,9 @@ pub fn compute_metrics(
     for i in 0..mesh.cell_count {
         let area = mesh.area(i);
         total_area += area;
+        if data.elevation[i] > 0.0 {
+            land_area += area;
+        }
         if data.crust_type[i] == CONTINENTAL {
             continental_area += area;
             if mesh
@@ -194,10 +221,10 @@ pub fn compute_metrics(
             continue;
         }
         // Continental crust never subducts; between two oceanic cells the
-        // denser one goes down.
+        // heavier column goes down.
         let down = if cont_a {
             pb
-        } else if cont_b || data.density[ca] >= data.density[cb] {
+        } else if cont_b || column_buoyancy(t, data, ca) <= column_buoyancy(t, data, cb) {
             pa
         } else {
             pb
@@ -293,10 +320,28 @@ pub fn compute_metrics(
         } else {
             0.0
         },
-        // The primordial era is the world's, not the crust's: `Sim::metrics`
-        // fills these in.
+        // The mantle and its heat are the world's, not the crust's:
+        // `Sim::metrics` fills these in.
         mantle_excess: 0.0,
         active_plumes: 0,
+        surface_heat_tw: 0.0,
+        radiogenic_tw: 0.0,
+        core_heat_tw: 0.0,
+        mantle_temp: 0.0,
+        core_temp: 0.0,
+        mantle_cooling: 0.0,
+        mantle_anomaly_min: 0.0,
+        mantle_anomaly_max: 0.0,
+        mantle_anomaly_mean: 0.0,
+        pile_mass: 0.0,
+        plume_weight_peak: 0.0,
+        dyn_topo_low: 0.0,
+        dyn_topo_high: 0.0,
+        land_area: if total_area > 0.0 {
+            land_area / total_area
+        } else {
+            0.0
+        },
         continental_recycled: globe_share_per_myr(advection.continental_recycled),
         continental_growth: advection.continental_growth,
         continental_eroded: continental_share_per_myr(advection.eroded_this_step),

@@ -79,6 +79,11 @@ export const bufferList = (b: SnapshotBuffers): ArrayBuffer[] => [
   b.density.buffer as ArrayBuffer,
   b.thickness.buffer as ArrayBuffer,
   b.keel.buffer as ArrayBuffer,
+  b.lithosphere.buffer as ArrayBuffer,
+  b.heatFlow.buffer as ArrayBuffer,
+  b.mantleTemp.buffer as ArrayBuffer,
+  b.lowerSlab.buffer as ArrayBuffer,
+  b.dynTopo.buffer as ArrayBuffer,
   b.cellKind.buffer as ArrayBuffer,
   b.arcKind.buffer as ArrayBuffer,
 ];

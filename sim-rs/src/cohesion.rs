@@ -32,6 +32,7 @@ fn swap_crust(mesh: &Mesh, data: &mut CellData, a: usize, b: usize) {
     data.age.swap(a, b);
     data.density.swap(a, b);
     data.keel.swap(a, b);
+    data.lithosphere.swap(a, b);
     data.plume_share.swap(a, b);
     data.elevation.swap(a, b);
 }

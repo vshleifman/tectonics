@@ -78,6 +78,11 @@ export class WasmWorld implements SimWorld {
       density: new Float32Array(buffer, w.density_ptr(), cells),
       thickness: new Float32Array(buffer, w.thickness_ptr(), cells),
       keel: new Float32Array(buffer, w.keel_ptr(), cells),
+      lithosphere: new Float32Array(buffer, w.lithosphere_ptr(), cells),
+      heatFlow: new Float32Array(buffer, w.heat_flow_ptr(), cells),
+      mantleTemp: new Float32Array(buffer, w.mantle_temp_ptr(), cells),
+      lowerSlab: new Float32Array(buffer, w.lower_slab_ptr(), cells),
+      dynTopo: new Float32Array(buffer, w.dyn_topo_ptr(), cells),
       cellKind: new Uint8Array(buffer, w.cell_kind_ptr(), cells),
       arcKind: new Int8Array(buffer, w.arc_kind_ptr(), arcs),
     };

@@ -1,6 +1,8 @@
-//! The primordial era (`primordial_heat` > 0, on by default): a young, hot
-//! mantle that makes continent over plumes rather than at arcs, cooling into
-//! the modern regime. Cratonic keels grow only while it lasts (`craton.rs`).
+//! Mantle plumes, and the primordial era (`primordial_heat` > 0, on by
+//! default): a young, hot mantle that makes continent over plumes rather than
+//! at arcs, cooling into the modern regime, where plumes still rise but build
+//! only ocean plateaus and hotspots. Cratonic keels grow only while the
+//! primordial era lasts (`craton.rs`).
 //!
 //! Early Archean mantle ran some 200-300 C hotter. Plume heads built thick
 //! basaltic plateaus whose hydrated roots melted into the first continental
@@ -10,11 +12,18 @@
 //! poor builders of continent. As the mantle cooled, plumes waned and
 //! subduction took over, by somewhere around 3.2-2.5 Ga.
 //!
-//! The mantle's excess temperature decays as `primordial_heat` times
-//! `exp(-t / primordial_cooling_time)`. Plumes rise at `plume_rate` times that
-//! per Myr, at random, and each thickens a round patch of the crust above it
-//! toward `plume_thickness` over `plume_duration`, riding with the plate it
-//! rises under so the plateau stays round rather than smearing into a track.
+//! The mantle starts `primordial_heat` hotter than today's and cools as the
+//! planet's heat budget lets it (see `heat.rs`). Plumes are fed by the heat
+//! the core passes up, which wanes far more slowly than the mantle cools, so
+//! they rise at `plume_rate` per Myr scaled by the core's heat flow against
+//! today's, in every era. They rise at the edges of the slab piles in the
+//! lower mantle (see `mantle.rs`), and each thickens a round patch of the
+//! crust above it over `plume_duration`, riding with the plate it rises under
+//! so the plateau stays round rather than smearing into a track. How thick
+//! depends on how hot the mantle is, rising faster than its excess: from
+//! `plume_thickness` at full excess, enough to melt into continent, down to
+//! `plume_thickness_cold` in a mantle as cool as today's, an ocean plateau
+//! that stays ocean.
 //! Arc accretion is scaled down by `hot_arc_suppression` times the excess,
 //! and the mafic part of ocean floor thickened anywhere but over a plume drips
 //! back into the mantle, `hot_drip` times the excess of its extra thickness
@@ -25,6 +34,8 @@
 
 use crate::advect::AdvectionField;
 use crate::cell_data::{CONTINENTAL, CellData, mixed_share};
+use crate::heat::{PlanetHeat, modern_core_tw};
+use crate::mantle::MantleFlow;
 use crate::math::{Vec3, clamp01, normalise, read3, rotate};
 use crate::mesh::Mesh;
 use crate::plates::PlateData;
@@ -54,30 +65,6 @@ impl Default for Primordial {
     }
 }
 
-/// Excess mantle temperature at `elapsed` Myr, in units of `primordial_heat`'s
-/// scale: 0 with the era off.
-pub fn mantle_excess(t: &Tuning, elapsed: f64) -> f64 {
-    if t.primordial_heat <= 0.0 {
-        return 0.0;
-    }
-    t.primordial_heat * (-elapsed / t.primordial_cooling_time.max(1e-6)).exp()
-}
-
-/// The tuning as the world sees it `elapsed` Myr in: a hot mantle's arcs
-/// build less continent, and ridge push comes in over the first
-/// `seafloor_flattening_age`. The sea floor a world starts with has ages
-/// that no ridge laid down, so a push down their slopes would steer the
-/// plates by the starting pattern until floor from real ridges replaces it.
-pub fn effective_tuning(t: &Tuning, elapsed: f64) -> Tuning {
-    let mut eff = t.clone();
-    let excess = mantle_excess(t, elapsed);
-    if excess > 0.0 {
-        eff.accretion_fraction *= clamp01(1.0 - t.hot_arc_suppression * excess);
-    }
-    eff.ridge_weight *= clamp01(elapsed / t.seafloor_flattening_age.max(1e-6));
-    eff
-}
-
 impl Primordial {
     pub fn reset(&mut self) {
         *self = Primordial::default();
@@ -87,8 +74,9 @@ impl Primordial {
         self.plumes.len()
     }
 
-    /// Raise new plumes, carry the live ones with their plates, and thicken
-    /// the crust over them. New crust goes into the ledger as created.
+    /// Raise new plumes where the lower mantle sends them up, carry the live
+    /// ones with their plates, and thicken the crust over them as hot as the
+    /// mantle now is. New crust goes into the ledger as created.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -96,29 +84,33 @@ impl Primordial {
         data: &mut CellData,
         plates: &PlateData,
         field: &mut AdvectionField,
+        mantle: &MantleFlow,
+        heat: &PlanetHeat,
         dt_myr: f64,
-        elapsed: f64,
         t: &Tuning,
     ) {
         field.plume_in.fill(0.0);
         field.plume_created_this_step = 0.0;
         field.dripped_this_step = 0.0;
-        let excess = mantle_excess(t, elapsed);
-        if excess <= 0.0 && self.plumes.is_empty() {
+        let excess = heat.excess();
+        let modern = modern_core_tw(t);
+        let core = if modern > 0.0 {
+            heat.core_tw(t) / modern
+        } else {
+            0.0
+        };
+        let expected = t.plume_rate.max(0.0) * core * dt_myr;
+        if expected <= 0.0 && excess <= 0.0 && self.plumes.is_empty() {
             return;
         }
 
-        let expected = t.plume_rate * excess * dt_myr;
         let mut count = expected.floor() as usize;
         if self.rng.next_f64() < expected.fract() {
             count += 1;
         }
         for _ in 0..count {
-            let z = 2.0 * self.rng.next_f64() - 1.0;
-            let phi = 2.0 * std::f64::consts::PI * self.rng.next_f64();
-            let r = (1.0 - z * z).max(0.0).sqrt();
             self.plumes.push(Plume {
-                centre: [r * phi.cos(), r * phi.sin(), z],
+                centre: mantle.pick_plume_site(mesh, self.rng.next_f64()),
                 elapsed: 0.0,
             });
         }
@@ -127,6 +119,12 @@ impl Primordial {
         let radius = t.plume_radius.max(1e-6);
         let reach = radius.cos();
         let duration = t.plume_duration.max(dt_myr);
+        // Both how deep a plume head starts to melt and how much of it melts
+        // grow with its excess heat, so its melt grows faster than the excess.
+        // Linear, mid-era plumes make so much keeled continent the plates
+        // weld into one; squared, too few cratons form.
+        let melt = clamp01(excess).powf(1.5);
+        let peak = t.plume_thickness_cold + (t.plume_thickness - t.plume_thickness_cold) * melt;
         let mut created = 0.0;
         for plume in &mut self.plumes {
             // Ride with the plate the plateau is building on.
@@ -154,8 +152,8 @@ impl Primordial {
                 } else {
                     ((1.0 - r) / (1.0 - PLATEAU_TOP)).max(0.0)
                 };
-                let target =
-                    t.oceanic_thickness + (t.plume_thickness - t.oceanic_thickness) * profile;
+                let base = t.ridge_crust_thickness;
+                let target = base + (peak - base) * profile;
                 let h = data.thickness[i] as f64;
                 let gain = (target - h).max(0.0) * share;
                 if gain <= 0.0 {
@@ -193,7 +191,7 @@ impl Primordial {
                     continue;
                 }
                 let before = data.thickness[i];
-                let excess_h = before as f64 - t.oceanic_thickness;
+                let excess_h = before as f64 - t.ridge_crust_thickness;
                 if excess_h <= 0.0 {
                     continue;
                 }
@@ -284,13 +282,45 @@ mod tests {
     }
 
     #[test]
-    fn a_cold_mantle_raises_nothing() {
+    fn a_cool_mantle_raises_ocean_plateaus_not_continent() {
         let mut sim = Sim::new(4);
         sim.tuning.primordial_heat = 0.0;
+        sim.tuning.start_age_ga = 0.0;
+        sim.tuning.plume_rate = 0.5;
+        sim.crack_great_circles(4, "primordial");
+        let (mut made, mut continent, mut risen) = (0.0, 0.0, 0usize);
+        for _ in 0..40 {
+            sim.tick();
+            assert!(sim.mantle_excess() <= 0.0, "today's mantle warmed");
+            made += sim.advection().plume_created_this_step;
+            continent += sim.advection().continentalised_by_plume;
+            risen = risen.max(sim.active_plumes());
+            let d = sim.front();
+            for i in 0..sim.mesh.cell_count {
+                if sim.advection().plume_in[i] > 0.0 && d.crust_type[i] != CONTINENTAL {
+                    assert!(
+                        (d.thickness[i] as f64) < sim.tuning.continental_thickness_threshold,
+                        "a plateau reached {:.1} km",
+                        d.thickness[i]
+                    );
+                }
+            }
+        }
+        assert!(risen > 0 && made > 0.0, "a cool mantle raised no plumes");
+        assert_eq!(continent, 0.0, "plumes made continent in a cool mantle");
+    }
+
+    #[test]
+    fn plumes_rise_with_the_core_s_heat() {
+        let mut sim = Sim::new(4);
+        sim.tuning.primordial_heat = 0.0;
+        sim.tuning.start_age_ga = 0.0;
+        sim.tuning.plume_rate = 0.5;
+        sim.tuning.core_coupling = 0.0;
         sim.crack_great_circles(4, "primordial");
         for _ in 0..30 {
             sim.tick();
+            assert_eq!(sim.active_plumes(), 0, "plumes rose off a core passing no heat");
         }
-        assert_eq!(sim.advection().plume_created_this_step, 0.0);
     }
 }

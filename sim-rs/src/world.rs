@@ -7,14 +7,17 @@ use crate::cell_data::{CellData, total_crust_mass};
 use crate::cohesion::{keep_continents_whole, keep_cratons_whole};
 use crate::craton::update_cratons;
 use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins, lay_new_floor};
-use crate::elevation::apply_elevation;
+use crate::elevation::{apply_elevation, dynamic_topography};
+use crate::heat::{PlanetHeat, effective_tuning};
+use crate::lithosphere::update_lithosphere;
 use crate::mantle::MantleFlow;
 use crate::math::read3;
 use std::collections::HashMap;
 use crate::mesh::Mesh;
+use crate::par;
 use crate::metrics::{PlateSummary, WorldMetrics, compute_metrics, summaries};
 use crate::passive_margins::collapse_passive_margins;
-use crate::primordial::{Primordial, effective_tuning, mantle_excess};
+use crate::primordial::Primordial;
 use crate::plate_forces::update_plate_motion;
 use crate::plate_lifecycle::update_plate_identity;
 use crate::plates::{PlateData, initialise_crust, reconcile};
@@ -54,6 +57,10 @@ pub struct Sim {
     advection: AdvectionField,
     mantle: MantleFlow,
     primordial: Primordial,
+    heat: PlanetHeat,
+    /// Dynamic topography (km) over each cell: where the surface stands for
+    /// the mantle's flow, not its crust, so it is not carried with the plates.
+    dyn_topo: Vec<f32>,
     scratch: Scratch,
     raw_labels: Vec<i32>,
     pub tuning: Tuning,
@@ -71,6 +78,7 @@ impl Sim {
         let mesh = Mesh::icosphere(level);
         let n = mesh.cell_count;
         let arcs = mesh.arc_count();
+        let tuning = Tuning::default();
         Sim {
             front: CellData::new(n),
             back: CellData::new(n),
@@ -80,9 +88,11 @@ impl Sim {
             advection: AdvectionField::new(n),
             mantle: MantleFlow::new(&mesh),
             primordial: Primordial::default(),
+            heat: PlanetHeat::new(n, &tuning),
+            dyn_topo: vec![0.0; n],
             scratch: Scratch::new(n),
             raw_labels: vec![0; n],
-            tuning: Tuning::default(),
+            tuning,
             options: SimOptions::default(),
             initial_mass: 0.0,
             elapsed: 0.0,
@@ -108,12 +118,14 @@ impl Sim {
             self.advection.continental_growth = 0.0;
             self.advection.continental_share_before = None;
             self.mantle.reset();
+            self.dyn_topo.fill(0.0);
             self.primordial.reset();
+            self.heat.reset(&self.tuning);
             self.elapsed = 0.0;
         }
         seed_slabs(&self.mesh, &mut self.front, &self.boundaries, &self.tuning);
         let dt = self.tuning.dt_myr;
-        let eff = effective_tuning(&self.tuning, self.elapsed);
+        let eff = self.effective_tuning();
         update_plate_motion(
             &self.mesh,
             &self.front,
@@ -190,15 +202,27 @@ impl Sim {
         self.substeps
     }
 
+    /// The tuning as the world sees it now, over the mantle as it is now.
+    fn effective_tuning(&self) -> Tuning {
+        effective_tuning(&self.tuning, self.elapsed, self.heat.excess())
+    }
+
     /// The forces on the plates over the coming tick, and the boundaries and
     /// welds they make.
     fn drive_plates(&mut self) {
-        let t = &effective_tuning(&self.tuning, self.elapsed);
+        let t = &self.effective_tuning();
         let dt = t.dt_myr;
-        let Sim { mesh, front, plates, boundaries, mantle, scratch, options, timings, .. } = self;
+        let Sim { mesh, front, plates, boundaries, mantle, dyn_topo, scratch, options, timings, .. } = self;
         let mut mark = now_ms();
         update_slabs(mesh, front, boundaries, scratch, t, dt);
-        mantle.update(mesh, front, boundaries, dt, t);
+        mantle.update(mesh, front, boundaries, dt, t, options);
+        {
+            let mantle = &*mantle;
+            let balance = mantle.mean_sink();
+            par::fill(dyn_topo, |i| {
+                dynamic_topography(t, mantle.upper_temp_at(i), mantle.sink_at(i) - balance) as f32
+            });
+        }
         update_plate_motion(mesh, front, plates, boundaries, mantle, scratch, t, dt);
         lap(timings, &mut mark, 0);
         classify(mesh, front, plates, boundaries, scratch, t);
@@ -210,7 +234,7 @@ impl Sim {
     /// Carry the crust through the tick in `steps` equal steps, laying fresh
     /// floor in the gaps each opens. Returns the steps' tallies, summed.
     fn move_plates(&mut self, steps: usize) -> [f64; 18] {
-        let t = &effective_tuning(&self.tuning, self.elapsed);
+        let t = &self.effective_tuning();
         let dt = t.dt_myr / steps as f64;
         let Sim { mesh, front, back, plates, boundaries, advection, scratch, timings, .. } = self;
         let mut mark = now_ms();
@@ -234,10 +258,12 @@ impl Sim {
         moved
     }
 
-    /// Everything that happens to the crust over the tick but its transport.
+    /// Everything that happens to the crust over the tick but its transport,
+    /// and the heat the planet loses through it.
     fn evolve_crust(&mut self) {
-        let t = &effective_tuning(&self.tuning, self.elapsed);
+        let t = &self.effective_tuning();
         let dt = t.dt_myr;
+        let excess = self.heat.excess();
         let Sim {
             mesh,
             front,
@@ -245,8 +271,11 @@ impl Sim {
             registry,
             boundaries,
             advection,
+            mantle,
             scratch,
             primordial,
+            heat,
+            dyn_topo,
             options,
             timings,
             elapsed,
@@ -255,28 +284,35 @@ impl Sim {
         let mut mark = now_ms();
         update_plate_identity(mesh, front, plates, registry, scratch, t);
         lap(timings, &mut mark, 4);
-        update_rifting(mesh, front, plates, dt, registry, scratch, t, options);
+        update_rifting(mesh, front, plates, mantle, dt, registry, scratch, t, options);
         collapse_passive_margins(mesh, front, plates, registry, scratch, t);
         lap(timings, &mut mark, 5);
         recycle_continental_margins(mesh, front, dt, advection, t);
         infill_enclosed_basins(mesh, front, dt, advection, scratch, t);
-        primordial.update(mesh, front, plates, advection, dt, *elapsed, t);
+        primordial.update(mesh, front, plates, advection, mantle, heat, dt, t);
         apply_crust_lifecycle(mesh, front, dt, advection, scratch, t);
         keep_continents_whole(mesh, front, advection, scratch, t);
         track_continental_growth(mesh, front, dt, advection);
-        update_cratons(mesh, front, dt, *elapsed, scratch, t);
+        update_cratons(mesh, front, dt, excess, scratch, t);
         keep_cratons_whole(mesh, front, scratch, t);
+        update_lithosphere(front, advection, dt, t);
+        heat.update(mesh, front, mantle.cell_temps(), dt, *elapsed, t);
         lap(timings, &mut mark, 6);
-        apply_elevation(&mesh.arc_cells, front, dt, boundaries, t);
+        apply_elevation(&mesh.arc_cells, front, dyn_topo, dt, boundaries, t);
         lap(timings, &mut mark, 7);
         classify(mesh, front, plates, boundaries, scratch, t);
         lap(timings, &mut mark, 8);
         *elapsed += dt;
     }
 
-    /// Excess mantle temperature now, from the primordial era; 0 with it off.
+    /// Excess of the mantle's temperature over today's, 1 being about 250 K
+    /// hotter.
     pub fn mantle_excess(&self) -> f64 {
-        mantle_excess(&self.tuning, self.elapsed)
+        self.heat.excess()
+    }
+
+    pub fn heat(&self) -> &PlanetHeat {
+        &self.heat
     }
 
     pub fn active_plumes(&self) -> usize {
@@ -293,6 +329,11 @@ impl Sim {
 
     pub fn mantle(&self) -> &MantleFlow {
         &self.mantle
+    }
+
+    /// Dynamic topography (km) over each cell, as of the last tick.
+    pub fn dyn_topo(&self) -> &[f32] {
+        &self.dyn_topo
     }
 
     pub fn boundaries(&self) -> &BoundaryField {
@@ -358,6 +399,25 @@ impl Sim {
         );
         m.mantle_excess = self.mantle_excess();
         m.active_plumes = self.active_plumes();
+        let h = &self.heat;
+        m.surface_heat_tw = h.last_surface_tw;
+        m.radiogenic_tw = h.last_radiogenic_tw;
+        m.core_heat_tw = h.last_core_tw;
+        m.mantle_temp = h.mantle_temp;
+        m.core_temp = h.core_temp;
+        m.mantle_cooling = -h.rate() * 1000.0;
+        let (coolest, hottest, mean) = self.mantle.anomaly_range();
+        m.mantle_anomaly_min = coolest;
+        m.mantle_anomaly_max = hottest;
+        m.mantle_anomaly_mean = mean;
+        m.pile_mass = self.mantle.pile_mass();
+        m.plume_weight_peak = self.mantle.plume_peak();
+        let (low, high) = self
+            .dyn_topo
+            .iter()
+            .fold((0.0f32, 0.0f32), |(lo, hi), &x| (lo.min(x), hi.max(x)));
+        m.dyn_topo_low = low as f64;
+        m.dyn_topo_high = high as f64;
         m
     }
 
@@ -380,6 +440,7 @@ impl Sim {
             &d.mantle_heat,
             &d.slab,
             &d.keel,
+            &d.lithosphere,
             &d.plume_share,
         ] {
             field.iter().for_each(|x| eat(x.to_bits() as u64));
@@ -391,7 +452,13 @@ impl Sim {
             p.omega.iter().for_each(|x| eat(x.to_bits()));
         }
         let a = &self.advection;
-        for x in [a.live_mass, a.subducted_total, a.created_total, self.elapsed] {
+        let h = &self.heat;
+        h.heat_flow
+            .iter()
+            .chain(self.mantle.cell_temps())
+            .chain(self.mantle.cell_piles())
+            .for_each(|x| eat(x.to_bits() as u64));
+        for x in [a.live_mass, a.subducted_total, a.created_total, self.elapsed, h.mantle_temp, h.core_temp] {
             eat(x.to_bits());
         }
         hash
@@ -468,6 +535,7 @@ mod tests {
             ("mantle heat", &a.mantle_heat, &b.mantle_heat),
             ("slab", &a.slab, &b.slab),
             ("keel", &a.keel, &b.keel),
+            ("lithosphere", &a.lithosphere, &b.lithosphere),
             ("plume share", &a.plume_share, &b.plume_share),
         ] {
             assert!(bits(x) == bits(y), "{name} differs");
@@ -529,6 +597,40 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_topography_moves_the_surface_and_nothing_else() {
+        let run = |on: bool| {
+            let mut sim = Sim::new(4);
+            if !on {
+                sim.tuning.dyn_topo_gain = 0.0;
+                sim.tuning.sink_topo_gain = 0.0;
+            }
+            sim.crack_great_circles(4, "dynamic topography");
+            for _ in 0..60 {
+                sim.tick();
+            }
+            sim
+        };
+        let (on, off) = (run(true), run(false));
+        assert!(off.dyn_topo.iter().all(|&x| x == 0.0));
+        let limit = on.tuning.dyn_topo_max as f32;
+        assert!(on.dyn_topo.iter().any(|&x| x.abs() > 0.1), "no relief from the mantle");
+        assert!(on.dyn_topo.iter().all(|&x| x.abs() <= limit));
+        let (a, b) = (&on.front, &off.front);
+        assert!(a.elevation != b.elevation, "elevation unmoved");
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (name, x, y) in [
+            ("age", &a.age, &b.age),
+            ("thickness", &a.thickness, &b.thickness),
+            ("keel", &a.keel, &b.keel),
+            ("lithosphere", &a.lithosphere, &b.lithosphere),
+            ("mantle heat", &a.mantle_heat, &b.mantle_heat),
+        ] {
+            assert!(bits(x) == bits(y), "{name} differs");
+        }
+        assert!(a.plate_id == b.plate_id && a.crust_type == b.crust_type);
+    }
+
+    #[test]
     fn world_keeps_moving() {
         let mut sim = Sim::new(4);
         sim.crack_great_circles(3, "moving");
@@ -569,6 +671,7 @@ mod tests {
                 d.mantle_heat[i] = heat;
             }
         }
+        crate::lithosphere::settle_lithosphere(d, t);
         for p in sim.plates.by_id.values_mut() {
             p.omega = [0.0; 3];
         }
@@ -777,7 +880,8 @@ mod tests {
         d.crust_type[pocket] = OCEANIC;
         d.thickness[pocket] = 9.0;
         d.age[pocket] = 150.0;
-        d.density[pocket] = sim.tuning.oceanic_density_old as f32;
+        d.density[pocket] = sim.tuning.oceanic_density as f32;
+        d.lithosphere[pocket] = crate::lithosphere::ocean_lithosphere(&sim.tuning, 150.0) as f32;
         for p in sim.plates.by_id.values_mut() {
             p.omega = [0.0; 3];
         }
@@ -824,6 +928,7 @@ mod tests {
             d.slab[i] = 0.0;
             d.mantle_heat[i] = 0.0;
         }
+        crate::lithosphere::settle_lithosphere(d, &sim.tuning);
         for p in sim.plates.by_id.values_mut() {
             p.omega = [0.0; 3];
         }
@@ -846,12 +951,13 @@ mod tests {
 
     #[test]
     fn ridge_push_comes_in_as_the_starting_sea_floor_is_replaced() {
-        use crate::primordial::effective_tuning;
         let t = Tuning::default();
-        assert_eq!(effective_tuning(&t, 0.0).ridge_weight, 0.0);
-        let half = effective_tuning(&t, 0.5 * t.seafloor_flattening_age).ridge_weight;
-        assert!((half - 0.5 * t.ridge_weight).abs() < 1e-12);
-        assert_eq!(effective_tuning(&t, 3.0 * t.seafloor_flattening_age).ridge_weight, t.ridge_weight);
+        for excess in [0.0, 1.0] {
+            let at = |elapsed: f64| effective_tuning(&t, elapsed, excess).ridge_weight;
+            assert_eq!(at(0.0), 0.0);
+            assert!((at(0.5 * t.seafloor_flattening_age) - 0.5 * t.ridge_weight).abs() < 1e-12);
+            assert_eq!(at(3.0 * t.seafloor_flattening_age), t.ridge_weight);
+        }
     }
 
     /// A hemisphere of old continent beside a hemisphere of old ocean, at
@@ -877,7 +983,7 @@ mod tests {
                 d.age[i] = 1000.0;
             } else {
                 d.crust_type[i] = OCEANIC;
-                d.density[i] = crate::plates::oceanic_density_from_age(&t, 150.0) as f32;
+                d.density[i] = t.oceanic_density as f32;
             }
         }
         let coast: Vec<usize> = (0..n)
@@ -889,6 +995,7 @@ mod tests {
         for &i in &coast {
             d.thickness[i] = t.oceanic_thickness as f32;
         }
+        crate::lithosphere::settle_lithosphere(d, &t);
         for p in sim.plates.by_id.values_mut() {
             p.omega = [0.0; 3];
         }
@@ -900,10 +1007,12 @@ mod tests {
         use crate::cell_data::OCEANIC;
         let (mut sim, _, coast) = thinned_coast();
         sim.tick();
-        let onset = sim.tuning.slab_pull_onset_age as f32;
+        let neutral = crate::lithosphere::neutral_age(&sim.tuning, sim.tuning.oceanic_thickness) as f32;
         for &i in &coast {
             assert_eq!(sim.front.crust_type[i], OCEANIC, "thinned coast at {i} still continent");
-            assert_eq!(sim.front.age[i], onset, "reverted crust at {i} is {} Myr old", sim.front.age[i]);
+            assert_eq!(sim.front.age[i], neutral, "reverted crust at {i} is {} Myr old", sim.front.age[i]);
+            let b = crate::elevation::column_buoyancy(&sim.tuning, &sim.front, i);
+            assert!(b.abs() < 1e-3, "reverted crust at {i} has buoyancy {b:.3}");
         }
     }
 
@@ -1064,6 +1173,7 @@ mod tests {
                 d.crust_type[i] = OCEANIC;
             }
         }
+        crate::lithosphere::settle_lithosphere(d, &sim.tuning);
         let ticks = (1.5 * sim.tuning.craton_growth_time / sim.tuning.dt_myr) as usize;
         for _ in 0..ticks {
             for p in sim.plates.by_id.values_mut() {

@@ -100,9 +100,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   elevationMin: "Lowest elevation the model will allow.",
   elevationMax: "Highest elevation the model will allow.",
   slabWeight: "Pull per unit of trench, and so the world's overall pace.",
-  slabPullOnsetAge: "Age at which cooling ocean becomes dense enough to pull.",
-  slabPullSaturationAge:
-    "Age by which a slab has cooled through and pulls no harder.",
+  slabPullSaturationBuoyancy:
+    "How much heavier than the mantle a sinking column must be to pull at full strength.",
   slabFullLength:
     "How much slab a trench needs before it pulls at full strength.",
   slabDecayTime:
@@ -135,10 +134,31 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "How strongly mantle flow toward trenches carries continents along.",
   downwellingMemory:
     "How long a mantle downwelling outlives the trench that fed it.",
+  slabCooling:
+    "How much the upper mantle cools for each site's area of slab sunk into it.",
+  siteInsulation:
+    "How fast the upper mantle warms under a site wholly covered by continent.",
+  siteDiffusion:
+    "How fast upper-mantle anomalies spread to neighbouring sites.",
+  upperRelaxTime:
+    "How long an upper-mantle anomaly takes to fade back to the mantle's temperature.",
+  upperTempMax: "Largest anomaly the upper mantle may run hotter or cooler.",
+  insulationSiteGain:
+    "How strongly hot upper mantle speeds the heat building under a continent, and cold slows it.",
+  slabTransitTime: "How long sunk slab takes to reach the lower mantle.",
+  slabPileLifetime:
+    "How long a slab pile in the lower mantle lasts before it warms through.",
+  lowerDiffusion: "How fast slab piles spread to neighbouring sites.",
+  pileCooling: "How much a slab pile chills the upper mantle above it.",
+  plumeFloor:
+    "Share of plumes scattered anywhere rather than drawn to the edges of slab piles.",
+  dynTopoGain:
+    "How far hot upper mantle lifts the surface above it, and cold mantle lowers it.",
+  sinkTopoGain: "How far a mantle downwelling drags the surface above it down.",
+  dynTopoMax: "Most the mantle's flow may lift or lower the surface.",
   maxOceanicAge: "Age at which oceanic crust is treated as fully cooled.",
   continentalDensity: "Density of buoyant continental crust.",
-  oceanicDensityYoung: "Density of young crust at a ridge.",
-  oceanicDensityOld: "Density of fully cooled oceanic crust.",
+  oceanicDensity: "Density of oceanic crust, at every age.",
   oceanicThickness: "Starting thickness of oceanic crust.",
   continentalThicknessThreshold:
     "Thickness at which accreted ocean counts as continent.",
@@ -149,6 +169,21 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   maxCrustThickness:
     "Thickness a crustal root can carry before it starts to founder.",
   delaminationRate: "How fast crust above that ceiling peels into the mantle.",
+  lithosphereGrowth:
+    "How fast the cold lid under ocean floor thickens; sets the age at which ocean starts to sink.",
+  plateThickness: "Lid thickness at which an ocean plate has cooled through.",
+  continentalLithosphere: "Lid a continent without a keel cools toward.",
+  keelLithosphere: "Extra lid a full cratonic keel reaches down.",
+  riftLithosphere:
+    "Lid a rift, plume head or foundering root thins the lithosphere toward.",
+  lithosphereGrowthTime: "How long a continent's lid takes to cool to depth.",
+  lithosphereThinningTime:
+    "How long a rift, plume or foundering root takes to thin the lid.",
+  thermalExpansion:
+    "How much denser the cold lid is than the mantle per kelvin.",
+  lidDeltaT: "Temperature drop across the lid, mantle to surface.",
+  keelDepletion:
+    "How much lighter a full keel's depleted residue is than ordinary lid.",
   accretionFraction:
     "Share of a subducting cell that sticks onto the plate above.",
   maxThickeningPerMyr: "Fastest a cell may thicken by accretion.",
@@ -158,7 +193,6 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   subductionErosion: "Share of consumed continent actually lost to the mantle.",
   marginErosion:
     "Share of a subducting ocean cell stripped from a continental margin.",
-  riftDensity: "Density of an empty rift until the lifecycle fills it.",
   riftThicknessFloor:
     "Thickness below which stretched crust counts as rifted ocean.",
   basinInfillRate:
@@ -217,11 +251,25 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   minPlateArea: "Smallest fragment that becomes a plate of its own.",
   primordialHeat:
     "Excess heat of the young mantle; early continent forms as plume cratons, and keels grow only while it lasts.",
-  primordialCoolingTime: "How long the young mantle takes to cool off.",
-  plumeRate: "Plumes rising per Myr while the mantle is at full heat.",
+  startAgeGa: "Age before present at which this world's history starts.",
+  radiogenicHeatNow: "Present-day radioactive heat production.",
+  coreCoupling: "Heat passed from core to mantle per kelvin of difference.",
+  heatResponseTime: "How quickly mantle cooling responds to surface heat loss.",
+  heatFlowSensitivity:
+    "How strongly convective surface heat loss rises with mantle temperature.",
+  continentalHeatFlow: "Heat flow through uninsulated continental crust.",
+  keelInsulation: "Share of continental heat flow blocked by a full keel.",
+  viscositySensitivity:
+    "How strongly excess heat lowers mantle drag and motion response time.",
+  ridgeHeatUplift: "Extra ridge elevation per unit of mantle excess.",
+  meltGain: "Extra new ocean-crust thickness per unit of mantle excess.",
+  plumeRate: "Plumes rising per Myr while the core passes up today's heat.",
   plumeRadius: "Radius of the plateau each plume builds.",
   plumeDuration: "How long a plume takes to build its plateau.",
-  plumeThickness: "Crust thickness a plume builds at the plateau's centre.",
+  plumeThickness:
+    "Crust thickness a plume builds at the plateau's centre in a fully hot mantle.",
+  plumeThicknessCold:
+    "Crust thickness a plume builds in a mantle as cool as today's; under the continental threshold it stays ocean plateau.",
   plumeKeel: "Cratonic keel plume crust is born with.",
   hotArcSuppression: "How much a hot mantle holds back arc accretion.",
   hotDrip:
@@ -322,18 +370,11 @@ const TUNING_GROUP_FIELDS: {
     sliders: [
       { key: "slabWeight", label: "Slab pull", min: 0, max: 5, step: 0.1 },
       {
-        key: "slabPullOnsetAge",
-        label: "Slab pull onset age",
-        min: 0,
-        max: 100,
-        step: 5,
-      },
-      {
-        key: "slabPullSaturationAge",
-        label: "Slab pull saturation age",
-        min: 20,
-        max: 300,
-        step: 5,
+        key: "slabPullSaturationBuoyancy",
+        label: "Full-pull negative buoyancy (km)",
+        min: 0.1,
+        max: 3,
+        step: 0.05,
       },
       {
         key: "slabFullLength",
@@ -613,17 +654,10 @@ const TUNING_GROUP_FIELDS: {
         step: 0.01,
       },
       {
-        key: "oceanicDensityYoung",
-        label: "Oceanic density (young)",
+        key: "oceanicDensity",
+        label: "Oceanic density",
         min: 2.5,
         max: 3.2,
-        step: 0.01,
-      },
-      {
-        key: "oceanicDensityOld",
-        label: "Oceanic density (old)",
-        min: 2.5,
-        max: 3.5,
         step: 0.01,
       },
       {
@@ -827,17 +861,198 @@ const TUNING_GROUP_FIELDS: {
         max: 5,
         step: 0.1,
       },
+    ],
+  },
+  {
+    title: "Lithosphere & buoyancy",
+    sliders: [
       {
-        key: "riftDensity",
-        label: "Rift density",
-        min: 2.5,
-        max: 3.2,
-        step: 0.01,
+        key: "lithosphereGrowth",
+        label: "Ocean lid growth (km/√Myr)",
+        min: 2,
+        max: 20,
+        step: 0.5,
+      },
+      {
+        key: "plateThickness",
+        label: "Ocean plate thickness (km)",
+        min: 40,
+        max: 200,
+        step: 5,
+      },
+      {
+        key: "continentalLithosphere",
+        label: "Continental lid (km)",
+        min: 50,
+        max: 300,
+        step: 5,
+      },
+      {
+        key: "keelLithosphere",
+        label: "Extra keel lid (km)",
+        min: 0,
+        max: 200,
+        step: 5,
+      },
+      {
+        key: "riftLithosphere",
+        label: "Thinned lid (km)",
+        min: 0,
+        max: 100,
+        step: 5,
+      },
+      {
+        key: "lithosphereGrowthTime",
+        label: "Continental lid cooling (Myr)",
+        min: 10,
+        max: 1000,
+        step: 10,
+      },
+      {
+        key: "lithosphereThinningTime",
+        label: "Lid thinning (Myr)",
+        min: 1,
+        max: 100,
+        step: 1,
+      },
+      {
+        key: "thermalExpansion",
+        label: "Thermal expansion (/K)",
+        min: 0,
+        max: 0.0001,
+        step: 0.000005,
+      },
+      {
+        key: "lidDeltaT",
+        label: "Lid temperature drop (K)",
+        min: 500,
+        max: 2000,
+        step: 50,
+      },
+      {
+        key: "keelDepletion",
+        label: "Keel depletion (g/cm³)",
+        min: 0,
+        max: 0.15,
+        step: 0.005,
       },
     ],
   },
   {
-    title: "Primordial era",
+    title: "Upper mantle",
+    sliders: [
+      {
+        key: "slabCooling",
+        label: "Slab cooling (K per site of slab)",
+        min: 0,
+        max: 200,
+        step: 5,
+      },
+      {
+        key: "siteInsulation",
+        label: "Continental warming (K/Myr)",
+        min: 0,
+        max: 5,
+        step: 0.1,
+      },
+      {
+        key: "siteDiffusion",
+        label: "Sideways spreading /Myr",
+        min: 0,
+        max: 0.1,
+        step: 0.001,
+      },
+      {
+        key: "upperRelaxTime",
+        label: "Anomaly fade time (Myr)",
+        min: 10,
+        max: 1000,
+        step: 10,
+      },
+      {
+        key: "upperTempMax",
+        label: "Largest anomaly (K)",
+        min: 0,
+        max: 600,
+        step: 10,
+      },
+      {
+        key: "insulationSiteGain",
+        label: "Hot mantle insulation gain",
+        min: 0,
+        max: 3,
+        step: 0.05,
+      },
+    ],
+  },
+  {
+    title: "Lower mantle & plumes",
+    sliders: [
+      {
+        key: "slabTransitTime",
+        label: "Slab transit time (Myr)",
+        min: 0,
+        max: 500,
+        step: 10,
+      },
+      {
+        key: "slabPileLifetime",
+        label: "Slab pile lifetime (Myr)",
+        min: 50,
+        max: 3000,
+        step: 50,
+      },
+      {
+        key: "lowerDiffusion",
+        label: "Pile spreading /Myr",
+        min: 0,
+        max: 0.02,
+        step: 0.0005,
+      },
+      {
+        key: "pileCooling",
+        label: "Pile cooling (K/Myr per site of slab)",
+        min: 0,
+        max: 0.05,
+        step: 0.001,
+      },
+      {
+        key: "plumeFloor",
+        label: "Plumes anywhere (share)",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
+    ],
+  },
+  {
+    title: "Dynamic topography",
+    sliders: [
+      {
+        key: "dynTopoGain",
+        label: "Uplift per K of mantle (km)",
+        min: 0,
+        max: 0.03,
+        step: 0.001,
+      },
+      {
+        key: "sinkTopoGain",
+        label: "Downwelling drag (km per share/Myr)",
+        min: 0,
+        max: 100,
+        step: 1,
+      },
+      {
+        key: "dynTopoMax",
+        label: "Largest uplift or drop (km)",
+        min: 0,
+        max: 4,
+        step: 0.1,
+      },
+    ],
+  },
+  {
+    title: "Planetary heat & primordial era",
     sliders: [
       {
         key: "primordialHeat",
@@ -847,11 +1062,74 @@ const TUNING_GROUP_FIELDS: {
         step: 0.05,
       },
       {
-        key: "primordialCoolingTime",
-        label: "Cooling time (Myr)",
-        min: 100,
-        max: 5000,
-        step: 100,
+        key: "startAgeGa",
+        label: "Starting age (Ga ago)",
+        min: 0,
+        max: 4.5,
+        step: 0.1,
+      },
+      {
+        key: "radiogenicHeatNow",
+        label: "Radioactive heat today (TW)",
+        min: 0,
+        max: 40,
+        step: 1,
+      },
+      {
+        key: "coreCoupling",
+        label: "Core coupling (TW/K)",
+        min: 0,
+        max: 0.02,
+        step: 0.001,
+      },
+      {
+        key: "heatResponseTime",
+        label: "Heat response time (Myr)",
+        min: 0,
+        max: 500,
+        step: 10,
+      },
+      {
+        key: "heatFlowSensitivity",
+        label: "Convective heat sensitivity",
+        min: 0,
+        max: 8,
+        step: 0.25,
+      },
+      {
+        key: "continentalHeatFlow",
+        label: "Continental heat flow (mW/m²)",
+        min: 20,
+        max: 120,
+        step: 5,
+      },
+      {
+        key: "keelInsulation",
+        label: "Keel insulation",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "viscositySensitivity",
+        label: "Viscosity sensitivity",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
+      {
+        key: "ridgeHeatUplift",
+        label: "Hot-ridge uplift (km)",
+        min: 0,
+        max: 2,
+        step: 0.05,
+      },
+      {
+        key: "meltGain",
+        label: "Hot-ridge melt gain",
+        min: 0,
+        max: 1,
+        step: 0.05,
       },
       {
         key: "plumeRate",
@@ -879,6 +1157,13 @@ const TUNING_GROUP_FIELDS: {
         label: "Plume crust (km)",
         min: 15,
         max: 60,
+        step: 1,
+      },
+      {
+        key: "plumeThicknessCold",
+        label: "Cool-mantle plume crust (km)",
+        min: 7,
+        max: 30,
         step: 1,
       },
       {
@@ -1226,7 +1511,12 @@ export const createControls = (
       { value: "colour", label: "Elevation colour" },
       { value: "data", label: "Data (all properties)" },
       { value: "crust", label: "Crust type" },
-      { value: "density", label: "Density" },
+      { value: "density", label: "Crust density" },
+      { value: "lithosphere", label: "Lithosphere" },
+      { value: "heat-flow", label: "Heat flow" },
+      { value: "mantle-temp", label: "Mantle temperature" },
+      { value: "slab-graveyard", label: "Slab graveyard" },
+      { value: "dyn-topo", label: "Dynamic topography" },
       { value: "boundary", label: "Boundaries" },
     ],
     initial.viewMode,

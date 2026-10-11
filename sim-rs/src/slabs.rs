@@ -2,11 +2,12 @@
 //! from a slab that has actually gone down, so it builds up while a margin
 //! converges, sinks away over `slab_decay_time` once it stops, and remembers
 //! which side is overriding. Without this memory the down-going side would be
-//! re-picked every tick from whichever cell happens to be denser, and two
+//! re-picked every tick from whichever column happens to be heavier, and two
 //! plates of similar age would trade the pull back and forth.
 
 use crate::boundaries::{BoundaryField, CONVERGENT, DIVERGENT};
 use crate::cell_data::{CONTINENTAL, CellData};
+use crate::elevation::column_buoyancy;
 use crate::math::clamp01;
 use crate::mesh::Mesh;
 use crate::par;
@@ -26,11 +27,11 @@ pub struct Subduction {
     pub strength: f64,
 }
 
-/// Pull per unit length of trench from crust of the given age, in [0, 1].
-pub fn slab_pull(t: &Tuning, age: f64) -> f64 {
-    let onset = t.slab_pull_onset_age;
-    let span = (t.slab_pull_saturation_age - onset).max(1e-6);
-    clamp01((age - onset) / span)
+/// Pull per unit length of trench from a column of the given buoyancy, in
+/// [0, 1]: none while it floats, full once it is
+/// `slab_pull_saturation_buoyancy` heavier than the mantle.
+pub fn slab_pull(t: &Tuning, buoyancy: f64) -> f64 {
+    clamp01(-buoyancy / t.slab_pull_saturation_buoyancy.max(1e-9))
 }
 
 /// The two cells either side of arc `a`, if they belong to different plates.
@@ -58,11 +59,13 @@ fn established(mesh: &Mesh, data: &CellData, cell: usize) -> f64 {
 }
 
 /// Polarity a new subduction zone would start with: continent never goes
-/// down, otherwise the denser crust does.
-fn initiating_over(data: &CellData, a: usize, b: usize) -> usize {
+/// down, otherwise the heavier column, crust and lid, does.
+fn initiating_over(t: &Tuning, data: &CellData, a: usize, b: usize) -> usize {
     if data.crust_type[a] == CONTINENTAL {
         a
-    } else if data.crust_type[b] == CONTINENTAL || data.density[a] >= data.density[b] {
+    } else if data.crust_type[b] == CONTINENTAL
+        || column_buoyancy(t, data, a) <= column_buoyancy(t, data, b)
+    {
         b
     } else {
         a
@@ -116,7 +119,7 @@ pub fn subduction(
     b: usize,
     t: &Tuning,
 ) -> Option<Subduction> {
-    subduction_with(mesh, data, a, b, t, |a, b| initiating_over(data, a, b))
+    subduction_with(mesh, data, a, b, t, |a, b| initiating_over(t, data, a, b))
 }
 
 /// Grow each trench's slab by how fast crust is converging into it, start new
@@ -160,7 +163,7 @@ pub fn update_slabs(
                     cb
                 }
             }
-            _ => initiating_over(data, ca, cb),
+            _ => initiating_over(t, data, ca, cb),
         }
     };
 
@@ -184,7 +187,7 @@ pub fn update_slabs(
         let founder = if data.crust_type[sub.down] == CONTINENTAL || age < t.slab_initiation_age {
             0.0
         } else {
-            founder_rate * slab_pull(t, age)
+            founder_rate * slab_pull(t, column_buoyancy(t, data, sub.down))
         };
         Some((sub.over, (closing + founder) as f32))
     });
@@ -228,7 +231,7 @@ pub fn seed_slabs(mesh: &Mesh, data: &mut CellData, boundaries: &BoundaryField, 
         if established(mesh, data, ca) > trace || established(mesh, data, cb) > trace {
             continue;
         }
-        let over_plate = data.plate_id[initiating_over(data, ca, cb)];
+        let over_plate = data.plate_id[initiating_over(t, data, ca, cb)];
         let len = mesh.arc_length[a] as f64;
         *vote.entry(suture_key(pa, pb)).or_insert(0.0) +=
             if over_plate == pa.min(pb) { len } else { -len };
@@ -237,7 +240,7 @@ pub fn seed_slabs(mesh: &Mesh, data: &mut CellData, boundaries: &BoundaryField, 
     for (ca, cb) in margins {
         let (pa, pb) = (data.plate_id[ca], data.plate_id[cb]);
         let over = if data.crust_type[ca] == CONTINENTAL || data.crust_type[cb] == CONTINENTAL {
-            initiating_over(data, ca, cb)
+            initiating_over(t, data, ca, cb)
         } else {
             let lower_over = vote.get(&suture_key(pa, pb)).copied().unwrap_or(0.0) >= 0.0;
             if (pa < pb) == lower_over { ca } else { cb }
@@ -248,7 +251,37 @@ pub fn seed_slabs(mesh: &Mesh, data: &mut CellData, boundaries: &BoundaryField, 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::cell_data::OCEANIC;
+    use crate::lithosphere::settle_lithosphere;
     use crate::world::Sim;
+
+    /// Two cells of ocean floor, of these ages and crust thicknesses.
+    fn two_oceans(t: &Tuning, a: (f32, f32), b: (f32, f32)) -> CellData {
+        let mut data = CellData::new(2);
+        data.crust_type = vec![OCEANIC; 2];
+        data.density = vec![t.oceanic_density as f32; 2];
+        data.age = vec![a.0, b.0];
+        data.thickness = vec![a.1, b.1];
+        settle_lithosphere(&mut data, t);
+        data
+    }
+
+    #[test]
+    fn the_older_of_two_oceans_goes_down() {
+        let t = Tuning::default();
+        let h = t.oceanic_thickness as f32;
+        assert_eq!(initiating_over(&t, &two_oceans(&t, (30.0, h), (120.0, h)), 0, 1), 0);
+        assert_eq!(initiating_over(&t, &two_oceans(&t, (120.0, h), (30.0, h)), 0, 1), 1);
+    }
+
+    #[test]
+    fn thick_crust_stays_on_top_of_younger_ordinary_floor() {
+        let t = Tuning::default();
+        let h = t.oceanic_thickness as f32;
+        let data = two_oceans(&t, (60.0, 20.0), (40.0, h));
+        assert_eq!(initiating_over(&t, &data, 0, 1), 0, "the plateau went down");
+    }
 
     #[test]
     fn seeded_world_has_trenches() {

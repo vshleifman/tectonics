@@ -6,6 +6,7 @@
 
 use crate::boundaries::{BoundaryField, CONVERGENT};
 use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, mixed_share};
+use crate::lithosphere::thinned;
 use crate::mesh::Mesh;
 use crate::par::{self, Disjoint};
 use crate::plates::PlateData;
@@ -776,10 +777,11 @@ pub fn advect(
     };
     gather(&mut dst.elevation, &src.elevation, 0.0);
     gather(&mut dst.age, &src.age, 0.0);
-    gather(&mut dst.density, &src.density, t.rift_density as f32);
+    gather(&mut dst.density, &src.density, t.oceanic_density as f32);
     gather(&mut dst.weakness, &src.weakness, 0.0);
     gather(&mut dst.slab, &src.slab, 0.0);
     gather(&mut dst.keel, &src.keel, 0.0);
+    gather(&mut dst.lithosphere, &src.lithosphere, 0.0);
     gather(&mut dst.plume_share, &src.plume_share, 0.0);
     par::fill(&mut dst.crust_type, |d| match from[d] {
         RIFT => OCEANIC,
@@ -1257,8 +1259,9 @@ pub fn advect(
     if shed_per_step > 0.0 {
         let keel = &dst.keel;
         let thickness = Disjoint::new(&mut dst.thickness);
+        let lithosphere = Disjoint::new(&mut dst.lithosphere);
         let shed = par::filter_map(n, |d| {
-            // Safety: iteration `d` alone touches index `d`.
+            // Safety: iteration `d` alone touches index `d` of each.
             unsafe {
                 let h = thickness.get(d) as f64;
                 let over = h - thickness_cap;
@@ -1267,6 +1270,9 @@ pub fn advect(
                 }
                 let shed = over.min(shed_per_step * t.craton_wear(keel[d]));
                 thickness.set(d, (h - shed) as f32);
+                // The root takes the lid it hangs from down with it.
+                let lid = thinned(t, lithosphere.get(d) as f64, dt_myr);
+                lithosphere.set(d, lid as f32);
                 Some(shed * area(d))
             }
         });
@@ -1385,6 +1391,7 @@ pub fn advect(
         dst.slab[d] = dst.slab[model];
         dst.rift_side[d] = dst.rift_side[model];
         dst.keel[d] = dst.keel[model];
+        dst.lithosphere[d] = dst.lithosphere[model];
         dst.thickness[d] = (pulled / area(d)) as f32;
         out.rift_cell[d] = 0;
     }
@@ -1412,7 +1419,7 @@ pub fn advect(
         if available <= 0.0 {
             continue;
         }
-        let wanted = available.min(t.oceanic_thickness * area(d));
+        let wanted = available.min(t.ridge_crust_thickness * area(d));
         let (mut pulled, mut traced) = (0.0f64, 0.0f64);
         for k in range(d) {
             let m = nbr[k] as usize;
@@ -1435,9 +1442,11 @@ pub fn advect(
         if dst.thickness[d] as f64 >= t.continental_thickness_threshold {
             dst.crust_type[d] = CONTINENTAL;
             dst.density[d] = t.continental_density as f32;
+            dst.lithosphere[d] = t.rift_lithosphere as f32;
         } else {
             dst.crust_type[d] = OCEANIC;
-            dst.density[d] = t.oceanic_density_young as f32;
+            dst.density[d] = t.oceanic_density as f32;
+            dst.lithosphere[d] = 0.0;
         }
     }
 

@@ -6,7 +6,7 @@
 
 use crate::boundaries::{BoundaryField, CONVERGENT};
 use crate::cell_data::{CONTINENTAL, CellData};
-use crate::elevation::thermal_elevation;
+use crate::elevation::{column_buoyancy, thermal_elevation};
 use crate::mantle::MantleFlow;
 use crate::math::{
     Sym3, Vec3, clamp01, cross, dominant_axis, dot, len3, normalise, scale, solve_sym3, sub,
@@ -229,7 +229,7 @@ pub fn update_plate_motion(
                 } else {
                     (cell_a, plate_a, plate_b, 1.0)
                 };
-                let pull = slab_pull(t, data.age[down_cell] as f64) * sub.strength;
+                let pull = slab_pull(t, column_buoyancy(t, data, down_cell)) * sub.strength;
                 if let Some(p) = slot_of(down_plate).filter(|_| pull > 0.0) {
                     let force = t.slab_weight * pull * arc_len;
                     add_torque(&mut f.torque, down_plate, a, sign, force);

@@ -14,9 +14,9 @@
 //! A keel is the depleted residue of heavy melting, which only a hotter mantle
 //! than today's could manage: nearly every craton is Archean or
 //! Palaeoproterozoic, and younger interiors, however quiet, do not grow one.
-//! So the keel grows over `craton_growth_time` scaled by the primordial
-//! mantle's excess heat (see `primordial.rs`), and not at all once it has
-//! cooled or with the era off. Inherited weakness slows it too: the mobile
+//! So the keel grows over `craton_growth_time` scaled by the mantle's excess
+//! heat over today's (see `heat.rs`), and not at all once it has cooled to
+//! today's or with the primordial era off. Inherited weakness slows it too: the mobile
 //! belts between cratons stay weak and keel-less for billions of years, and
 //! are where the supercontinents later part.
 //!
@@ -32,7 +32,6 @@
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::mesh::Mesh;
 use crate::par;
-use crate::primordial::mantle_excess;
 use crate::scratch::Scratch;
 use crate::tuning::Tuning;
 
@@ -50,7 +49,7 @@ pub fn update_cratons(
     mesh: &Mesh,
     data: &mut CellData,
     dt_myr: f64,
-    elapsed: f64,
+    excess: f64,
     s: &mut Scratch,
     t: &Tuning,
 ) {
@@ -85,7 +84,7 @@ pub fn update_cratons(
     }
 
     let spacing = (4.0 * std::f64::consts::PI / n as f64).sqrt();
-    let grow = (dt_myr * mantle_excess(t, elapsed) / t.craton_growth_time.max(1e-6)) as f32;
+    let grow = (dt_myr * excess / t.craton_growth_time.max(1e-6)) as f32;
     let erode = (dt_myr / t.craton_decay_time.max(1e-6)) as f32;
     // A craton's crust is of ordinary continental thickness or more; crust
     // that has only just crossed the continental threshold has no root.

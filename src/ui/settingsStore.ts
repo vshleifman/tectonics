@@ -3,11 +3,24 @@ import type { Projection } from "../render/projection";
 
 /**
  * How cells render: elevation colour ("colour"), greyscale with per-cell
- * id/elevation labels ("data"), crust type ("crust"), density ramp ("density"),
- * or boundary type ("boundary"). Plates are no longer a base view mode — they
- * are an independently chosen overlay (see `plateOverlay`).
+ * id/elevation labels ("data"), crust type ("crust"), crust density ramp
+ * ("density"), mantle lid thickness ("lithosphere"), surface heat loss
+ * ("heat-flow"), upper-mantle temperature ("mantle-temp"), slab piled in the
+ * lower mantle ("slab-graveyard"), the mantle's lift or drag on the surface
+ * ("dyn-topo"), or boundary type ("boundary"). Plates are no longer a base view mode — they are an
+ * independently chosen overlay.
  */
-export type ViewMode = "colour" | "data" | "crust" | "density" | "boundary";
+export type ViewMode =
+  | "colour"
+  | "data"
+  | "crust"
+  | "density"
+  | "lithosphere"
+  | "heat-flow"
+  | "mantle-temp"
+  | "slab-graveyard"
+  | "dyn-topo"
+  | "boundary";
 
 /**
  * How plate regions are drawn over the base view: not at all, as boundary

@@ -46,6 +46,8 @@ export const EARTH = {
    * has.
    */
   oceanRecyclingMyr: 180,
+  surfaceHeatTw: 46,
+  radiogenicHeatTw: 20,
 } as const;
 
 /**
@@ -112,10 +114,38 @@ export interface WorldMetrics {
    * into a hot primordial mantle instead of becoming continent.
    */
   dripped: number;
-  /** Excess mantle temperature of the primordial era; 0 once cooled or off. */
+  /** Mantle temperature above today's, in roughly 300 K units. */
   mantleExcess: number;
   /** Plumes building crust right now. */
   activePlumes: number;
+  /** Total heat leaving the surface (TW). */
+  surfaceHeatTw: number;
+  /** Heat supplied by radioactive decay (TW). */
+  radiogenicTw: number;
+  /** Heat supplied by the core (TW). */
+  coreHeatTw: number;
+  /** Mantle potential temperature (K). */
+  mantleTemp: number;
+  /** Temperature at the top of the core (K). */
+  coreTemp: number;
+  /** Current mantle cooling rate (K/Gyr); negative means warming. */
+  mantleCooling: number;
+  /** Coolest upper-mantle site (K below the planet's mantle temperature if negative). */
+  mantleAnomalyMin: number;
+  /** Hottest upper-mantle site (K above the planet's mantle temperature). */
+  mantleAnomalyMax: number;
+  /** Upper-mantle anomaly averaged over the globe by area (K): 0 but where sites are held at the limit. */
+  mantleAnomalyMean: number;
+  /** Slab piled in the lower mantle, as a multiple of the globe's area. */
+  pileMass: number;
+  /** Largest mantle site's plume weight over the mean: 1 when plumes rise anywhere alike. */
+  plumeWeightPeak: number;
+  /** Lowest dynamic topography over any cell (km): the mantle's deepest drag on the surface. */
+  dynTopoLow: number;
+  /** Highest dynamic topography over any cell (km): the mantle's greatest lift. */
+  dynTopoHigh: number;
+  /** Share of the globe standing above sea level (0 km). */
+  landArea: number;
   /**
    * Share of the surface per Myr of continental crust recycled into the mantle
    * at active margins. Levelled off, it matches {@link continentalGrowth}.

@@ -26,6 +26,11 @@ export interface LabelFields {
   density: ArrayLike<number>;
   thickness: ArrayLike<number>;
   keel: ArrayLike<number>;
+  lithosphere: ArrayLike<number>;
+  heatFlow: ArrayLike<number>;
+  mantleTemp: ArrayLike<number>;
+  lowerSlab: ArrayLike<number>;
+  dynTopo: ArrayLike<number>;
 }
 
 /** Multi-line debug dump of every per-cell property for a given cell. */
@@ -37,7 +42,12 @@ const labelText = (data: LabelFields, i: number): string =>
   `age ${data.age[i].toFixed(1)}\n` +
   `dens ${data.density[i].toFixed(2)}\n` +
   `thick ${data.thickness[i].toFixed(1)}\n` +
-  `keel ${data.keel[i].toFixed(2)}`;
+  `keel ${data.keel[i].toFixed(2)}\n` +
+  `lith ${data.lithosphere[i].toFixed(0)} km\n` +
+  `heat ${data.heatFlow[i].toFixed(1)} mW/m²\n` +
+  `mantle ${data.mantleTemp[i] >= 0 ? "+" : ""}${data.mantleTemp[i].toFixed(0)} K\n` +
+  `pile ${data.lowerSlab[i].toFixed(1)}\n` +
+  `dyn ${data.dynTopo[i] >= 0 ? "+" : ""}${data.dynTopo[i].toFixed(2)} km`;
 
 /**
  * Overlays crisp HTML labels (cell id + elevation) on each cell using a

@@ -1001,14 +1001,49 @@ fn main() {
             "max_thickening_per_myr" => t.max_thickening_per_myr = value,
             "mantle_drag" => t.mantle_drag = value,
             "upwelling_gain" => t.upwelling_gain = value,
+            "slab_cooling" => t.slab_cooling = value,
+            "site_insulation" => t.site_insulation = value,
+            "site_diffusion" => t.site_diffusion = value,
+            "upper_relax_time" => t.upper_relax_time = value,
+            "upper_temp_max" => t.upper_temp_max = value,
+            "insulation_site_gain" => t.insulation_site_gain = value,
+            "slab_transit_time" => t.slab_transit_time = value,
+            "slab_pile_lifetime" => t.slab_pile_lifetime = value,
+            "lower_diffusion" => t.lower_diffusion = value,
+            "pile_cooling" => t.pile_cooling = value,
+            "plume_floor" => t.plume_floor = value,
+            "dyn_topo_gain" => t.dyn_topo_gain = value,
+            "sink_topo_gain" => t.sink_topo_gain = value,
+            "dyn_topo_max" => t.dyn_topo_max = value,
+            "plume_thickness_cold" => t.plume_thickness_cold = value,
             "primordial_heat" => t.primordial_heat = value,
-            "primordial_cooling_time" => t.primordial_cooling_time = value,
+            "start_age_ga" => t.start_age_ga = value,
+            "radiogenic_heat_now" => t.radiogenic_heat_now = value,
+            "core_coupling" => t.core_coupling = value,
+            "heat_response_time" => t.heat_response_time = value,
+            "heat_flow_sensitivity" => t.heat_flow_sensitivity = value,
+            "continental_heat_flow" => t.continental_heat_flow = value,
+            "keel_insulation" => t.keel_insulation = value,
+            "viscosity_sensitivity" => t.viscosity_sensitivity = value,
+            "ridge_heat_uplift" => t.ridge_heat_uplift = value,
+            "melt_gain" => t.melt_gain = value,
             "plume_rate" => t.plume_rate = value,
             "plume_radius" => t.plume_radius = value,
             "plume_duration" => t.plume_duration = value,
             "plume_thickness" => t.plume_thickness = value,
             "plume_keel" => t.plume_keel = value,
             "hot_arc_suppression" => t.hot_arc_suppression = value,
+            "slab_pull_saturation_buoyancy" => t.slab_pull_saturation_buoyancy = value,
+            "lithosphere_growth" => t.lithosphere_growth = value,
+            "plate_thickness" => t.plate_thickness = value,
+            "continental_lithosphere" => t.continental_lithosphere = value,
+            "keel_lithosphere" => t.keel_lithosphere = value,
+            "rift_lithosphere" => t.rift_lithosphere = value,
+            "lithosphere_growth_time" => t.lithosphere_growth_time = value,
+            "lithosphere_thinning_time" => t.lithosphere_thinning_time = value,
+            "thermal_expansion" => t.thermal_expansion = value,
+            "lid_delta_t" => t.lid_delta_t = value,
+            "keel_depletion" => t.keel_depletion = value,
             "hot_drip" => t.hot_drip = value,
             "continental_drag" => t.continental_drag = value,
             "collision_drag" => t.collision_drag = value,
@@ -1250,6 +1285,42 @@ fn main() {
                 let made = plume_mass_made.max(1e-12);
                 (cont / made, keeled / made, any / made)
             };
+            let m = sim.metrics();
+            // Dynamic topography under continent and under ocean, by area.
+            let (dyn_cont, dyn_ocean) = {
+                let d = sim.front();
+                let dyn_topo = sim.dyn_topo();
+                let mut sums = [(0.0f64, 0.0f64); 2];
+                for i in 0..sim.mesh.cell_count {
+                    let s = &mut sums[(d.crust_type[i] != CONTINENTAL) as usize];
+                    s.0 += sim.mesh.area(i) * dyn_topo[i] as f64;
+                    s.1 += sim.mesh.area(i);
+                }
+                (sums[0].0 / sums[0].1.max(1e-12), sums[1].0 / sums[1].1.max(1e-12))
+            };
+            println!(
+                "heat {:>5.0} excess {:+.2} mantle {:.0} K core {:.0} K surface {:.1} TW radiogenic {:.1} TW core {:.1} TW cooling {:+.0} K/Gyr \
+                 anomaly {:+.0}..{:+.0} K mean {:+.1} K pile {:.2} plume_peak {:.1} \
+                 dyn {:+.2}..{:+.2} km dyn_cont {:+.3} dyn_ocean {:+.3} land {:.3}",
+                sim.elapsed(),
+                m.mantle_excess,
+                m.mantle_temp,
+                m.core_temp,
+                m.surface_heat_tw,
+                m.radiogenic_tw,
+                m.core_heat_tw,
+                m.mantle_cooling,
+                m.mantle_anomaly_min,
+                m.mantle_anomaly_max,
+                m.mantle_anomaly_mean,
+                m.pile_mass,
+                m.plume_weight_peak,
+                m.dyn_topo_low,
+                m.dyn_topo_high,
+                dyn_cont,
+                dyn_ocean,
+                m.land_area,
+            );
             println!(
                 "era {:>5.0} heat {:.2} plumes {} made_plume {:.3} made_arc {:.3} made_piling {:.3} cratons {} craton_area {:.4} craton_aspect {:.2} craton_share {:.2} \
                  ancient {:.3} ancient_keeled {:.3} overrun {:.3} unplaced {:.3} lost_keeled {:.3} \

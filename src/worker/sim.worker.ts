@@ -72,6 +72,11 @@ const allocateBuffers = (w: SimWorld): SnapshotBuffers => {
     density: new Float32Array(cells),
     thickness: new Float32Array(cells),
     keel: new Float32Array(cells),
+    lithosphere: new Float32Array(cells),
+    heatFlow: new Float32Array(cells),
+    mantleTemp: new Float32Array(cells),
+    lowerSlab: new Float32Array(cells),
+    dynTopo: new Float32Array(cells),
     cellKind: new Uint8Array(cells),
     arcKind: new Int8Array(arcs),
   };
@@ -95,6 +100,11 @@ const publish = (): void => {
   buffers.density.set(fields.density);
   buffers.thickness.set(fields.thickness);
   buffers.keel.set(fields.keel);
+  buffers.lithosphere.set(fields.lithosphere);
+  buffers.heatFlow.set(fields.heatFlow);
+  buffers.mantleTemp.set(fields.mantleTemp);
+  buffers.lowerSlab.set(fields.lowerSlab);
+  buffers.dynTopo.set(fields.dynTopo);
   buffers.cellKind.set(fields.cellKind);
   buffers.arcKind.set(fields.arcKind);
 

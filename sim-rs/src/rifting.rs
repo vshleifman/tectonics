@@ -36,6 +36,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use crate::cell_data::{CONTINENTAL, CellData, RIFT_FAR, RIFT_NEAR};
+use crate::mantle::MantleFlow;
 use crate::math::{Vec3, clamp01, cross, dot, len3, normalise, rotate};
 use crate::mesh::Mesh;
 use crate::par;
@@ -80,6 +81,7 @@ pub fn update_rifting(
     mesh: &Mesh,
     data: &mut CellData,
     plates: &mut PlateData,
+    mantle: &MantleFlow,
     dt_myr: f64,
     registry: &mut Registry,
     s: &mut Scratch,
@@ -90,7 +92,7 @@ pub fn update_rifting(
     let keep = (-dt_myr / t.weakness_decay_time.max(1e-6)).exp();
     par::for_each_mut(&mut data.weakness, |_, w| *w = (*w as f64 * keep) as f32);
     if o.supercontinent_insulation {
-        insulate(mesh, data, dt_myr, s, t);
+        insulate(mesh, data, mantle.cell_temps(), dt_myr, s, t);
     }
 
     // Each plate's cells by one counting sort, visited in order of lowest cell.
@@ -205,8 +207,17 @@ fn zone_of(mesh: &Mesh, data: &CellData, cells: &[i32], id: i32) -> Vec<usize> {
 /// Build heat under continents and lose it under ocean. A continent only
 /// insulates the mantle beneath it some way in from its coast, reaching full
 /// effect `insulation_reach` inland, so heat builds fastest under the interior
-/// of a large continent and hardly at all under a small one.
-fn insulate(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scratch, t: &Tuning) {
+/// of a large continent and hardly at all under a small one. It builds faster
+/// still over upper mantle that runs hot, and slower over mantle chilled by
+/// slabs; `upper_temp` is that anomaly beneath each cell (K).
+fn insulate(
+    mesh: &Mesh,
+    data: &mut CellData,
+    upper_temp: &[f32],
+    dt_myr: f64,
+    s: &mut Scratch,
+    t: &Tuning,
+) {
     let n = mesh.cell_count;
     let hops = &mut s.i32a;
     let queue = &mut s.queue;
@@ -243,7 +254,12 @@ fn insulate(mesh: &Mesh, data: &mut CellData, dt_myr: f64, s: &mut Scratch, t: &
             } else {
                 clamp01(hops[i] as f64 * spacing / t.insulation_reach)
             };
-            t.insulation_rate * inland
+            let site = if t.upper_temp_max > 0.0 {
+                (1.0 + t.insulation_site_gain * upper_temp[i] as f64 / t.upper_temp_max).max(0.0)
+            } else {
+                1.0
+            };
+            t.insulation_rate * inland * site
         } else {
             -t.insulation_cooling
         };
@@ -1115,12 +1131,29 @@ mod tests {
             }
         }
         let mut s = Scratch::new(mesh.cell_count);
-        insulate(&mesh, &mut data, 10.0, &mut s, &t);
+        insulate(&mesh, &mut data, &vec![0.0; mesh.cell_count], 10.0, &mut s, &t);
         let (deep, small) = (data.mantle_heat[interior], data.mantle_heat[island]);
         assert!(
             deep as f64 > 0.99 * t.insulation_rate * 10.0,
             "interior {deep}"
         );
         assert!(small < 0.6 * deep, "island {small} vs interior {deep}");
+    }
+
+    #[test]
+    fn heat_builds_faster_over_hot_upper_mantle() {
+        let mesh = Mesh::icosphere(4);
+        let n = mesh.cell_count;
+        let t = Tuning::default();
+        let built = |anomaly: f32| {
+            let mut data = CellData::new(n);
+            data.crust_type.fill(CONTINENTAL);
+            let mut s = Scratch::new(n);
+            insulate(&mesh, &mut data, &vec![anomaly; n], 10.0, &mut s, &t);
+            data.mantle_heat[0]
+        };
+        let (cold, still, hot) = (built(-150.0), built(0.0), built(150.0));
+        assert!(cold < still && still < hot, "cold {cold}, still {still}, hot {hot}");
+        assert_eq!(built(-(t.upper_temp_max as f32)), 0.0);
     }
 }

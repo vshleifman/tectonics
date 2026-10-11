@@ -576,6 +576,11 @@ export class CellRenderer {
    * - `"plate"`: a stable per-`plateId` hue so plates read as solid regions.
    * - `"crust"`: oceanic vs continental two-tone.
    * - `"density"`: a light-to-dark ramp over the crust density range.
+   * - `"lithosphere"`: thickness of the cold mantle lid under the crust.
+   * - `"heat-flow"`: surface heat loss from cold old plates to hot ridges.
+   * - `"mantle-temp"`: upper-mantle anomaly, cold under trenches, hot under continents.
+   * - `"slab-graveyard"`: slab piled in the lower mantle beneath old trenches.
+   * - `"dyn-topo"`: the mantle's lift over hot upwellings and drag over downwellings.
    * - `"boundary"`: each cell tinted by its dominant boundary type (needs
    *   `boundaryKind`, the per-cell classification from {@link classifyBoundaries}).
    */

@@ -15,6 +15,11 @@ export type ColourMode =
   | "plate"
   | "crust"
   | "density"
+  | "lithosphere"
+  | "heat-flow"
+  | "mantle-temp"
+  | "slab-graveyard"
+  | "dyn-topo"
   | "boundary";
 
 /**
@@ -31,6 +36,11 @@ export interface ColourFields {
   crustType: ArrayLike<number>;
   density: ArrayLike<number>;
   keel: ArrayLike<number>;
+  lithosphere: ArrayLike<number>;
+  heatFlow: ArrayLike<number>;
+  mantleTemp: ArrayLike<number>;
+  lowerSlab: ArrayLike<number>;
+  dynTopo: ArrayLike<number>;
 }
 
 const WHITE: Rgb = [1, 1, 1];
@@ -51,6 +61,58 @@ const hex = (v: number): Rgb => [
 
 /** A colour ramp: ascending positions (km) paired with the colour at each. */
 type Stops = readonly (readonly [number, Rgb])[];
+
+/** Lid thickness (km): bare ridge through cooled ocean plate to deep keel. */
+const LITHOSPHERE_STOPS: Stops = [
+  [0, hex(0xfff3d0)],
+  [30, hex(0xf2ca52)],
+  [60, hex(0x2fb8a0)],
+  [100, hex(0x2563a8)],
+  [150, hex(0x3b2a7a)],
+  [250, hex(0x120a2a)],
+];
+
+/** Surface heat flow (mW/m²): cold old plates through hot ridge crust. */
+const HEAT_FLOW_STOPS: Stops = [
+  [30, hex(0x172554)],
+  [48, hex(0x2563a8)],
+  [65, hex(0x2fb8a0)],
+  [100, hex(0xf2ca52)],
+  [200, hex(0xd94b32)],
+  [490, hex(0xfff3d0)],
+];
+
+/** Upper-mantle anomaly (K): chilled by slabs through neutral to hot under continents. */
+const MANTLE_TEMP_STOPS: Stops = [
+  [-200, hex(0x172554)],
+  [-100, hex(0x2563a8)],
+  [-30, hex(0x9cc9e8)],
+  [0, hex(0xf2efe6)],
+  [30, hex(0xf6c58a)],
+  [100, hex(0xd94b32)],
+  [200, hex(0x7a1020)],
+];
+
+/** Slab piled in the lower mantle (site areas of plate): bare mantle through deep cold graveyards. */
+const LOWER_SLAB_STOPS: Stops = [
+  [0, hex(0xf4efe6)],
+  [3, hex(0xcfe0e8)],
+  [6, hex(0x8fbcd9)],
+  [10, hex(0x4a86c0)],
+  [15, hex(0x2a4f96)],
+  [25, hex(0x1b1546)],
+];
+
+/** Dynamic topography (km): dragged down over downwellings through neutral to lifted over hot mantle. */
+const DYN_TOPO_STOPS: Stops = [
+  [-1.5, hex(0x2d1e5c)],
+  [-0.8, hex(0x5a5aa8)],
+  [-0.25, hex(0xb4b8dc)],
+  [0, hex(0xf2efe6)],
+  [0.25, hex(0xe0d29a)],
+  [0.8, hex(0xb7863a)],
+  [1.5, hex(0x5e3a12)],
+];
 
 /**
  * Hypsometric tints by height above sea level (km), after the atlas convention
@@ -191,6 +253,31 @@ export const writeCellColours = (
       }
       return;
     }
+    case "lithosphere":
+      for (let i = 0; i < cellCount; i++) {
+        putRamp(out, i * 4, LITHOSPHERE_STOPS, data.lithosphere[i]);
+      }
+      return;
+    case "heat-flow":
+      for (let i = 0; i < cellCount; i++) {
+        putRamp(out, i * 4, HEAT_FLOW_STOPS, data.heatFlow[i]);
+      }
+      return;
+    case "mantle-temp":
+      for (let i = 0; i < cellCount; i++) {
+        putRamp(out, i * 4, MANTLE_TEMP_STOPS, data.mantleTemp[i]);
+      }
+      return;
+    case "slab-graveyard":
+      for (let i = 0; i < cellCount; i++) {
+        putRamp(out, i * 4, LOWER_SLAB_STOPS, data.lowerSlab[i]);
+      }
+      return;
+    case "dyn-topo":
+      for (let i = 0; i < cellCount; i++) {
+        putRamp(out, i * 4, DYN_TOPO_STOPS, data.dynTopo[i]);
+      }
+      return;
     case "boundary":
       for (let i = 0; i < cellCount; i++) {
         put(
@@ -414,7 +501,63 @@ export const legendForView = (
           { at: 1, label: density.max.toFixed(2) },
         ],
         swatches: [],
-        note: "Light is buoyant continental crust; dark is old oceanic crust.",
+        note: "Crust density alone: light continental, dark oceanic. Whether a column sinks is up to its lid too (see the lithosphere view).",
+      };
+    case "lithosphere":
+      return {
+        gradient: stopsToGradient(LITHOSPHERE_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "0" },
+          { at: 0.2, label: "30" },
+          { at: 0.6, label: "100" },
+          { at: 1, label: "250 km" },
+        ],
+        swatches: [],
+        note: "Cold mantle lid under the crust: bare at ridges, thinned under rifts and plumes, deepest under cratonic keels.",
+      };
+    case "heat-flow":
+      return {
+        gradient: stopsToGradient(HEAT_FLOW_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "30" },
+          { at: 0.35, label: "65" },
+          { at: 1, label: "490 mW/m²" },
+        ],
+        swatches: [],
+        note: "Surface heat loss: coolest old floor and keels to hottest young ridge crust.",
+      };
+    case "mantle-temp":
+      return {
+        gradient: stopsToGradient(MANTLE_TEMP_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "−200" },
+          { at: 0.5, label: "0" },
+          { at: 1, label: "+200 K" },
+        ],
+        swatches: [],
+        note: "Upper mantle against the planet's mantle temperature: chilled where slabs sink, warmed under large continents.",
+      };
+    case "slab-graveyard":
+      return {
+        gradient: stopsToGradient(LOWER_SLAB_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "0" },
+          { at: 0.6, label: "10" },
+          { at: 1, label: "25 site areas" },
+        ],
+        swatches: [],
+        note: "Slab piled on the core, sunk at old trenches and fading over hundreds of Myr: plumes rise at the edges of the piles.",
+      };
+    case "dyn-topo":
+      return {
+        gradient: stopsToGradient(DYN_TOPO_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "−1.5" },
+          { at: 0.5, label: "0" },
+          { at: 1, label: "+1.5 km" },
+        ],
+        swatches: [],
+        note: "How far the mantle's flow holds the surface up or down: lifted over hot upper mantle such as under a supercontinent, dragged down over sinking slabs.",
       };
     case "boundary":
       return {

@@ -20,8 +20,7 @@ export interface Tuning {
    * Age (Myr) by which the sea floor has subsided all the way to
    * {@link abyssElevation}. Until then it sinks as the square root of its
    * age, as a cooling half-space does: fast off the ridge, then ever slower.
-   * Earth's flattens out at around 80-100 Myr. Oceanic density follows the
-   * same curve.
+   * Earth's flattens out at around 80-100 Myr.
    */
   seafloorFlatteningAge: number;
   /**
@@ -62,15 +61,13 @@ export interface Tuning {
    */
   slabWeight: number;
   /**
-   * Age (Myr) at which cooling oceanic lithosphere becomes denser than the
-   * mantle and starts to pull. Below it a slab has no weight to give.
+   * How much heavier than the mantle (km of mantle displaced) the column
+   * going down a trench must be, crust and lid together, to pull at full
+   * strength. A column that still floats pulls nothing; ordinary ocean floor
+   * starts to sink some 25 Myr off the ridge and reaches this at ~80 Myr.
+   * Lower saturates the pull of younger floor.
    */
-  slabPullOnsetAge: number;
-  /**
-   * Age (Myr) by which the plate has cooled through and its slab stops getting
-   * heavier. Beyond this, older crust pulls no harder.
-   */
-  slabPullSaturationAge: number;
+  slabPullSaturationBuoyancy: number;
   /**
    * Length of slab (radians of arc subducted) a trench needs before it pulls at
    * full strength. A slab only exists where crust has actually gone down, so a
@@ -197,23 +194,85 @@ export interface Tuning {
    */
   downwellingMemory: number;
 
+  // --- Upper-mantle temperature (see sim-rs/src/mantle.rs) ---
+  /**
+   * Cooling (K) of the upper mantle at a mantle site for each site's area of
+   * cold plate sunk there. Busy trenches sink a site's area every ~20 Myr, so
+   * the mantle beneath long-lived subduction zones runs cold.
+   */
+  slabCooling: number;
+  /**
+   * Warming (K/Myr) of the upper mantle under a site wholly covered by
+   * continent, which holds in the heat that would have left through ocean
+   * floor. With {@link upperRelaxTime} this sets how much hotter the mantle
+   * under a supercontinent gets: ~150 K at the defaults.
+   */
+  siteInsulation: number;
+  /** Share per Myr of the difference from its neighbours that each site's anomaly evens out by. */
+  siteDiffusion: number;
+  /** Myr over which an upper-mantle anomaly fades back to the planet's mantle temperature. */
+  upperRelaxTime: number;
+  /** Largest anomaly (K) the upper mantle may run hotter or cooler than the planet's mantle. */
+  upperTempMax: number;
+  /**
+   * How strongly a hot upper mantle speeds up the heat that builds under a
+   * continent before it rifts, and a cold one slows it: at 1, mantle
+   * {@link upperTempMax} hot doubles {@link insulationRate} and mantle as cold
+   * stops it.
+   */
+  insulationSiteGain: number;
+
+  // --- Lower-mantle slab piles and plume sites (see sim-rs/src/mantle.rs) ---
+  /** Myr slab sunk at a trench takes to reach the lower mantle and pile up there. */
+  slabTransitTime: number;
+  /**
+   * Myr over which a slab pile in the lower mantle warms through and fades.
+   * Longer gives the mantle a longer memory of where oceans closed, and holds
+   * plumes to the rims of old piles for longer.
+   */
+  slabPileLifetime: number;
+  /** Share per Myr of the difference from its neighbours that each site's pile evens out by. */
+  lowerDiffusion: number;
+  /** Cooling (K/Myr) of the upper mantle over a pile for each site's area of slab in it. */
+  pileCooling: number;
+  /**
+   * Share of the plume weight spread evenly over the globe, on top of what
+   * pile edges draw: higher scatters plumes more widely. With no piles at all,
+   * plumes rise anywhere alike.
+   */
+  plumeFloor: number;
+
+  // --- Dynamic topography (see sim-rs/src/elevation.rs) ---
+  /**
+   * Uplift (km) of the surface for each K the upper mantle beneath it runs
+   * hotter than the planet's mantle, and subsidence for each K colder. At the
+   * default a supercontinent's ~150 K of trapped heat lifts it ~1.5 km.
+   */
+  dynTopoGain: number;
+  /**
+   * Subsidence (km) of the surface over a downwelling for each share of the
+   * area over it subducting there per Myr, beyond the globe's mean; the
+   * gentle upwelling between downwellings lifts the rest a little.
+   */
+  sinkTopoGain: number;
+  /** Most (km) the mantle's flow may lift or lower the surface. */
+  dynTopoMax: number;
+
   // --- Crust lifecycle & densities (see sim-rs/src/plates.rs, crust_lifecycle.rs) ---
   /**
    * Age (Myr) by which oceanic lithosphere has reached its full strength
    * against rifting, and the range the starting sea floor's ages are drawn
-   * over. Depth and density follow {@link seafloorFlatteningAge} instead.
+   * over. Depth follows {@link seafloorFlatteningAge} instead.
    */
   maxOceanicAge: number;
   /** Continental (buoyant) crust density. */
   continentalDensity: number;
   /**
-   * Young ridge oceanic crust density, and the density of oceanic crust
-   * itself in isostasy (see {@link mantleDensity}): how deep ocean floor sits
-   * as it cools is the cooling curve's job, not its density's.
+   * Density of oceanic crust, at every age. Crust does not densify as it
+   * cools; what makes old ocean sink is the cold mantle lid beneath it (see
+   * {@link lithosphereGrowth}), and how deep it sits the cooling curve's job.
    */
-  oceanicDensityYoung: number;
-  /** Fully cooled oceanic crust density. */
-  oceanicDensityOld: number;
+  oceanicDensity: number;
   /** Starting oceanic crust thickness (km). */
   oceanicThickness: number;
   /** Thickness (km) above which accreted oceanic crust becomes continental. */
@@ -254,6 +313,40 @@ export interface Tuning {
    * so a collision widens into a plateau rather than evaporating.
    */
   delaminationRate: number;
+
+  // --- Lithosphere & buoyancy (see sim-rs/src/lithosphere.rs) ---
+  /**
+   * How fast the cold mantle lid under ocean floor thickens (km per square
+   * root of Myr), as a cooling half-space does. The lid is denser than the
+   * mantle, so this sets the age at which ocean floor starts to sink: ~23 Myr
+   * for ordinary crust at 9, later under thicker crust.
+   */
+  lithosphereGrowth: number;
+  /** Thickness (km) at which an ocean plate has cooled through and stops thickening. */
+  plateThickness: number;
+  /** Thickness (km) of the lid a continent without a keel cools toward. */
+  continentalLithosphere: number;
+  /** Extra lid (km) a full cratonic keel reaches down. */
+  keelLithosphere: number;
+  /** Thickness (km) a rift, plume head or foundering root thins the lid toward. */
+  riftLithosphere: number;
+  /** Myr for a continent's lid to cool toward its full depth. */
+  lithosphereGrowthTime: number;
+  /** Myr for a rift, plume head or foundering root to thin the lid. */
+  lithosphereThinningTime: number;
+  /** Thermal expansion of the mantle (per K): how much denser cold lid is. */
+  thermalExpansion: number;
+  /**
+   * Temperature drop (K) across the lid, from the mantle beneath to the
+   * surface. The lid is taken at half of it on average.
+   */
+  lidDeltaT: number;
+  /**
+   * How much lighter (g/cm³) a full keel's depleted melt residue is than
+   * ordinary lid: about enough to offset its cold, so a craton floats however
+   * deep its keel.
+   */
+  keelDepletion: number;
 
   // --- Advection (see sim-rs/src/advect.rs) ---
   /**
@@ -301,8 +394,6 @@ export interface Tuning {
    * accretion minus this; when this is larger the margin shrinks.
    */
   marginErosion: number;
-  /** Density stamped on an empty rift placeholder until the lifecycle fills it. */
-  riftDensity: number;
   /**
    * Thickness (km) below which crust stretched across advancing cells counts as
    * rifted apart, and fresh ocean is minted there instead of a paper-thin sliver.
@@ -544,26 +635,53 @@ export interface Tuning {
    */
   minPlateArea: number;
 
-  // --- Primordial era (see sim-rs/src/primordial.rs) ---
+  // --- Planetary heat / primordial era (see sim-rs/src/heat.rs) ---
   /**
    * Excess heat of the young mantle at the start, in [0, 1]; 0 turns the era
    * off. While it lasts, continent is made over plumes as round, keeled
    * cratons, and thickened ocean floor drips back into the mantle rather than
-   * piling up into continent. It decays over {@link primordialCoolingTime}.
-   * Keels grow only while it lasts (see {@link cratonGrowthTime}), so with it
-   * at 0 no craton ever forms.
+   * piling up into continent. The planetary heat budget cools it. Keels grow
+   * only while it lasts (see {@link cratonGrowthTime}), so with it at 0 and a
+   * present-day start age no craton ever forms.
    */
   primordialHeat: number;
-  /** Myr for the mantle's excess heat to fall by a factor of e. */
-  primordialCoolingTime: number;
-  /** Plumes rising per Myr at full excess heat. */
+  /** Age before present (Ga) at which the simulated history starts. */
+  startAgeGa: number;
+  /** Present-day heat from radioactive decay in the mantle and crust (TW). */
+  radiogenicHeatNow: number;
+  /** Core-to-mantle heat flow in TW per kelvin of temperature difference. */
+  coreCoupling: number;
+  /** Myr over which mantle cooling responds to a changed surface heat flow. */
+  heatResponseTime: number;
+  /** Exponent by which convective surface heat loss rises with temperature. */
+  heatFlowSensitivity: number;
+  /** Heat flow through uninsulated continental crust (mW/m²). */
+  continentalHeatFlow: number;
+  /** Share of continental heat flow a full cratonic keel blocks. */
+  keelInsulation: number;
+  /** Exponential fall in mantle viscosity per unit of excess heat. */
+  viscositySensitivity: number;
+  /** Ridge uplift (km) per unit of excess heat. */
+  ridgeHeatUplift: number;
+  /** Extra ridge-crust thickness per unit of excess heat. */
+  meltGain: number;
+  /**
+   * Plumes rising per Myr while the core passes up as much heat as today's.
+   * The core cools slowly, so plumes keep rising into the present.
+   */
   plumeRate: number;
   /** Radius (radians; 0.08 is ~500 km) of the plateau a plume builds. */
   plumeRadius: number;
   /** Myr a plume takes to build its plateau. */
   plumeDuration: number;
-  /** Crust thickness (km) a plume builds at the plateau's centre. */
+  /** Crust thickness (km) a plume builds at the plateau's centre at full excess heat. */
   plumeThickness: number;
+  /**
+   * Crust thickness (km) a plume builds at the plateau's centre in a mantle as
+   * cool as today's: kept under {@link continentalThicknessThreshold}, so it
+   * makes an ocean plateau rather than continent.
+   */
+  plumeThicknessCold: number;
   /**
    * Keel a plume's crust is born with, in [0, 1]: the depleted mantle the melt
    * leaves behind is a cratonic root from the start.
@@ -604,8 +722,7 @@ export const defaultTuning: Tuning = {
   elevationMax: 10,
 
   slabWeight: 1,
-  slabPullOnsetAge: 25,
-  slabPullSaturationAge: 80,
+  slabPullSaturationBuoyancy: 0.7,
   slabFullLength: 0.1,
   slabDecayTime: 30,
   slabInitiationTime: 20,
@@ -625,10 +742,24 @@ export const defaultTuning: Tuning = {
   mantleFlowCoupling: 30,
   downwellingMemory: 800,
 
+  slabCooling: 25,
+  siteInsulation: 1,
+  siteDiffusion: 0.01,
+  upperRelaxTime: 150,
+  upperTempMax: 300,
+  insulationSiteGain: 1,
+  slabTransitTime: 100,
+  slabPileLifetime: 700,
+  lowerDiffusion: 0.002,
+  pileCooling: 0.005,
+  plumeFloor: 0.1,
+  dynTopoGain: 0.01,
+  sinkTopoGain: 20,
+  dynTopoMax: 1.5,
+
   maxOceanicAge: 200,
   continentalDensity: 2.7,
-  oceanicDensityYoung: 2.9,
-  oceanicDensityOld: 3.0,
+  oceanicDensity: 2.9,
   oceanicThickness: 7,
   continentalThicknessThreshold: 15,
   continentalRevertThickness: 10,
@@ -636,13 +767,23 @@ export const defaultTuning: Tuning = {
   maxCrustThickness: 60,
   delaminationRate: 0.3,
 
+  lithosphereGrowth: 9,
+  plateThickness: 100,
+  continentalLithosphere: 150,
+  keelLithosphere: 100,
+  riftLithosphere: 30,
+  lithosphereGrowthTime: 200,
+  lithosphereThinningTime: 10,
+  thermalExpansion: 3e-5,
+  lidDeltaT: 1300,
+  keelDepletion: 0.065,
+
   accretionFraction: 0.2,
   maxThickeningPerMyr: 0.5,
   subductionErosion: 0.05,
   marginErosion: 0.12,
   crustSpreadStart: 35,
   crustSpreadRate: 0.05,
-  riftDensity: 2.9,
   riftThicknessFloor: 2,
   basinInfillRate: 1,
   basinInfillMaxArea: 0.0005,
@@ -684,11 +825,21 @@ export const defaultTuning: Tuning = {
   minPlateArea: 0.0005,
 
   primordialHeat: 1,
-  primordialCoolingTime: 1000,
+  startAgeGa: 3,
+  radiogenicHeatNow: 20,
+  coreCoupling: 0.004,
+  heatResponseTime: 50,
+  heatFlowSensitivity: 4,
+  continentalHeatFlow: 65,
+  keelInsulation: 0.4,
+  viscositySensitivity: 0.1,
+  ridgeHeatUplift: 0.1,
+  meltGain: 0.1,
   plumeRate: 0.1,
   plumeRadius: 0.08,
   plumeDuration: 20,
   plumeThickness: 35,
+  plumeThicknessCold: 13,
   plumeKeel: 1,
   hotArcSuppression: 1,
   hotDrip: 1,

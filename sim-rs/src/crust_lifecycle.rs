@@ -6,9 +6,9 @@
 use crate::advect::AdvectionField;
 use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, total_crust_mass};
 use crate::elevation::baseline_elevation;
+use crate::lithosphere::neutral_age;
 use crate::mesh::Mesh;
 use crate::par::{self, Disjoint};
-use crate::plates::oceanic_density_from_age;
 use crate::scratch::Scratch;
 use crate::tuning::Tuning;
 
@@ -136,22 +136,24 @@ pub fn infill_enclosed_basins(
     field.continentalised_by_infill = infilled;
 }
 
-/// Lay fresh ocean floor in the gaps a step of transport opened, booked as
-/// created mass. Ages are brought up to date once a tick, by
-/// [`apply_crust_lifecycle`], so floor laid partway through a tick is given
-/// `age` short of zero by the rest of the tick still to come.
+/// Lay fresh ocean floor, `ridge_crust_thickness` thick, in the gaps a step
+/// of transport opened, booked as created mass. Ages are brought up to date
+/// once a tick, by [`apply_crust_lifecycle`], so floor laid partway through a
+/// tick is given `age` short of zero by the rest of the tick still to come.
 pub fn lay_new_floor(mesh: &Mesh, data: &mut CellData, field: &mut AdvectionField, age: f64, t: &Tuning) {
     let gaps = par::filter_map(mesh.cell_count, |i| (field.rift_cell[i] != 0).then_some(i));
-    let elevation = baseline_elevation(t, OCEANIC, 0.0, t.oceanic_thickness) as f32;
+    let thickness = t.ridge_crust_thickness as f32;
+    let elevation = baseline_elevation(t, OCEANIC, 0.0, thickness as f64) as f32;
     let mut created = 0.0f64;
     for i in gaps {
         data.crust_type[i] = OCEANIC;
         data.age[i] = age as f32;
         data.plume_share[i] = 0.0;
-        data.density[i] = t.oceanic_density_young as f32;
-        data.thickness[i] = t.oceanic_thickness as f32;
+        data.density[i] = t.oceanic_density as f32;
+        data.lithosphere[i] = 0.0;
+        data.thickness[i] = thickness;
         data.elevation[i] = elevation;
-        created += mesh.area(i) * t.oceanic_thickness;
+        created += mesh.area(i) * thickness as f64;
     }
     field.created_this_step = created;
     field.created_total += created;
@@ -207,7 +209,6 @@ pub fn apply_crust_lifecycle(
                             || h >= t.continental_nucleation_thickness
                             || continental_nbrs(i) >= 2);
                     if !nucleates {
-                        density.set(i, oceanic_density_from_age(t, aged as f64) as f32);
                         return None;
                     }
                     crust_type.set(i, CONTINENTAL);
@@ -229,12 +230,12 @@ pub fn apply_crust_lifecycle(
                 {
                     // Thinned continent is old, cool lithosphere, not crust
                     // fresh from a ridge; but no older than ocean that has yet
-                    // to pull, so a margin that loses its crust does not at
-                    // once become the side of a trench that sinks.
-                    let reverted = (aged as f64).min(t.slab_pull_onset_age);
+                    // to sink, so a margin that loses its crust does not at
+                    // once become the side of a trench that goes down.
+                    let reverted = (aged as f64).min(neutral_age(t, h));
                     crust_type.set(i, OCEANIC);
                     age.set(i, reverted as f32);
-                    density.set(i, oceanic_density_from_age(t, reverted) as f32);
+                    density.set(i, t.oceanic_density as f32);
                     keel.set(i, 0.0);
                     Some(Flip::Reverted)
                 } else {

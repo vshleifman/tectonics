@@ -57,6 +57,21 @@ export interface TrajectoryPoint {
   continentCount: number;
   largestContinentShare: number;
   cratonShare: number;
+  mantleExcess: number;
+  surfaceHeatTw: number;
+  radiogenicTw: number;
+  coreHeatTw: number;
+  mantleTemp: number;
+  coreTemp: number;
+  mantleCooling: number;
+  mantleAnomalyMin: number;
+  mantleAnomalyMax: number;
+  pileMass: number;
+  plumeWeightPeak: number;
+  dynTopoLow: number;
+  dynTopoHigh: number;
+  landArea: number;
+  activePlumes: number;
   meanOceanAge: number;
   maxOceanAge: number;
   oceanRecyclingMyr: number | null;
@@ -142,6 +157,21 @@ export const runBench = (
       continentCount: m.continentCount,
       largestContinentShare: m.largestContinentShare,
       cratonShare: m.cratonShare,
+      mantleExcess: m.mantleExcess,
+      surfaceHeatTw: m.surfaceHeatTw,
+      radiogenicTw: m.radiogenicTw,
+      coreHeatTw: m.coreHeatTw,
+      mantleTemp: m.mantleTemp,
+      coreTemp: m.coreTemp,
+      mantleCooling: m.mantleCooling,
+      mantleAnomalyMin: m.mantleAnomalyMin,
+      mantleAnomalyMax: m.mantleAnomalyMax,
+      pileMass: m.pileMass,
+      plumeWeightPeak: m.plumeWeightPeak,
+      dynTopoLow: m.dynTopoLow,
+      dynTopoHigh: m.dynTopoHigh,
+      landArea: m.landArea,
+      activePlumes: m.activePlumes,
       meanOceanAge: m.meanOceanAge,
       maxOceanAge: m.maxOceanAge,
       oceanRecyclingMyr: m.oceanRecyclingMyr,
@@ -215,7 +245,13 @@ export const describeBench = (r: BenchResult): string => {
     `(${passes})` +
     (last
       ? ` | final: plates ${last.plateCount}, cont ${(last.continentalArea * 100).toFixed(1)}%, ` +
-        `ocean age ${last.meanOceanAge.toFixed(1)}, drift ${(last.drift * 100).toFixed(3)}%` +
+        `ocean age ${last.meanOceanAge.toFixed(1)}, heat ${last.surfaceHeatTw.toFixed(1)} TW, ` +
+        `mantle ${last.mantleTemp.toFixed(0)} K (${last.mantleCooling.toFixed(0)} K/Gyr cooling, ` +
+        `upper ${last.mantleAnomalyMin.toFixed(0)}..${last.mantleAnomalyMax.toFixed(0)} K, ` +
+        `piled ${last.pileMass.toFixed(2)} globes, ${last.activePlumes} plumes), ` +
+        `dynamic topography ${last.dynTopoLow.toFixed(2)}..${last.dynTopoHigh.toFixed(2)} km, ` +
+        `land ${percent(last.landArea, 1)}, ` +
+        `drift ${(last.drift * 100).toFixed(3)}%` +
         describeContinentalBudget(r)
       : "")
   );

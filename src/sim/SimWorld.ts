@@ -32,6 +32,16 @@ export interface WorldFields {
   thickness: Float32Array;
   /** Cratonic keel per cell, in [0, 1]. */
   keel: Float32Array;
+  /** Thickness (km) of the cold mantle lid beneath each cell. */
+  lithosphere: Float32Array;
+  /** Heat leaving each cell (mW/m²). */
+  heatFlow: Float32Array;
+  /** Upper-mantle temperature beneath each cell (K), above or below the planet's mantle temperature. */
+  mantleTemp: Float32Array;
+  /** Slab piled in the lower mantle beneath each cell, as a share of the area over it. */
+  lowerSlab: Float32Array;
+  /** Dynamic topography (km) over each cell: how far the mantle's flow lifts or lowers the surface. */
+  dynTopo: Float32Array;
   cellKind: Uint8Array;
   arcKind: Int8Array;
 }
