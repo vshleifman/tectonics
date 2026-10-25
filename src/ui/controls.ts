@@ -124,6 +124,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   collisionLockGain:
     "How much stiffer a continent-continent collision is than ocean subduction.",
   sutureCoupling: "How strongly a suture pulls two plates onto one motion.",
+  edgeCoupling:
+    "How strongly each plate is drawn toward its neighbours' motion. Small plates are carried along.",
   sutureMergeTime:
     "How long a suture must hold before the two plates become one.",
   boundaryDeathTime:
@@ -225,16 +227,20 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   riftStrength:
     "Tension continental lithosphere must be under before it tears.",
   oceanicStrengthYoung:
-    "Strength of young oceanic lithosphere, relative to continental.",
+    "Strength of young ocean relative to continent. At 1 it is no weaker, so ridges do not tear the plate.",
   oceanicStrengthOld:
     "Strength of fully cooled ocean; old ocean almost never tears.",
   riftDuration:
     "How long a continental rift stretches before the plate breaks.",
+  minRiftDuration:
+    "How long any rift, even through ocean, must stretch before the plate can break.",
   riftStretch:
     "How many times over rift crust is thinned by the time it breaks.",
   sutureWeakness: "Weakness left on the seam where two continents weld.",
   riftMarginWeakness: "Weakness left where a plate has rifted apart.",
-  weaknessDecayTime: "How long lithospheric weakness takes to heal.",
+  weaknessDecayTime: "How long weakness in continent takes to heal.",
+  oceanWeaknessDecayTime:
+    "How long weakness in ocean takes to heal, as the lithosphere cools.",
   weaknessRelief: "How much of a plate's strength its weakest line can remove.",
   minRiftArea: "Smallest share of the globe each piece of a rift must cover.",
   maxRiftAspect: "Longest a rift piece may be, as a multiple of its width.",
@@ -248,7 +254,12 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   domePush: "Push that slides lithosphere off a hot dome after a rift.",
   domePushDuration: "How long that push keeps the rifted pieces apart.",
   riftHeatRelease: "Share of mantle heat vented when a plate rifts.",
-  minPlateArea: "Smallest fragment that becomes a plate of its own.",
+  minPlateArea:
+    "Smallest piece that still counts as a plate when a rift breaks.",
+  minFragmentArea:
+    "Smallest pinched-off piece that becomes a plate. Smaller ones join a neighbour.",
+  passiveMarginCollapseAge:
+    "Age at which ocean beside a continent founders and breaks away to start a trench. 0 turns it off.",
   primordialHeat:
     "Excess heat of the young mantle; early continent forms as plume cratons, and keels grow only while it lasts.",
   startAgeGa: "Age before present at which this world's history starts.",
@@ -462,6 +473,13 @@ const TUNING_GROUP_FIELDS: {
         step: 0.01,
       },
       {
+        key: "edgeCoupling",
+        label: "Neighbour coupling",
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
         key: "sutureMergeTime",
         label: "Suture merge time (Myr)",
         min: 0,
@@ -523,6 +541,13 @@ const TUNING_GROUP_FIELDS: {
         step: 2,
       },
       {
+        key: "minRiftDuration",
+        label: "Minimum rift time (Myr)",
+        min: 0,
+        max: 40,
+        step: 1,
+      },
+      {
         key: "riftStretch",
         label: "Rift thinning factor",
         min: 1,
@@ -570,6 +595,13 @@ const TUNING_GROUP_FIELDS: {
         min: 100,
         max: 5000,
         step: 100,
+      },
+      {
+        key: "oceanWeaknessDecayTime",
+        label: "Ocean weakness memory (Myr)",
+        min: 10,
+        max: 2000,
+        step: 10,
       },
       {
         key: "insulationRate",
@@ -629,10 +661,24 @@ const TUNING_GROUP_FIELDS: {
       },
       {
         key: "minPlateArea",
-        label: "Min fragment area",
+        label: "Min plate area",
         min: 0,
         max: 0.01,
         step: 0.0005,
+      },
+      {
+        key: "minFragmentArea",
+        label: "Min pinched-plate area",
+        min: 0,
+        max: 0.05,
+        step: 0.001,
+      },
+      {
+        key: "passiveMarginCollapseAge",
+        label: "Margin collapse age (Myr)",
+        min: 0,
+        max: 2000,
+        step: 50,
       },
     ],
   },
@@ -1303,6 +1349,42 @@ export const createControls = (
     insulationToggle.row,
     "Mantle heat builds under continents and can tear a supercontinent apart.",
   );
+  const tensionToggle = makeToggle(
+    "Two-sided tension",
+    simOptions.twoSidedTension,
+  );
+  tensionToggle.input.addEventListener("change", () => {
+    setSimOptions({ twoSidedTension: tensionToggle.input.checked });
+    onTuningChange();
+  });
+  tooltip.attach(
+    tensionToggle.row,
+    "A plate is in tension only where slabs pull it from both sides.",
+  );
+  const quietToggle = makeToggle(
+    "Quiet by mean speed",
+    simOptions.quietByMeanSpeed,
+  );
+  quietToggle.input.addEventListener("change", () => {
+    setSimOptions({ quietByMeanSpeed: quietToggle.input.checked });
+    onTuningChange();
+  });
+  tooltip.attach(
+    quietToggle.row,
+    "A boundary counts as quiet by its average speed, not its single fastest spot.",
+  );
+  const collapseToggle = makeToggle(
+    "Collapse only stagnant plates",
+    simOptions.collapseStagnantOnly,
+  );
+  collapseToggle.input.addEventListener("change", () => {
+    setSimOptions({ collapseStagnantOnly: collapseToggle.input.checked });
+    onTuningChange();
+  });
+  tooltip.attach(
+    collapseToggle.row,
+    "Old passive margins founder only on plates whose sea floor is old on average, such as one covering the globe.",
+  );
 
   const readout = document.createElement("div");
   Object.assign(readout.style, {
@@ -1478,6 +1560,9 @@ export const createControls = (
     stepButton,
     clearButton,
     insulationToggle.row,
+    tensionToggle.row,
+    quietToggle.row,
+    collapseToggle.row,
     readout,
     massEl,
     diagnostics.pinned,

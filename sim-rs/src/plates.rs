@@ -71,6 +71,18 @@ pub struct PlateData {
     pub failed_rifts: u64,
     /// Oceans broken away from the continent they aged against.
     pub passive_collapses: u64,
+    /// Pieces pinched off a plate that were large enough to become plates.
+    pub fragments: u64,
+    /// Pinched-off pieces absorbed into a neighbour instead.
+    pub absorbed_fragments: u64,
+    /// Plates folded together along a continental suture.
+    pub weld_merges: u64,
+    /// Plates folded together because their shared boundary had gone quiet.
+    pub quiet_merges: u64,
+    /// Plates folded together because their cratons had stayed welded.
+    pub craton_merges: u64,
+    /// Plates retired because they held no crust.
+    pub consumed: u64,
 }
 
 /// Key for an unordered pair of plate ids.
@@ -144,7 +156,11 @@ pub fn initialise_crust(t: &Tuning, centres: &[f32], data: &mut CellData, seed: 
     let n = data.age.len();
     let field: Vec<f64> = (0..n)
         .map(|i| {
-            let p = [centres[i * 3] as f64, centres[i * 3 + 1] as f64, centres[i * 3 + 2] as f64];
+            let p = [
+                centres[i * 3] as f64,
+                centres[i * 3 + 1] as f64,
+                centres[i * 3 + 2] as f64,
+            ];
             waves
                 .iter()
                 .map(|(d, k, phase)| (k * (p[0] * d[0] + p[1] * d[1] + p[2] * d[2]) + phase).cos())
@@ -153,7 +169,9 @@ pub fn initialise_crust(t: &Tuning, centres: &[f32], data: &mut CellData, seed: 
         .collect();
     let (lo, hi) = field
         .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| (l.min(x), h.max(x)));
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| {
+            (l.min(x), h.max(x))
+        });
     let span = (hi - lo).max(1e-12);
     for i in 0..n {
         let age = (field[i] - lo) / span * t.max_oceanic_age;

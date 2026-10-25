@@ -12,15 +12,14 @@ use crate::heat::{PlanetHeat, effective_tuning};
 use crate::lithosphere::update_lithosphere;
 use crate::mantle::MantleFlow;
 use crate::math::read3;
-use std::collections::HashMap;
 use crate::mesh::Mesh;
-use crate::par;
 use crate::metrics::{PlateSummary, WorldMetrics, compute_metrics, summaries};
+use crate::par;
 use crate::passive_margins::collapse_passive_margins;
-use crate::primordial::Primordial;
 use crate::plate_forces::update_plate_motion;
 use crate::plate_lifecycle::update_plate_identity;
 use crate::plates::{PlateData, initialise_crust, reconcile};
+use crate::primordial::Primordial;
 use crate::recycling::{recycle_continental_margins, track_continental_growth};
 use crate::registry::{Registry, assign_plates};
 use crate::rifting::update_rifting;
@@ -30,6 +29,7 @@ use crate::slabs::{seed_slabs, update_slabs};
 use crate::sutures::update_sutures;
 use crate::timer::now_ms;
 use crate::tuning::{SimOptions, Tuning};
+use std::collections::HashMap;
 
 /// Passes timed per tick, in order; matches `PASS_NAMES` on the TypeScript side.
 pub const PASS_COUNT: usize = 9;
@@ -109,7 +109,12 @@ impl Sim {
             .relabel(&self.raw_labels, count, &mut self.front.plate_id);
         reconcile(&mut self.plates, &report);
         if init_crust {
-            initialise_crust(&self.tuning, &self.mesh.centres, &mut self.front, "tectonics");
+            initialise_crust(
+                &self.tuning,
+                &self.mesh.centres,
+                &mut self.front,
+                "tectonics",
+            );
             self.initial_mass = total_crust_mass(&self.mesh.areas, &self.front);
             self.advection.live_mass = self.initial_mass;
             self.advection.subducted_total = 0.0;
@@ -135,6 +140,7 @@ impl Sim {
             &mut self.scratch,
             &eff,
             dt,
+            &self.options,
         );
         classify(
             &self.mesh,
@@ -212,7 +218,18 @@ impl Sim {
     fn drive_plates(&mut self) {
         let t = &self.effective_tuning();
         let dt = t.dt_myr;
-        let Sim { mesh, front, plates, boundaries, mantle, dyn_topo, scratch, options, timings, .. } = self;
+        let Sim {
+            mesh,
+            front,
+            plates,
+            boundaries,
+            mantle,
+            dyn_topo,
+            scratch,
+            options,
+            timings,
+            ..
+        } = self;
         let mut mark = now_ms();
         update_slabs(mesh, front, boundaries, scratch, t, dt);
         mantle.update(mesh, front, boundaries, dt, t, options);
@@ -223,7 +240,9 @@ impl Sim {
                 dynamic_topography(t, mantle.upper_temp_at(i), mantle.sink_at(i) - balance) as f32
             });
         }
-        update_plate_motion(mesh, front, plates, boundaries, mantle, scratch, t, dt);
+        update_plate_motion(
+            mesh, front, plates, boundaries, mantle, scratch, t, dt, options,
+        );
         lap(timings, &mut mark, 0);
         classify(mesh, front, plates, boundaries, scratch, t);
         lap(timings, &mut mark, 1);
@@ -236,14 +255,26 @@ impl Sim {
     fn move_plates(&mut self, steps: usize) -> [f64; 18] {
         let t = &self.effective_tuning();
         let dt = t.dt_myr / steps as f64;
-        let Sim { mesh, front, back, plates, boundaries, advection, scratch, timings, .. } = self;
+        let Sim {
+            mesh,
+            front,
+            back,
+            plates,
+            boundaries,
+            advection,
+            scratch,
+            timings,
+            ..
+        } = self;
         let mut mark = now_ms();
         let mut moved = [0.0f64; 18];
         for step in 0..steps {
             for x in advection.step_tallies_mut() {
                 *x = 0.0;
             }
-            advect(mesh, front, back, plates, dt, boundaries, advection, scratch, t);
+            advect(
+                mesh, front, back, plates, dt, boundaries, advection, scratch, t,
+            );
             lay_new_floor(mesh, back, advection, -((step + 1) as f64) * dt, t);
             for (sum, x) in moved.iter_mut().zip(advection.step_tallies_mut()) {
                 *sum += *x;
@@ -284,8 +315,10 @@ impl Sim {
         let mut mark = now_ms();
         update_plate_identity(mesh, front, plates, registry, scratch, t);
         lap(timings, &mut mark, 4);
-        update_rifting(mesh, front, plates, mantle, dt, registry, scratch, t, options);
-        collapse_passive_margins(mesh, front, plates, registry, scratch, t);
+        update_rifting(
+            mesh, front, plates, mantle, dt, registry, scratch, t, options,
+        );
+        collapse_passive_margins(mesh, front, plates, registry, scratch, t, options);
         lap(timings, &mut mark, 5);
         recycle_continental_margins(mesh, front, dt, advection, t);
         infill_enclosed_basins(mesh, front, dt, advection, scratch, t);
@@ -362,6 +395,30 @@ impl Sim {
 
     pub fn failed_rift_count(&self) -> u64 {
         self.plates.failed_rifts
+    }
+
+    pub fn fragment_count(&self) -> u64 {
+        self.plates.fragments
+    }
+
+    pub fn absorbed_fragment_count(&self) -> u64 {
+        self.plates.absorbed_fragments
+    }
+
+    pub fn weld_merge_count(&self) -> u64 {
+        self.plates.weld_merges
+    }
+
+    pub fn quiet_merge_count(&self) -> u64 {
+        self.plates.quiet_merges
+    }
+
+    pub fn craton_merge_count(&self) -> u64 {
+        self.plates.craton_merges
+    }
+
+    pub fn consumed_count(&self) -> u64 {
+        self.plates.consumed
     }
 
     pub fn plate_omegas(&self) -> Vec<f64> {
@@ -446,7 +503,10 @@ impl Sim {
             field.iter().for_each(|x| eat(x.to_bits() as u64));
         }
         d.plate_id.iter().for_each(|&x| eat(x as u32 as u64));
-        d.crust_type.iter().chain(&d.rift_side).for_each(|&x| eat(x as u64));
+        d.crust_type
+            .iter()
+            .chain(&d.rift_side)
+            .for_each(|&x| eat(x as u64));
         for (&id, p) in &self.plates.by_id {
             eat(id as u32 as u64);
             p.omega.iter().for_each(|x| eat(x.to_bits()));
@@ -458,7 +518,14 @@ impl Sim {
             .chain(self.mantle.cell_temps())
             .chain(self.mantle.cell_piles())
             .for_each(|x| eat(x.to_bits() as u64));
-        for x in [a.live_mass, a.subducted_total, a.created_total, self.elapsed, h.mantle_temp, h.core_temp] {
+        for x in [
+            a.live_mass,
+            a.subducted_total,
+            a.created_total,
+            self.elapsed,
+            h.mantle_temp,
+            h.core_temp,
+        ] {
             eat(x.to_bits());
         }
         hash
@@ -613,7 +680,10 @@ mod tests {
         let (on, off) = (run(true), run(false));
         assert!(off.dyn_topo.iter().all(|&x| x == 0.0));
         let limit = on.tuning.dyn_topo_max as f32;
-        assert!(on.dyn_topo.iter().any(|&x| x.abs() > 0.1), "no relief from the mantle");
+        assert!(
+            on.dyn_topo.iter().any(|&x| x.abs() > 0.1),
+            "no relief from the mantle"
+        );
         assert!(on.dyn_topo.iter().all(|&x| x.abs() <= limit));
         let (a, b) = (&on.front, &off.front);
         assert!(a.elevation != b.elevation, "elevation unmoved");
@@ -665,9 +735,12 @@ mod tests {
                 d.crust_type[i] = crate::cell_data::CONTINENTAL;
                 d.thickness[i] = 35.0;
                 d.density[i] = t.continental_density as f32;
-                d.elevation[i] =
-                    crate::elevation::baseline_elevation(t, crate::cell_data::CONTINENTAL, 0.0, 35.0)
-                        as f32;
+                d.elevation[i] = crate::elevation::baseline_elevation(
+                    t,
+                    crate::cell_data::CONTINENTAL,
+                    0.0,
+                    35.0,
+                ) as f32;
                 d.mantle_heat[i] = heat;
             }
         }
@@ -917,7 +990,11 @@ mod tests {
             a = [a[0] + p[0], a[1] + p[1], a[2] + p[2]];
         }
         let a = normalise(a);
-        let any = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let any = if a[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         let e = normalise(cross(a, any));
         let d = &mut sim.front;
         for i in 0..n {
@@ -989,7 +1066,10 @@ mod tests {
         let coast: Vec<usize> = (0..n)
             .filter(|&i| {
                 d.plate_id[i] == continent
-                    && sim.mesh.nbrs(i).any(|k| d.plate_id[sim.mesh.nbr[k] as usize] != continent)
+                    && sim
+                        .mesh
+                        .nbrs(i)
+                        .any(|k| d.plate_id[sim.mesh.nbr[k] as usize] != continent)
             })
             .collect();
         for &i in &coast {
@@ -1007,10 +1087,18 @@ mod tests {
         use crate::cell_data::OCEANIC;
         let (mut sim, _, coast) = thinned_coast();
         sim.tick();
-        let neutral = crate::lithosphere::neutral_age(&sim.tuning, sim.tuning.oceanic_thickness) as f32;
+        let neutral =
+            crate::lithosphere::neutral_age(&sim.tuning, sim.tuning.oceanic_thickness) as f32;
         for &i in &coast {
-            assert_eq!(sim.front.crust_type[i], OCEANIC, "thinned coast at {i} still continent");
-            assert_eq!(sim.front.age[i], neutral, "reverted crust at {i} is {} Myr old", sim.front.age[i]);
+            assert_eq!(
+                sim.front.crust_type[i], OCEANIC,
+                "thinned coast at {i} still continent"
+            );
+            assert_eq!(
+                sim.front.age[i], neutral,
+                "reverted crust at {i} is {} Myr old",
+                sim.front.age[i]
+            );
             let b = crate::elevation::column_buoyancy(&sim.tuning, &sim.front, i);
             assert!(b.abs() < 1e-3, "reverted crust at {i} has buoyancy {b:.3}");
         }
@@ -1033,7 +1121,9 @@ mod tests {
             .filter(|&i| {
                 d.plate_id[i] != continent
                     && d.slab[i] > 0.0
-                    && mesh.nbrs(i).any(|k| d.plate_id[mesh.nbr[k] as usize] == continent)
+                    && mesh
+                        .nbrs(i)
+                        .any(|k| d.plate_id[mesh.nbr[k] as usize] == continent)
             })
             .count();
         assert!(over_coast > 0, "the old ocean never began to founder");
@@ -1055,10 +1145,17 @@ mod tests {
         let mean = diff / pairs as f64;
         // Independent uniform ages would differ by a third of the range.
         let noise = sim.tuning.max_oceanic_age / 3.0;
-        assert!(mean < 0.1 * noise, "neighbours differ by {mean:.1} Myr on average");
+        assert!(
+            mean < 0.1 * noise,
+            "neighbours differ by {mean:.1} Myr on average"
+        );
         let ages: Vec<f32> = d.age.clone();
-        let span = ages.iter().copied().fold(f32::MIN, f32::max) - ages.iter().copied().fold(f32::MAX, f32::min);
-        assert!(span as f64 > 0.9 * sim.tuning.max_oceanic_age, "ages span only {span:.0} Myr");
+        let span = ages.iter().copied().fold(f32::MIN, f32::max)
+            - ages.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            span as f64 > 0.9 * sim.tuning.max_oceanic_age,
+            "ages span only {span:.0} Myr"
+        );
     }
 
     #[test]
@@ -1086,7 +1183,11 @@ mod tests {
         // One hemisphere turns about an axis in the boundary's plane, so half
         // the boundary spreads and the other half closes.
         let a = centroid(&sim, ids[0]);
-        let any = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let any = if a[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         let omegas = [
             (ids[0], scale(normalise(cross(a, any)), 0.02)),
             (ids[1], [0.0; 3]),
@@ -1101,7 +1202,10 @@ mod tests {
             sim.tick();
             for i in (0..n).filter(|&i| sim.advection.rift_cell[i] != 0) {
                 opened += 1;
-                assert_eq!(sim.front.weakness[i], 0.0, "new sea floor at {i} came out weak");
+                assert_eq!(
+                    sim.front.weakness[i], 0.0,
+                    "new sea floor at {i} came out weak"
+                );
             }
         }
         assert!(opened > 0, "the boundary never spread");
@@ -1123,7 +1227,11 @@ mod tests {
             a = [a[0] + p[0], a[1] + p[1], a[2] + p[2]];
         }
         let a = normalise(a);
-        let any = if a[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let any = if a[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
         // Only one plate moves; half the boundary spreads behind it.
         let omega = scale(normalise(cross(a, any)), 0.02);
         let mut floor = [0usize; 2];

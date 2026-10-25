@@ -24,8 +24,10 @@
 //! `rift_duration` Myr, thinning the crust along it into a basin and piling what
 //! it loses onto shoulders on either side, and only then breaks the plate in
 //! two. If the tension behind it dies away first it stalls: a failed rift,
-//! thinned and left weak, but whole. Oceanic lithosphere has no such phase; a
-//! rift opens in proportion to how much of its line runs through continent.
+//! thinned and left weak, but whole. A rift through ocean stretches for a
+//! shorter time, in proportion to how much of its line runs through continent,
+//! but never for less than `min_rift_duration`, so a brief spike of tension
+//! stalls instead of opening a plate.
 //!
 //! Breaking open vents much of the heat beneath the plate, as the melting of
 //! breakup does, so a hot supercontinent comes apart in stages rather than
@@ -88,9 +90,20 @@ pub fn update_rifting(
     t: &Tuning,
     o: &SimOptions,
 ) {
-    // Weakness heals, but barely.
-    let keep = (-dt_myr / t.weakness_decay_time.max(1e-6)).exp();
-    par::for_each_mut(&mut data.weakness, |_, w| *w = (*w as f64 * keep) as f32);
+    // Weakness heals, but barely, and much sooner in ocean than in continent:
+    // oceanic lithosphere cools through in a couple of hundred Myr, while a
+    // continental suture stays the weak line for billions of years.
+    let keep_cont = (-dt_myr / t.weakness_decay_time.max(1e-6)).exp();
+    let keep_ocean = (-dt_myr / t.ocean_weakness_decay_time.max(1e-6)).exp();
+    let crust_type = &data.crust_type;
+    par::for_each_mut(&mut data.weakness, |i, w| {
+        let keep = if crust_type[i] == CONTINENTAL {
+            keep_cont
+        } else {
+            keep_ocean
+        };
+        *w = (*w as f64 * keep) as f32;
+    });
     if o.supercontinent_insulation {
         insulate(mesh, data, mantle.cell_temps(), dt_myr, s, t);
     }
@@ -170,7 +183,8 @@ pub fn update_rifting(
             .filter(|&&i| data.crust_type[i] == CONTINENTAL)
             .map(|&i| mesh.area(i))
             .sum();
-        let duration = t.rift_duration * continental / zone_area.max(1e-12);
+        let duration =
+            (t.rift_duration * continental / zone_area.max(1e-12)).max(t.min_rift_duration);
         if duration >= dt_myr {
             plates.opening.insert(
                 id,
@@ -197,9 +211,9 @@ fn zone_of(mesh: &Mesh, data: &CellData, cells: &[i32], id: i32) -> Vec<usize> {
         .filter(|&i| {
             !cratonic(data, i)
                 && mesh.nbrs(i).any(|k| {
-                let m = mesh.nbr[k] as usize;
-                data.plate_id[m] == id && data.rift_side[m] != data.rift_side[i]
-            })
+                    let m = mesh.nbr[k] as usize;
+                    data.plate_id[m] == id && data.rift_side[m] != data.rift_side[i]
+                })
         })
         .collect()
 }
@@ -571,7 +585,11 @@ impl Cratons {
             }
         }
         starts.push(members.len());
-        Cratons { members, starts, of }
+        Cratons {
+            members,
+            starts,
+            of,
+        }
     }
 
     fn count(&self) -> usize {
@@ -1095,14 +1113,20 @@ mod tests {
     }
 
     #[test]
-    fn old_ocean_is_stronger_than_continent_and_young_ocean_weaker() {
+    fn old_ocean_is_stronger_than_continent_and_young_ocean_is_weaker() {
         let t = Tuning::default();
         let mut data = CellData::new(3);
         data.crust_type[0] = CONTINENTAL;
         data.age[1] = 0.0;
         data.age[2] = t.max_oceanic_age as f32;
         let s = |i| lithosphere_strength(&t, &data, i);
-        assert!(s(1) < s(0) && s(0) < s(2));
+        assert!(
+            s(1) < s(0) && s(0) < s(2),
+            "young {}, continent {}, old {}",
+            s(1),
+            s(0),
+            s(2)
+        );
     }
 
     #[test]
@@ -1131,7 +1155,14 @@ mod tests {
             }
         }
         let mut s = Scratch::new(mesh.cell_count);
-        insulate(&mesh, &mut data, &vec![0.0; mesh.cell_count], 10.0, &mut s, &t);
+        insulate(
+            &mesh,
+            &mut data,
+            &vec![0.0; mesh.cell_count],
+            10.0,
+            &mut s,
+            &t,
+        );
         let (deep, small) = (data.mantle_heat[interior], data.mantle_heat[island]);
         assert!(
             deep as f64 > 0.99 * t.insulation_rate * 10.0,
@@ -1153,7 +1184,144 @@ mod tests {
             data.mantle_heat[0]
         };
         let (cold, still, hot) = (built(-150.0), built(0.0), built(150.0));
-        assert!(cold < still && still < hot, "cold {cold}, still {still}, hot {hot}");
+        assert!(
+            cold < still && still < hot,
+            "cold {cold}, still {still}, hot {hot}"
+        );
         assert_eq!(built(-(t.upper_temp_max as f32)), 0.0);
+    }
+
+    /// An oceanic hemisphere on plate 0, the rest on plate 1.
+    fn oceanic_hemisphere() -> (Mesh, CellData, PlateData) {
+        let mesh = Mesh::icosphere(4);
+        let mut data = CellData::new(mesh.cell_count);
+        let mut plates = PlateData::default();
+        let props = || PlateProps {
+            omega: [0.0; 3],
+            pending: 0.0,
+            steps: 0,
+        };
+        plates.by_id.insert(0, props());
+        plates.by_id.insert(1, props());
+        for i in 0..mesh.cell_count {
+            data.plate_id[i] = if mesh.centres[i * 3 + 2] > 0.0 { 0 } else { 1 };
+            data.crust_type[i] = crate::cell_data::OCEANIC;
+        }
+        (mesh, data, plates)
+    }
+
+    #[test]
+    fn a_single_tick_of_tension_on_ocean_stalls() {
+        let (mesh, mut data, mut plates) = oceanic_hemisphere();
+        let t = Tuning {
+            min_rift_duration: 5.0,
+            ..Tuning::default()
+        };
+        let o = SimOptions {
+            supercontinent_insulation: false,
+            ..SimOptions::default()
+        };
+        plates.stress.insert(
+            0,
+            PlateStress {
+                opposed_pull: 50.0,
+                axis: [1.0, 0.0, 0.0],
+            },
+        );
+        let mantle = crate::mantle::MantleFlow::new(&mesh);
+        let mut registry = Registry::default();
+        let mut s = Scratch::new(mesh.cell_count);
+        let ids: Vec<i32> = data.plate_id.clone();
+        update_rifting(
+            &mesh,
+            &mut data,
+            &mut plates,
+            &mantle,
+            t.dt_myr,
+            &mut registry,
+            &mut s,
+            &t,
+            &o,
+        );
+        assert_eq!(plates.rifts, 0, "ocean broke in one tick");
+        assert!(
+            plates.opening.contains_key(&0),
+            "the rift never started stretching"
+        );
+        plates.stress.clear();
+        update_rifting(
+            &mesh,
+            &mut data,
+            &mut plates,
+            &mantle,
+            t.dt_myr,
+            &mut registry,
+            &mut s,
+            &t,
+            &o,
+        );
+        assert_eq!(
+            plates.failed_rifts, 1,
+            "the rift did not stall once the tension died"
+        );
+        assert_eq!(plates.rifts, 0);
+        assert!(data.plate_id == ids, "the plate broke anyway");
+    }
+
+    #[test]
+    fn ocean_weakness_fades_and_continental_weakness_barely_does() {
+        let mesh = Mesh::icosphere(3);
+        let mut data = CellData::new(mesh.cell_count);
+        data.plate_id.fill(0);
+        data.crust_type[0] = CONTINENTAL;
+        data.crust_type[1] = crate::cell_data::OCEANIC;
+        data.weakness[0] = 1.0;
+        data.weakness[1] = 1.0;
+        // Ocean heals on a shorter scale than a suture. The default matches
+        // the continental time, because a short heal stalls rifts; the split
+        // is what this checks.
+        let t = Tuning {
+            ocean_weakness_decay_time: 100.0,
+            ..Tuning::default()
+        };
+        let o = SimOptions {
+            supercontinent_insulation: false,
+            ..SimOptions::default()
+        };
+        let mantle = crate::mantle::MantleFlow::new(&mesh);
+        let mut plates = PlateData::default();
+        plates.by_id.insert(
+            0,
+            PlateProps {
+                omega: [0.0; 3],
+                pending: 0.0,
+                steps: 0,
+            },
+        );
+        let mut registry = Registry::default();
+        let mut s = Scratch::new(mesh.cell_count);
+        update_rifting(
+            &mesh,
+            &mut data,
+            &mut plates,
+            &mantle,
+            t.ocean_weakness_decay_time,
+            &mut registry,
+            &mut s,
+            &t,
+            &o,
+        );
+        let ocean = data.weakness[1] as f64;
+        let continent = data.weakness[0] as f64;
+        assert!(
+            (ocean - (-1.0f64).exp()).abs() < 1e-4,
+            "ocean weakness {ocean}"
+        );
+        let expected = (-t.ocean_weakness_decay_time / t.weakness_decay_time).exp();
+        assert!(
+            (continent - expected).abs() < 1e-4,
+            "continent weakness {continent}"
+        );
+        assert!(continent > 0.9, "continent healed too fast: {continent}");
     }
 }

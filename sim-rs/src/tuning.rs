@@ -36,6 +36,12 @@ pub struct Tuning {
     pub collision_drag: f64,
     pub collision_lock_gain: f64,
     pub suture_coupling: f64,
+    /// How strongly a plate's target motion is drawn toward each neighbour's,
+    /// per unit of shared boundary over the plate's width. Small plates, with
+    /// a long boundary for their area, are carried along and then merge.
+    /// Even a small value locks neighbouring large plates together over a
+    /// supercontinent cycle, so the default leaves every plate to its own forces.
+    pub edge_coupling: f64,
     pub suture_merge_time: f64,
     pub boundary_death_time: f64,
     pub merge_quiet_speed: f64,
@@ -105,12 +111,21 @@ pub struct Tuning {
     pub suture_weakness: f64,
     pub rift_margin_weakness: f64,
     pub weakness_decay_time: f64,
+    /// Myr over which weakness in oceanic lithosphere fades. Ocean cools faster
+    /// than a continental suture, but a heal of about 100 Myr stalls rifts that
+    /// have to cross young ocean and the plates then weld into one. The default
+    /// matches `weakness_decay_time`, so a rift can finish.
+    pub ocean_weakness_decay_time: f64,
     pub weakness_relief: f64,
     pub min_rift_area: f64,
     pub max_rift_aspect: f64,
     pub oceanic_strength_young: f64,
     pub oceanic_strength_old: f64,
     pub rift_duration: f64,
+    /// Myr any rift stretches before the plate can break, even through ocean.
+    /// A positive floor turns a spike of tension into a stall. The default is
+    /// 0: a few Myr of required stretch lets craton welds outrun new rifts.
+    pub min_rift_duration: f64,
     pub rift_stretch: f64,
 
     pub insulation_rate: f64,
@@ -122,6 +137,14 @@ pub struct Tuning {
     pub rift_heat_release: f64,
 
     pub min_plate_area: f64,
+    /// Smallest share of the globe a piece pinched off a plate must cover
+    /// before it becomes a plate. Below it, the piece joins the neighbour it
+    /// shares the most boundary with.
+    pub min_fragment_area: f64,
+    /// Myr ocean must have aged against a continent on the same plate before
+    /// the margin founders and the ocean breaks away to start a trench; 0
+    /// turns collapse off. Earth's oldest sea floor is under 200 Myr, so a
+    /// plate whose ocean reaches this has stopped recycling it.
     pub passive_margin_collapse_age: f64,
 
     pub primordial_heat: f64,
@@ -185,6 +208,7 @@ impl Default for Tuning {
             collision_drag: 400.0,
             collision_lock_gain: 10.0,
             suture_coupling: 0.05,
+            edge_coupling: 0.0,
             suture_merge_time: 80.0,
             boundary_death_time: 120.0,
             merge_quiet_speed: 0.002,
@@ -254,12 +278,14 @@ impl Default for Tuning {
             suture_weakness: 1.0,
             rift_margin_weakness: 0.6,
             weakness_decay_time: 2000.0,
+            ocean_weakness_decay_time: 2000.0,
             weakness_relief: 0.7,
             min_rift_area: 0.015,
             max_rift_aspect: 3.0,
-            oceanic_strength_young: 0.6,
+            oceanic_strength_young: 0.7,
             oceanic_strength_old: 1.5,
             rift_duration: 20.0,
+            min_rift_duration: 0.0,
             rift_stretch: 3.0,
 
             insulation_rate: 0.004,
@@ -271,7 +297,8 @@ impl Default for Tuning {
             rift_heat_release: 0.5,
 
             min_plate_area: 0.0005,
-            passive_margin_collapse_age: 0.0,
+            min_fragment_area: 0.002,
+            passive_margin_collapse_age: 300.0,
 
             primordial_heat: 1.0,
             start_age_ga: 3.0,
@@ -329,6 +356,20 @@ pub struct SimOptions {
     /// A continent rifting apart by rotation closes at one end of the rift as
     /// it opens along the rest, which otherwise welds it shut at once.
     pub weld_on_net_closing: bool,
+    /// Count slab pull as tension only where it pulls a plate from both sides.
+    /// Off, the tension is the pull that cancels in the vector sum, which a
+    /// zigzagging trench registers even when it all lies along one side. On,
+    /// that artefact goes away, and with it most of the rifts this model was
+    /// balanced to, so the default is off: the plates otherwise weld into one.
+    pub two_sided_tension: bool,
+    /// A boundary counts as quiet by its length-weighted mean relative speed
+    /// rather than by its single fastest spot.
+    pub quiet_by_mean_speed: bool,
+    /// Passive margins collapse only on plates whose ocean floor is, on
+    /// average, older than `passive_margin_collapse_age`: plates that have
+    /// stopped renewing it, such as one covering the globe. A plate with a
+    /// working ridge keeps an old coast or two without breaking up.
+    pub collapse_stagnant_only: bool,
 }
 
 impl Default for SimOptions {
@@ -336,6 +377,9 @@ impl Default for SimOptions {
         SimOptions {
             supercontinent_insulation: true,
             weld_on_net_closing: false,
+            two_sided_tension: false,
+            quiet_by_mean_speed: false,
+            collapse_stagnant_only: true,
         }
     }
 }

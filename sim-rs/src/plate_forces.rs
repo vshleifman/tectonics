@@ -16,7 +16,8 @@ use crate::par;
 use crate::plates::{PlateData, PlateStress, split_key, suture_key};
 use crate::scratch::Scratch;
 use crate::slabs::{slab_pull, subduction};
-use crate::tuning::Tuning;
+use crate::tuning::{SimOptions, Tuning};
+use std::collections::BTreeMap;
 
 /// A stable id with no live plate.
 const NO_SLOT: usize = usize::MAX;
@@ -30,6 +31,8 @@ struct Forces {
     pull_magnitude: Vec<f64>,
     pull_spread: Vec<f64>,
     area: Vec<f64>,
+    /// Area-weighted sum of cell positions, for the plate's centre.
+    centre: Vec<f64>,
 }
 
 impl Forces {
@@ -41,6 +44,7 @@ impl Forces {
             pull_magnitude: vec![0.0; plates],
             pull_spread: vec![0.0; plates * 6],
             area: vec![0.0; plates],
+            centre: vec![0.0; plates * 3],
         }
     }
 
@@ -52,6 +56,7 @@ impl Forces {
             (&mut self.pull_magnitude, &other.pull_magnitude),
             (&mut self.pull_spread, &other.pull_spread),
             (&mut self.area, &other.area),
+            (&mut self.centre, &other.centre),
         ] {
             sum.iter_mut().zip(part).for_each(|(s, x)| *s += x);
         }
@@ -68,6 +73,7 @@ pub fn update_plate_motion(
     scratch: &mut Scratch,
     t: &Tuning,
     dt_myr: f64,
+    o: &SimOptions,
 ) {
     let bound = scratch.pack_plates(plates);
     let by_id = &plates.by_id;
@@ -118,6 +124,9 @@ pub fn update_plate_motion(
             f.drag[m + 4] -= k * x * z;
             f.drag[m + 5] -= k * y * z;
             f.area[p] += mesh.area(i);
+            f.centre[p * 3] += mesh.area(i) * x;
+            f.centre[p * 3 + 1] += mesh.area(i) * y;
+            f.centre[p * 3 + 2] += mesh.area(i) * z;
             if carried > 0.0 && data.crust_type[i] == CONTINENTAL {
                 let u = mantle.wind_at(i);
                 let g = k * carried;
@@ -236,7 +245,13 @@ pub fn update_plate_motion(
                     // Trench suction: the slab rolls back, and the mantle
                     // wedge above it draws the overriding plate after the
                     // trench.
-                    add_torque(&mut f.torque, over_plate, a, -sign, t.trench_suction * force);
+                    add_torque(
+                        &mut f.torque,
+                        over_plate,
+                        a,
+                        -sign,
+                        t.trench_suction * force,
+                    );
                     let n = normal_of(a);
                     let d = [n[0] * sign, n[1] * sign, n[2] * sign];
                     f.pull_sum[p * 3] += d[0] * force;
@@ -299,6 +314,7 @@ pub fn update_plate_motion(
         pull_magnitude,
         pull_spread,
         area,
+        centre,
     } = forces;
 
     let sym = |arr: &[f64], id: usize| -> Sym3 {
@@ -315,19 +331,51 @@ pub fn update_plate_motion(
     // What is left over as tension: pulls that cancel do not move the plate,
     // they stretch it.
     plates.stress.clear();
-    for (p, &id) in ids.iter().enumerate() {
-        let opposed =
-            pull_magnitude[p] - len3(pull_sum[p * 3], pull_sum[p * 3 + 1], pull_sum[p * 3 + 2]);
-        if opposed <= 0.0 || area[p] <= 0.0 {
-            continue;
+    if o.two_sided_tension {
+        // A trench along one side of a plate pulls it that way. It is tension
+        // only where slabs pull from both sides, so the zigzag of the mesh and
+        // the curvature of the sphere no longer read as a plate tearing itself.
+        let mut axis = vec![[0.0; 3]; ids.len()];
+        let mut at = vec![[0.0; 3]; ids.len()];
+        for (p, centre_p) in at.iter_mut().enumerate() {
+            axis[p] = dominant_axis(&sym(&pull_spread, p), [1.0, 0.0, 0.0]);
+            if area[p] > 0.0 {
+                *centre_p = normalise([
+                    centre[p * 3] / area[p],
+                    centre[p * 3 + 1] / area[p],
+                    centre[p * 3 + 2] / area[p],
+                ]);
+            }
         }
-        plates.stress.insert(
-            id,
-            PlateStress {
-                opposed_pull: opposed,
-                axis: dominant_axis(&sym(&pull_spread, p), [1.0, 0.0, 0.0]),
-            },
-        );
+        let (plus, minus) = opposing_sides(mesh, data, &slots, &at, &axis, t);
+        for (p, &id) in ids.iter().enumerate() {
+            let opposed = 2.0 * plus[p].min(minus[p]);
+            if opposed <= 0.0 || area[p] <= 0.0 {
+                continue;
+            }
+            plates.stress.insert(
+                id,
+                PlateStress {
+                    opposed_pull: opposed,
+                    axis: axis[p],
+                },
+            );
+        }
+    } else {
+        for (p, &id) in ids.iter().enumerate() {
+            let opposed =
+                pull_magnitude[p] - len3(pull_sum[p * 3], pull_sum[p * 3 + 1], pull_sum[p * 3 + 2]);
+            if opposed <= 0.0 || area[p] <= 0.0 {
+                continue;
+            }
+            plates.stress.insert(
+                id,
+                PlateStress {
+                    opposed_pull: opposed,
+                    axis: dominant_axis(&sym(&pull_spread, p), [1.0, 0.0, 0.0]),
+                },
+            );
+        }
     }
 
     // Solve the balance for the motion each plate is heading for.
@@ -339,6 +387,55 @@ pub fn update_plate_motion(
         );
         let i = id as usize * 3;
         target[i..i + 3].copy_from_slice(&w);
+    }
+
+    // Edge coupling: each plate's target is drawn toward its neighbours', in
+    // proportion to how much boundary they share relative to the plate's
+    // width. A small plate has a long edge for its area, so it is carried
+    // along by whoever surrounds it; a large plate barely notices one small
+    // neighbour. The weights are taken from the targets as solved, so the
+    // order of the plates does not matter, and they sum to at most 1.
+    if t.edge_coupling > 0.0 {
+        let mut shared: BTreeMap<i64, f64> = BTreeMap::new();
+        for a in 0..mesh.arc_count() {
+            let (ca, cb) = (mesh.arc_cells[a * 2], mesh.arc_cells[a * 2 + 1]);
+            if ca < 0 || cb < 0 {
+                continue;
+            }
+            let (pa, pb) = (data.plate_id[ca as usize], data.plate_id[cb as usize]);
+            if pa < 0 || pb < 0 || pa == pb {
+                continue;
+            }
+            *shared.entry(suture_key(pa, pb)).or_insert(0.0) += mesh.arc_length[a] as f64;
+        }
+        let area_of = |id: i32| slot_of(id).map(|p| area[p]).unwrap_or(0.0);
+        let mut weight: BTreeMap<i32, BTreeMap<i32, f64>> = BTreeMap::new();
+        for (&key, &len) in &shared {
+            let (a, b) = split_key(key);
+            for (id, other) in [(a, b), (b, a)] {
+                let plate_area = area_of(id);
+                if plate_area <= 0.0 {
+                    continue;
+                }
+                let w = clamp01(t.edge_coupling * len / plate_area.sqrt());
+                if w > 0.0 {
+                    weight.entry(id).or_default().insert(other, w);
+                }
+            }
+        }
+        let before = target.clone();
+        for (&id, neighbours) in &weight {
+            let sum: f64 = neighbours.values().sum();
+            let scale_w = if sum > 1.0 { 1.0 / sum } else { 1.0 };
+            let p = id as usize * 3;
+            for (&other, &w) in neighbours {
+                let n = other as usize * 3;
+                let w = w * scale_w;
+                for k in 0..3 {
+                    target[p + k] += w * (before[n + k] - before[p + k]);
+                }
+            }
+        }
     }
 
     // Suture coupling: welded plates head for a common motion. It acts on the
@@ -385,6 +482,97 @@ pub fn update_plate_motion(
         }
         props.omega = next;
     }
+}
+
+/// `v` with the part along `centre` removed, so it lies in the tangent plane.
+fn tangent_component(centre: Vec3, v: Vec3) -> Vec3 {
+    let along = dot(v, centre);
+    [
+        v[0] - along * centre[0],
+        v[1] - along * centre[1],
+        v[2] - along * centre[2],
+    ]
+}
+
+/// Pull from slabs on the positive side of each plate's axis, and from slabs
+/// on the negative side, each projected into the tangent plane at the plate's
+/// centre. A trench that all lies on one side fills only one of the two.
+fn opposing_sides(
+    mesh: &Mesh,
+    data: &CellData,
+    slots: &[usize],
+    centre: &[Vec3],
+    axis: &[Vec3],
+    t: &Tuning,
+) -> (Vec<f64>, Vec<f64>) {
+    let n = centre.len();
+    let slot_of = |plate: i32| -> Option<usize> {
+        let s = *slots.get(usize::try_from(plate).ok()?)?;
+        (s != NO_SLOT).then_some(s)
+    };
+    let parts = par::chunks(mesh.arc_count(), |arcs| {
+        let mut plus = vec![0.0f64; n];
+        let mut minus = vec![0.0f64; n];
+        for a in arcs {
+            let cell_a = mesh.arc_cells[a * 2];
+            let cell_b = mesh.arc_cells[a * 2 + 1];
+            if cell_a < 0 || cell_b < 0 {
+                continue;
+            }
+            let (cell_a, cell_b) = (cell_a as usize, cell_b as usize);
+            let (plate_a, plate_b) = (data.plate_id[cell_a], data.plate_id[cell_b]);
+            if plate_a < 0 || plate_b < 0 || plate_a == plate_b {
+                continue;
+            }
+            let Some(sub) = subduction(mesh, data, cell_a, cell_b, t) else {
+                continue;
+            };
+            let (down_cell, down_plate, sign) = if sub.down == cell_b {
+                (cell_b, plate_b, -1.0)
+            } else {
+                (cell_a, plate_a, 1.0)
+            };
+            let pull = slab_pull(t, column_buoyancy(t, data, down_cell)) * sub.strength;
+            let Some(p) = slot_of(down_plate).filter(|_| pull > 0.0) else {
+                continue;
+            };
+            let force = t.slab_weight * pull * mesh.arc_length[a] as f64;
+            let normal = [
+                mesh.arc_normal[a * 3] as f64,
+                mesh.arc_normal[a * 3 + 1] as f64,
+                mesh.arc_normal[a * 3 + 2] as f64,
+            ];
+            let mid = [
+                mesh.arc_mid[a * 3] as f64,
+                mesh.arc_mid[a * 3 + 1] as f64,
+                mesh.arc_mid[a * 3 + 2] as f64,
+            ];
+            let c = centre[p];
+            let axis_t = tangent_component(c, axis[p]);
+            let axis_len = len3(axis_t[0], axis_t[1], axis_t[2]);
+            if axis_len < 1e-9 {
+                continue;
+            }
+            let axis_hat = scale(axis_t, 1.0 / axis_len);
+            let along = dot(tangent_component(c, scale(normal, sign)), axis_hat);
+            let side = dot(tangent_component(c, mid), axis_hat);
+            let component = along * force;
+            if side > 0.0 && component > 0.0 {
+                plus[p] += component;
+            } else if side < 0.0 && component < 0.0 {
+                minus[p] += -component;
+            }
+        }
+        (plus, minus)
+    });
+    let (mut plus, mut minus) = (vec![0.0; n], vec![0.0; n]);
+    for (part_plus, part_minus) in parts {
+        for i in 0..n {
+            plus[i] += part_plus[i];
+            minus[i] += part_minus[i];
+        }
+    }
+    (plus, minus)
 }
 
 /// `next`, with its Euler pole turned no more than `max_turn` radians from
@@ -455,5 +643,371 @@ mod tests {
         assert_eq!(limit_turn(now, gentle, 0.1), gentle);
         let reversed = limit_turn(now, [0.0, 0.0, -0.01], 0.1);
         assert!((angle(now, reversed) - 0.1).abs() < 1e-9);
+    }
+
+    use crate::boundaries::BoundaryField;
+    use crate::cell_data::{CONTINENTAL, CellData, OCEANIC};
+    use crate::mantle::MantleFlow;
+    use crate::mesh::Mesh;
+    use crate::plates::PlateProps;
+    use crate::scratch::Scratch;
+    use crate::sutures::update_sutures;
+    use crate::tuning::SimOptions;
+
+    fn props(omega: Vec3) -> PlateProps {
+        PlateProps {
+            omega,
+            pending: 0.0,
+            steps: 0,
+        }
+    }
+
+    fn heavy_ocean(t: &Tuning, data: &mut CellData, i: usize) {
+        data.crust_type[i] = OCEANIC;
+        data.age[i] = t.max_oceanic_age as f32;
+        data.density[i] = t.oceanic_density as f32;
+        data.thickness[i] = t.oceanic_thickness as f32;
+        data.lithosphere[i] = t.plate_thickness as f32;
+    }
+
+    fn continent(t: &Tuning, data: &mut CellData, i: usize, slab: f32) {
+        data.crust_type[i] = CONTINENTAL;
+        data.density[i] = t.continental_density as f32;
+        data.thickness[i] = 35.0;
+        data.slab[i] = slab;
+    }
+
+    fn tension(mesh: &Mesh, data: &CellData, plates: &PlateData, on: bool) -> f64 {
+        let mut plates = plates_copy(plates);
+        let boundaries = BoundaryField::new(mesh.cell_count, mesh.arc_count());
+        let mantle = MantleFlow::new(mesh);
+        let mut scratch = Scratch::new(mesh.cell_count);
+        let t = Tuning {
+            mantle_flow_coupling: 0.0,
+            ridge_weight: 0.0,
+            edge_coupling: 0.0,
+            ..Tuning::default()
+        };
+        let o = SimOptions {
+            two_sided_tension: on,
+            ..SimOptions::default()
+        };
+        update_plate_motion(
+            mesh,
+            data,
+            &mut plates,
+            &boundaries,
+            &mantle,
+            &mut scratch,
+            &t,
+            t.dt_myr,
+            &o,
+        );
+        plates.stress.get(&0).map(|s| s.opposed_pull).unwrap_or(0.0)
+    }
+
+    /// PlateData has no Clone; copy the motions the tests set up.
+    fn plates_copy(plates: &PlateData) -> PlateData {
+        let mut out = PlateData::default();
+        for (&id, p) in &plates.by_id {
+            out.by_id.insert(id, props(p.omega));
+        }
+        out
+    }
+
+    #[test]
+    fn a_trench_along_one_side_is_not_tension() {
+        let mesh = Mesh::icosphere(4);
+        let n = mesh.cell_count;
+        let t = Tuning::default();
+        let mut data = CellData::new(n);
+        for i in 0..n {
+            let (x, z) = (mesh.centres[i * 3], mesh.centres[i * 3 + 2]);
+            if z > 0.2 {
+                data.plate_id[i] = 0;
+                heavy_ocean(&t, &mut data, i);
+            } else if x > 0.0 {
+                data.plate_id[i] = 1;
+                continent(&t, &mut data, i, t.slab_full_length as f32);
+            } else {
+                data.plate_id[i] = 2;
+                data.crust_type[i] = OCEANIC;
+                data.density[i] = t.oceanic_density as f32;
+                data.thickness[i] = t.oceanic_thickness as f32;
+            }
+        }
+        let mut plates = PlateData::default();
+        for id in 0..3 {
+            plates.by_id.insert(id, props([0.0; 3]));
+        }
+        let one_side = tension(&mesh, &data, &plates, true);
+        let artefact = tension(&mesh, &data, &plates, false);
+        assert_eq!(
+            one_side, 0.0,
+            "a one-sided trench read as tension {one_side}"
+        );
+        assert!(
+            artefact > 0.0,
+            "the old measure found no pull to compare against"
+        );
+    }
+
+    #[test]
+    fn trenches_on_opposite_sides_tension_the_weaker_pull() {
+        let mesh = Mesh::icosphere(4);
+        let n = mesh.cell_count;
+        let t = Tuning::default();
+        // A northern cap pulled by a trench on its +x side and, optionally, on
+        // its -x side. One side of a cap stays on one side of the cap's centre,
+        // which a trench wrapped all the way round it would not.
+        let world = |west_slab: f32| {
+            let mut data = CellData::new(n);
+            for i in 0..n {
+                let (x, z) = (mesh.centres[i * 3], mesh.centres[i * 3 + 2]);
+                if z > 0.2 {
+                    data.plate_id[i] = 0;
+                    heavy_ocean(&t, &mut data, i);
+                } else if x > 0.0 {
+                    data.plate_id[i] = 1;
+                    continent(&t, &mut data, i, t.slab_full_length as f32);
+                } else {
+                    data.plate_id[i] = 2;
+                    continent(&t, &mut data, i, west_slab);
+                }
+            }
+            data
+        };
+        let mut plates = PlateData::default();
+        for id in 0..3 {
+            plates.by_id.insert(id, props([0.0; 3]));
+        }
+        let both = tension(&mesh, &world(t.slab_full_length as f32), &plates, true);
+        let half = tension(
+            &mesh,
+            &world(0.5 * t.slab_full_length as f32),
+            &plates,
+            true,
+        );
+        let one = tension(&mesh, &world(0.0), &plates, true);
+        assert!(both > 0.0, "opposite trenches produced no tension");
+        assert_eq!(one, 0.0, "dropping one trench left tension {one}");
+        // Halving the weaker side halves the tension, which is twice that side.
+        assert!(
+            (half - 0.5 * both).abs() < 0.15 * both,
+            "half {half}, both {both}"
+        );
+        assert!(half > 0.0 && half < both, "half {half}, both {both}");
+    }
+
+    fn step_motion(
+        mesh: &Mesh,
+        data: &mut CellData,
+        plates: &mut PlateData,
+        t: &Tuning,
+        o: &SimOptions,
+    ) {
+        let boundaries = BoundaryField::new(mesh.cell_count, mesh.arc_count());
+        let mantle = MantleFlow::new(mesh);
+        let mut scratch = Scratch::new(mesh.cell_count);
+        update_plate_motion(
+            mesh,
+            data,
+            plates,
+            &boundaries,
+            &mantle,
+            &mut scratch,
+            t,
+            t.dt_myr,
+            o,
+        );
+        update_sutures(
+            mesh,
+            data,
+            plates,
+            &boundaries,
+            t.dt_myr,
+            &mut scratch,
+            t,
+            o,
+        );
+    }
+
+    #[test]
+    fn a_small_plate_is_captured_by_the_plate_around_it() {
+        let mesh = Mesh::icosphere(4);
+        let n = mesh.cell_count;
+        let t = Tuning {
+            mantle_flow_coupling: 0.0,
+            ridge_weight: 0.0,
+            mantle_drag: 2.0,
+            // Strong enough that the patch, whose edge is long for its width,
+            // is carried by the plate around it. Weak enough that the same
+            // plate is not dragged to a stop by the short trench that pulls it.
+            edge_coupling: 0.2,
+            suture_coupling: 0.0,
+            craton_merge_time: 0.0,
+            boundary_death_time: 24.0,
+            motion_response_time: 4.0,
+            merge_quiet_speed: 0.005,
+            ..Tuning::default()
+        };
+        let o = SimOptions {
+            quiet_by_mean_speed: true,
+            two_sided_tension: true,
+            ..SimOptions::default()
+        };
+
+        // A small western cap with a slab on only its northern rim, so the
+        // pull does not cancel and the ocean plate has a motion of its own.
+        // The cap is small, so the ocean plate barely couples to it. A patch
+        // at the opposite pole shares edges only with that ocean plate.
+        let west = (0..n)
+            .min_by(|&a, &b| {
+                mesh.centres[a * 3]
+                    .total_cmp(&mesh.centres[b * 3])
+                    .then(a.cmp(&b))
+            })
+            .unwrap();
+        let mut cap = vec![west];
+        let mut seen = vec![false; n];
+        seen[west] = true;
+        let mut head = 0;
+        while cap.len() < 24 && head < cap.len() {
+            let cell = cap[head];
+            head += 1;
+            for k in mesh.nbrs(cell) {
+                let m = mesh.nbr[k] as usize;
+                if !seen[m] && cap.len() < 24 {
+                    seen[m] = true;
+                    cap.push(m);
+                }
+            }
+        }
+        let east = (0..n)
+            .max_by(|&a, &b| {
+                mesh.centres[a * 3]
+                    .total_cmp(&mesh.centres[b * 3])
+                    .then(b.cmp(&a))
+            })
+            .unwrap();
+        let mut patch = vec![east];
+        let mut seen = vec![false; n];
+        seen[east] = true;
+        let mut head = 0;
+        while patch.len() < 12 && head < patch.len() {
+            let cell = patch[head];
+            head += 1;
+            for k in mesh.nbrs(cell) {
+                let m = mesh.nbr[k] as usize;
+                if !seen[m] && patch.len() < 12 {
+                    seen[m] = true;
+                    patch.push(m);
+                }
+            }
+        }
+        let mut data = CellData::new(n);
+        for i in 0..n {
+            data.plate_id[i] = 0;
+            heavy_ocean(&t, &mut data, i);
+        }
+        for &i in &cap {
+            let z = mesh.centres[i * 3 + 2];
+            data.plate_id[i] = 2;
+            let slab = if z > 0.0 {
+                t.slab_full_length as f32
+            } else {
+                0.0
+            };
+            continent(&t, &mut data, i, slab);
+        }
+        for &i in &patch {
+            data.plate_id[i] = 1;
+            heavy_ocean(&t, &mut data, i);
+        }
+
+        let mut plates = PlateData::default();
+        plates.by_id.insert(0, props([0.0; 3]));
+        plates.by_id.insert(1, props([0.02, 0.0, 0.0]));
+        plates.by_id.insert(2, props([0.0; 3]));
+        let mut still = plates_copy(&plates);
+        let mut data_free = data.clone();
+        let mut t_free = t.clone();
+        t_free.edge_coupling = 0.0;
+        for _ in 0..40 {
+            step_motion(&mesh, &mut data, &mut plates, &t, &o);
+            step_motion(&mesh, &mut data_free, &mut still, &t_free, &o);
+        }
+        assert!(
+            !plates.by_id.contains_key(&1),
+            "the small plate was not captured"
+        );
+        assert!(plates.quiet_merges >= 1);
+        assert!(
+            still.by_id.contains_key(&1),
+            "it merged with no edge coupling"
+        );
+    }
+
+    #[test]
+    fn two_large_plates_pulled_apart_are_not_held_together() {
+        let mesh = Mesh::icosphere(4);
+        let n = mesh.cell_count;
+        let t = Tuning {
+            mantle_flow_coupling: 0.0,
+            ridge_weight: 0.0,
+            mantle_drag: 2.0,
+            // The same coupling that captures a small plate.
+            edge_coupling: 0.2,
+            suture_coupling: 0.0,
+            craton_merge_time: 0.0,
+            // Long enough that merely being slow at the start does not merge
+            // them. What would merge them is the coupling dragging their
+            // motions together.
+            boundary_death_time: 1.0e6,
+            motion_response_time: 4.0,
+            ..Tuning::default()
+        };
+        let o = SimOptions::default();
+        // Plate 0 is pulled by a one-sided trench. Plate 1, the other
+        // hemisphere, has none, so the two motions stay apart. The boundary
+        // they share is long, but each is wide, so the default coupling only
+        // nudges them.
+        let mut data = CellData::new(n);
+        for i in 0..n {
+            let (x, z) = (mesh.centres[i * 3], mesh.centres[i * 3 + 2]);
+            if x < -0.55 {
+                data.plate_id[i] = 2;
+                let slab = if z > 0.0 {
+                    t.slab_full_length as f32
+                } else {
+                    0.0
+                };
+                continent(&t, &mut data, i, slab);
+            } else if x < 0.0 {
+                data.plate_id[i] = 0;
+                heavy_ocean(&t, &mut data, i);
+            } else {
+                data.plate_id[i] = 1;
+                heavy_ocean(&t, &mut data, i);
+            }
+        }
+        let mut plates = PlateData::default();
+        for id in 0..3 {
+            plates.by_id.insert(id, props([0.0; 3]));
+        }
+        for _ in 0..20 {
+            step_motion(&mesh, &mut data, &mut plates, &t, &o);
+        }
+        assert!(
+            plates.by_id.contains_key(&0) && plates.by_id.contains_key(&1),
+            "a large plate was absorbed"
+        );
+        let (a, b) = (plates.by_id[&0].omega, plates.by_id[&1].omega);
+        let apart = len3(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        let speed = len3(a[0], a[1], a[2]).max(len3(b[0], b[1], b[2]));
+        assert!(
+            apart > 0.5 * speed && apart > t.merge_quiet_speed,
+            "the two plates were held to one motion: apart {apart}, speed {speed}"
+        );
     }
 }

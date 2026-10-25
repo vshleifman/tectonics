@@ -1,6 +1,11 @@
 //! Plate identity over deep time, mirroring `plateLifecycle.ts`: terranes
 //! dock, pinched-off fragments become plates or are absorbed, and plates left
 //! holding no crust are retired.
+//!
+//! A piece pinched off its plate becomes a plate of its own only once it covers
+//! `min_fragment_area`. Anything smaller joins, as a whole, the neighbouring
+//! plate it shares the most boundary with: a handful of cells left behind by
+//! moving the crust a cell at a time is an artefact of the mesh, not a plate.
 
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::math::{cross, read3, sub};
@@ -76,14 +81,16 @@ pub fn update_plate_identity(
         }
     }
 
-    let min_area = t.min_plate_area * total_area;
+    // Below `min_plate_area` a piece was never a plate. Between that and
+    // `min_fragment_area` it used to be promoted; it is now absorbed whole.
+    let promote_at = t.min_fragment_area.max(t.min_plate_area) * total_area;
     let mut dissolving = vec![false; comp_count + 1];
     let mut absorb: Vec<usize> = Vec::new();
     for comp in 0..comp_count {
         if largest.get(&comp_plate[comp]) == Some(&comp) {
             continue;
         }
-        if comp_area[comp] < min_area {
+        if comp_area[comp] < promote_at {
             absorb.push(comp);
             dissolving[comp] = true;
             continue;
@@ -105,45 +112,66 @@ pub fn update_plate_identity(
         for q in comp_start[comp]..comp_start[comp + 1] {
             plate_id[order[q] as usize] = id;
         }
+        plates.fragments += 1;
     }
 
-    // Slivers are handed to a surrounding plate, eroded from the outside in.
-    let is_dissolving = |component: &[i32], cell: usize| {
+    // Each pinched piece joins the settled plate it shares the most boundary
+    // with. A piece that only touches other pinched pieces waits until one of
+    // them has joined, so the choice spreads in from the pieces that do touch
+    // a real plate.
+    let is_dissolving = |component: &[i32], dissolving: &[bool], cell: usize| {
         let comp = component[cell];
         comp >= 0 && dissolving[comp as usize]
     };
-    let mut frontier: Vec<usize> = Vec::new();
-    for &comp in &absorb {
-        for q in comp_start[comp]..comp_start[comp + 1] {
-            let cell = order[q] as usize;
-            if mesh
-                .nbrs(cell)
-                .any(|k| !is_dissolving(component, mesh.nbr[k] as usize))
-            {
-                frontier.push(cell);
+    let mut pending = absorb;
+    while !pending.is_empty() {
+        let mut waiting = Vec::new();
+        let mut progressed = false;
+        for comp in pending {
+            let mut tally: Vec<(i32, f64)> = Vec::new();
+            for q in comp_start[comp]..comp_start[comp + 1] {
+                let cell = order[q] as usize;
+                for k in mesh.nbrs(cell) {
+                    let m = mesh.nbr[k] as usize;
+                    if is_dissolving(component, &dissolving, m) {
+                        continue;
+                    }
+                    let other = plate_id[m];
+                    if other < 0 {
+                        continue;
+                    }
+                    let arc = mesh.nbr_arc[k];
+                    if arc < 0 {
+                        continue;
+                    }
+                    let len = mesh.arc_length[arc as usize] as f64;
+                    if let Some(entry) = tally.iter_mut().find(|e| e.0 == other) {
+                        entry.1 += len;
+                    } else {
+                        tally.push((other, len));
+                    }
+                }
             }
-        }
-    }
-    let mut head = 0;
-    while head < frontier.len() {
-        let cell = frontier[head];
-        head += 1;
-        if !is_dissolving(component, cell) {
-            continue;
-        }
-        let taker = mesh
-            .nbrs(cell)
-            .map(|k| mesh.nbr[k] as usize)
-            .find(|&m| !is_dissolving(component, m) && plate_id[m] >= 0);
-        let Some(taker) = taker else { continue };
-        plate_id[cell] = plate_id[taker];
-        component[cell] = component[taker];
-        for k in mesh.nbrs(cell) {
-            let m = mesh.nbr[k] as usize;
-            if is_dissolving(component, m) {
-                frontier.push(m);
+            // Longest shared boundary, and the smaller id when they tie, so
+            // the same mesh always gives the same plate.
+            let Some(&(id, _)) = tally
+                .iter()
+                .max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+            else {
+                waiting.push(comp);
+                continue;
+            };
+            for q in comp_start[comp]..comp_start[comp + 1] {
+                plate_id[order[q] as usize] = id;
             }
+            dissolving[comp] = false;
+            plates.absorbed_fragments += 1;
+            progressed = true;
         }
+        if !progressed {
+            break;
+        }
+        pending = waiting;
     }
 
     // Retire whatever is left holding no crust.
@@ -155,7 +183,9 @@ pub fn update_plate_identity(
         }
     }
     let is_live = |id: i32| id >= 0 && id <= max_id && live[id as usize];
+    let before = plates.by_id.len();
     plates.by_id.retain(|&id, _| is_live(id));
+    plates.consumed += (before - plates.by_id.len()) as u64;
     plates.sutures.retain(|&key, _| {
         let (a, b) = split_key(key);
         is_live(a) && is_live(b)
@@ -226,5 +256,159 @@ fn dock_terranes(
     }
     for (cell, onto) in docking {
         data.plate_id[cell] = onto;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::Mesh;
+    use crate::registry::Registry;
+
+    fn props() -> PlateProps {
+        PlateProps {
+            omega: [0.0; 3],
+            pending: 0.0,
+            steps: 0,
+        }
+    }
+
+    /// A connected patch of `count` cells around the southernmost cell.
+    fn southern_patch(mesh: &Mesh, count: usize) -> Vec<usize> {
+        let south = (0..mesh.cell_count)
+            .min_by(|&a, &b| {
+                mesh.centres[a * 3 + 2]
+                    .total_cmp(&mesh.centres[b * 3 + 2])
+                    .then(a.cmp(&b))
+            })
+            .unwrap();
+        let mut patch = vec![south];
+        let mut seen = vec![false; mesh.cell_count];
+        seen[south] = true;
+        let mut head = 0;
+        while patch.len() < count && head < patch.len() {
+            let cell = patch[head];
+            head += 1;
+            for k in mesh.nbrs(cell) {
+                let m = mesh.nbr[k] as usize;
+                if !seen[m] && patch.len() < count {
+                    seen[m] = true;
+                    patch.push(m);
+                }
+            }
+        }
+        patch
+    }
+
+    fn shares(mesh: &Mesh, data: &CellData, patch: &[usize]) -> (f64, f64) {
+        let mut share = [0.0f64; 3];
+        let in_patch = |i: usize| patch.contains(&i);
+        for &cell in patch {
+            for k in mesh.nbrs(cell) {
+                let m = mesh.nbr[k] as usize;
+                if in_patch(m) {
+                    continue;
+                }
+                let id = data.plate_id[m];
+                if !(1..=2).contains(&id) {
+                    continue;
+                }
+                let arc = mesh.nbr_arc[k];
+                if arc >= 0 {
+                    share[id as usize] += mesh.arc_length[arc as usize] as f64;
+                }
+            }
+        }
+        (share[1], share[2])
+    }
+
+    #[test]
+    fn a_pinched_piece_joins_the_neighbour_with_the_longest_shared_boundary() {
+        let mesh = Mesh::icosphere(4);
+        let n = mesh.cell_count;
+        let patch = southern_patch(&mesh, 10);
+        assert!(
+            patch.iter().all(|&i| mesh.centres[i * 3 + 2] < -0.5),
+            "the patch reaches the parent plate"
+        );
+        // The parent is the north. The south is two large plates split by the
+        // y = 0 plane, so each is one connected body and the patch, sitting on
+        // the south pole, borders both.
+        let mut data = CellData::new(n);
+        for i in 0..n {
+            let (y, z) = (mesh.centres[i * 3 + 1], mesh.centres[i * 3 + 2]);
+            data.plate_id[i] = if patch.contains(&i) || z > 0.2 {
+                0
+            } else if y > 0.0 {
+                2
+            } else {
+                1
+            };
+        }
+        let (share1, share2) = shares(&mesh, &data, &patch);
+        let winner = if share2 > share1 { 2 } else { 1 };
+        assert!(
+            share1 != share2 && share1 > 0.0 && share2 > 0.0,
+            "the piece does not border both neighbours: {share1}, {share2}"
+        );
+
+        let mut plates = PlateData::default();
+        for id in 0..3 {
+            plates.by_id.insert(id, props());
+        }
+        let mut registry = Registry::default();
+        for _ in 0..3 {
+            registry.allocate();
+        }
+        let mut s = Scratch::new(n);
+        let t = Tuning {
+            min_fragment_area: 0.02,
+            ..Tuning::default()
+        };
+        update_plate_identity(&mesh, &mut data, &mut plates, &mut registry, &mut s, &t);
+
+        assert!(
+            patch.iter().all(|&i| data.plate_id[i] == winner),
+            "joined {:?}, expected {winner} (shares {share1:.4} vs {share2:.4})",
+            patch.iter().map(|&i| data.plate_id[i]).collect::<Vec<_>>()
+        );
+        assert_eq!(plates.fragments, 0);
+        assert!(plates.absorbed_fragments >= 1);
+    }
+
+    #[test]
+    fn a_piece_above_min_fragment_area_becomes_a_plate() {
+        let mesh = Mesh::icosphere(4);
+        let n = mesh.cell_count;
+        let mut data = CellData::new(n);
+        for i in 0..n {
+            let z = mesh.centres[i * 3 + 2];
+            data.plate_id[i] = if z.abs() > 0.3 { 0 } else { 1 };
+        }
+        let mut plates = PlateData::default();
+        plates.by_id.insert(0, props());
+        plates.by_id.insert(1, props());
+        let mut registry = Registry::default();
+        registry.allocate();
+        registry.allocate();
+        let mut s = Scratch::new(n);
+        let t = Tuning {
+            min_fragment_area: 0.005,
+            ..Tuning::default()
+        };
+        update_plate_identity(&mesh, &mut data, &mut plates, &mut registry, &mut s, &t);
+
+        let ids = |sign: f32| -> Vec<i32> {
+            (0..n)
+                .filter(|&i| mesh.centres[i * 3 + 2] * sign > 0.3)
+                .map(|i| data.plate_id[i])
+                .collect()
+        };
+        let (north, south) = (ids(1.0), ids(-1.0));
+        assert!(north.iter().all(|&id| id == north[0]));
+        assert!(south.iter().all(|&id| id == south[0]));
+        assert_ne!(north[0], south[0], "the two caps stayed one plate");
+        assert!(north[0] == 0 || south[0] == 0);
+        assert_eq!(plates.fragments, 1);
     }
 }

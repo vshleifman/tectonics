@@ -159,6 +159,15 @@ export interface Tuning {
    * the pair pulling apart again and what lets them eventually merge.
    */
   sutureCoupling: number;
+  /**
+   * How strongly a plate's target motion is drawn toward each neighbour's, per
+   * unit of shared boundary over the plate's width. A small plate has a long
+   * edge for its area, so it is carried along by the plates around it and then
+   * merges with one. Even a small value locks neighbouring large plates
+   * together over a supercontinent cycle, so the default leaves every plate
+   * to its own forces.
+   */
+  edgeCoupling: number;
   /** Myr a suture must hold before the two plates become a single plate. */
   sutureMergeTime: number;
   /**
@@ -533,8 +542,9 @@ export interface Tuning {
   riftStrength: number;
   /**
    * Strength of oceanic lithosphere fresh from a ridge, as a multiple of
-   * continental. Young, hot, thin lithosphere is the weakest there is, which is
-   * why oceanic plates break up near ridges if they break at all.
+   * continental. Below 1, a ridge is easier to open than the interior of a
+   * continent. At 1, young ocean is no weaker, and ridges stop tearing, so
+   * the plates weld into one.
    */
   oceanicStrengthYoung: number;
   /**
@@ -548,9 +558,17 @@ export interface Tuning {
    * time the crust along it thins into a basin between raised shoulders, and if
    * the tension behind it dies away first it stalls as a failed rift: thinned,
    * left weak, but whole. A rift through ocean takes this times the share of
-   * continent along it, so a purely oceanic one opens at once.
+   * continent along it, and never less than {@link minRiftDuration}.
    */
   riftDuration: number;
+  /**
+   * Myr any rift stretches before the plate can break, even through ocean, so a
+   * spike of tension that dies within this stalls instead of opening a plate.
+   * The default is 0: a few Myr of required stretch lets craton welds outrun
+   * new rifts. A positive value still stalls a purely oceanic rift that does
+   * not last that long.
+   */
+  minRiftDuration: number;
   /**
    * How many times over the crust along a rift is thinned by the time it breaks
    * (the stretching factor). The crust it loses is piled onto the shoulders.
@@ -561,11 +579,19 @@ export interface Tuning {
   /** Weakness stamped on a margin left behind where a plate rifted apart. */
   riftMarginWeakness: number;
   /**
-   * Myr over which lithospheric weakness decays back toward intact. Long: old
-   * sutures stay the preferred place to break for billions of years, which is
-   * what makes an ocean reopen roughly where the last one closed.
+   * Myr over which lithospheric weakness in continent decays back toward
+   * intact. Long: old sutures stay the preferred place to break for billions
+   * of years, which is what makes an ocean reopen roughly where the last one
+   * closed.
    */
   weaknessDecayTime: number;
+  /**
+   * Myr over which weakness in oceanic lithosphere fades. Ocean can cool faster
+   * than a continental suture, but a heal of about 100 Myr stalls rifts that
+   * have to cross young ocean and the plates then weld into one. The default
+   * matches {@link weaknessDecayTime}, so a rift can finish.
+   */
+  oceanWeaknessDecayTime: number;
   /** How much of a plate's strength the weakest line across it can remove. */
   weaknessRelief: number;
   /**
@@ -627,13 +653,29 @@ export interface Tuning {
 
   // --- Plate identity (see sim-rs/src/plate_lifecycle.rs) ---
   /**
-   * Smallest share of the globe a fragment must cover to become a plate of its
-   * own when a plate is pinched in two. Below it the fragment is absorbed into a
-   * neighbour: a handful of cells is an artefact of the grid, not a microplate,
-   * and handing every one an Euler pole fills the world with noise. Earth's
-   * smallest recognised plates are a few hundredths of a percent of the surface.
+   * Smallest share of the globe a piece must cover to be a plate at all, once a
+   * rift that has already been stretching finally breaks, or once an old
+   * passive margin collapses. Earth's smallest recognised plates are a few
+   * hundredths of a percent of the surface.
    */
   minPlateArea: number;
+  /**
+   * Smallest share of the globe a piece pinched off a plate must cover before
+   * it becomes a plate of its own. Below it the piece joins, whole, the
+   * neighbour it shares the most boundary with: a handful of cells left behind
+   * by moving crust a cell at a time is an artefact of the mesh, not a
+   * microplate.
+   */
+  minFragmentArea: number;
+  /**
+   * Myr ocean must have aged against a continent on the same plate before
+   * the margin founders and the ocean breaks away as a plate of its own,
+   * where a trench can start; 0 turns collapse off. With
+   * {@link SimOptions.collapseStagnantOnly} only a plate whose ocean floor is
+   * this old on average collapses, which is what breaks open a single plate
+   * covering the globe. Earth's oldest sea floor is under 200 Myr.
+   */
+  passiveMarginCollapseAge: number;
 
   // --- Planetary heat / primordial era (see sim-rs/src/heat.rs) ---
   /**
@@ -736,6 +778,7 @@ export const defaultTuning: Tuning = {
   collisionDrag: 400,
   collisionLockGain: 10,
   sutureCoupling: 0.05,
+  edgeCoupling: 0,
   sutureMergeTime: 80,
   boundaryDeathTime: 120,
   mergeQuietSpeed: 0.002,
@@ -802,13 +845,15 @@ export const defaultTuning: Tuning = {
   cratonMergeTime: 60,
 
   riftStrength: 0.65,
-  oceanicStrengthYoung: 0.6,
+  oceanicStrengthYoung: 0.7,
   oceanicStrengthOld: 1.5,
   riftDuration: 20,
+  minRiftDuration: 0,
   riftStretch: 3,
   sutureWeakness: 1,
   riftMarginWeakness: 0.6,
   weaknessDecayTime: 2000,
+  oceanWeaknessDecayTime: 2000,
   weaknessRelief: 0.7,
   minRiftArea: 0.015,
   maxRiftAspect: 3,
@@ -823,6 +868,8 @@ export const defaultTuning: Tuning = {
   riftHeatRelease: 0.5,
 
   minPlateArea: 0.0005,
+  minFragmentArea: 0.002,
+  passiveMarginCollapseAge: 300,
 
   primordialHeat: 1,
   startAgeGa: 3,
@@ -860,10 +907,34 @@ export interface SimOptions {
    * tension alone and the per-cell heat field is never touched.
    */
   supercontinentInsulation: boolean;
+  /**
+   * Count slab pull as tension only where it pulls a plate from both sides.
+   * Off, tension is whatever pull cancels in the vector sum, which a
+   * zigzagging trench registers even when it all lies along one side. On,
+   * that artefact goes away and so do most of the rifts the model was
+   * balanced to, and the plates weld into one, so the default is off.
+   */
+  twoSidedTension: boolean;
+  /**
+   * A boundary counts as quiet by its length-weighted mean relative speed
+   * rather than by its single fastest spot, so one transform stretch does not
+   * keep two otherwise locked plates apart forever.
+   */
+  quietByMeanSpeed: boolean;
+  /**
+   * Passive margins collapse only on plates whose ocean floor is, on average,
+   * older than {@link Tuning.passiveMarginCollapseAge}: plates that have
+   * stopped renewing it, above all a single plate covering the globe. A plate
+   * with a working ridge keeps an old coast or two without breaking up.
+   */
+  collapseStagnantOnly: boolean;
 }
 
 export const defaultSimOptions: SimOptions = {
   supercontinentInsulation: true,
+  twoSidedTension: false,
+  quietByMeanSpeed: false,
+  collapseStagnantOnly: true,
 };
 
 /** Live, mutable modelling options the simulation reads each tick. */

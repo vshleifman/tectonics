@@ -29,6 +29,9 @@ pub fn update_sutures(
     // Closing times length over all of each pair's continental contact.
     let mut net: HashMap<i64, f64> = HashMap::new();
     let mut relative_speed: IndexMap<i64, f64> = IndexMap::new();
+    // Length-weighted speed, added in arc order so the mean is deterministic.
+    let mut speed_moment: IndexMap<i64, f64> = IndexMap::new();
+    let mut boundary_len: IndexMap<i64, f64> = IndexMap::new();
     let mut craton_contact: IndexSet<i64> = IndexSet::new();
 
     for a in 0..mesh.arc_count() {
@@ -48,6 +51,9 @@ pub fn update_sutures(
         if apart > relative_speed.get(&pair).copied().unwrap_or(0.0) {
             relative_speed.insert(pair, apart);
         }
+        let arc_len = mesh.arc_length[a] as f64;
+        *speed_moment.entry(pair).or_insert(0.0) += apart * arc_len;
+        *boundary_len.entry(pair).or_insert(0.0) += arc_len;
 
         if data.crust_type[ca] != CONTINENTAL || data.crust_type[cb] != CONTINENTAL {
             continue;
@@ -108,15 +114,33 @@ pub fn update_sutures(
         .quiet
         .retain(|key, _| relative_speed.contains_key(key));
     for (&key, &apart) in &relative_speed {
-        if apart > t.merge_quiet_speed {
+        // The fastest spot on a boundary is a harsh test: one transform
+        // stretch keeps the whole boundary alive. The length-weighted mean
+        // lets a boundary that is quiet almost everywhere still count.
+        let speed = if o.quiet_by_mean_speed {
+            let len = boundary_len.get(&key).copied().unwrap_or(0.0);
+            if len > 0.0 {
+                speed_moment.get(&key).copied().unwrap_or(0.0) / len
+            } else {
+                apart
+            }
+        } else {
+            apart
+        };
+        if speed > t.merge_quiet_speed {
             plates.quiet.shift_remove(&key);
         } else {
             *plates.quiet.entry(key).or_insert(0.0) += dt_myr;
         }
     }
 
-    // Merge plates that have been one plate for long enough.
-    let mut merging: Vec<i64> = Vec::new();
+    // Merge plates that have been one plate for long enough. A pair can qualify
+    // more than once; the first list that queues it is why it merged, and the
+    // later ones find one of the plates already gone.
+    const WELD: u8 = 0;
+    const QUIET: u8 = 1;
+    const CRATON: u8 = 2;
+    let mut merging: Vec<(i64, u8)> = Vec::new();
     for (&key, &age) in &plates.sutures {
         if age < t.suture_merge_time {
             continue;
@@ -127,12 +151,12 @@ pub fn update_sutures(
         };
         let d = sub(a.omega, b.omega);
         if len3(d[0], d[1], d[2]) <= t.merge_quiet_speed {
-            merging.push(key);
+            merging.push((key, WELD));
         }
     }
     for (&key, &age) in &plates.quiet {
         if age >= t.boundary_death_time {
-            merging.push(key);
+            merging.push((key, QUIET));
         }
     }
     // Cratons that have stayed welded together this long are one craton, and
@@ -141,14 +165,19 @@ pub fn update_sutures(
     if t.craton_merge_time > 0.0 {
         for (&key, &age) in &plates.craton_welds {
             if age >= t.craton_merge_time {
-                merging.push(key);
+                merging.push((key, CRATON));
             }
         }
     }
-    for key in merging {
+    for (key, cause) in merging {
         let (a, b) = split_key(key);
         if !plates.by_id.contains_key(&a) || !plates.by_id.contains_key(&b) {
             continue;
+        }
+        match cause {
+            WELD => plates.weld_merges += 1,
+            QUIET => plates.quiet_merges += 1,
+            _ => plates.craton_merges += 1,
         }
         merge_plates(data, plates, a, b);
     }

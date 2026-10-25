@@ -1,8 +1,8 @@
 //! Native benchmark for profiling outside the browser:
 //! `cargo run --release --bin bench -- <level> <ticks> [planes] [name=value ...]`,
-//! where each `name=value` overrides a tuning field (snake_case), and
-//! `threads=N` sets how many threads the passes run on when built with
-//! `--features parallel`.
+//! where each `name=value` overrides a tuning field (snake_case), `seed=`
+//! chooses the great-circle layout, and `threads=N` sets how many threads the
+//! passes run on when built with `--features parallel`.
 //!
 //! Plates come from great-circle cracks rather than the TypeScript crack walk,
 //! so the numbers are for profiling the passes, not for parity with the
@@ -137,6 +137,12 @@ struct Assembly {
     main_reach: f64,
     /// The same for a round cap of its area.
     main_cap_reach: f64,
+    /// Plates covering at least 0.5%, 2% and 5% of the globe.
+    plates_05: usize,
+    plates_2: usize,
+    plates_5: usize,
+    /// Share of the globe held by the seven largest plates.
+    top7: f64,
 }
 
 /// Mean distance (km) between neighbouring cell centres.
@@ -250,17 +256,26 @@ fn assembly(sim: &Sim) -> Assembly {
     if main_area > 0.0 && len(centre) > 0.0 {
         let cap = 1.0 - main_area / globe;
         out.main_compact = len(centre) / main_area / cap;
-        let unit = [centre[0] / len(centre), centre[1] / len(centre), centre[2] / len(centre)];
+        let unit = [
+            centre[0] / len(centre),
+            centre[1] / len(centre),
+            centre[2] / len(centre),
+        ];
         out.main_reach = main
             .iter()
             .map(|&i| {
                 let p = c(i);
-                (p[0] * unit[0] + p[1] * unit[1] + p[2] * unit[2]).clamp(-1.0, 1.0).acos()
+                (p[0] * unit[0] + p[1] * unit[1] + p[2] * unit[2])
+                    .clamp(-1.0, 1.0)
+                    .acos()
             })
             .fold(0.0, f64::max)
             .to_degrees();
         // Reach of a round cap of the same area, for comparison.
-        out.main_cap_reach = (1.0 - 2.0 * main_area / globe).clamp(-1.0, 1.0).acos().to_degrees();
+        out.main_cap_reach = (1.0 - 2.0 * main_area / globe)
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees();
     }
 
     let mut seen = vec![false; n];
@@ -316,7 +331,11 @@ fn assembly(sim: &Sim) -> Assembly {
         }
     }
     out.clump = if total > 0.0 { len(sum) / total } else { 0.0 };
-    out.fragments = if total > 0.0 { fragment_area / total } else { 0.0 };
+    out.fragments = if total > 0.0 {
+        fragment_area / total
+    } else {
+        0.0
+    };
     if total > 0.0 && len(sum) > 0.0 {
         let centre = [sum[0] / len(sum), sum[1] / len(sum), sum[2] / len(sum)];
         // A cap holding share f of the globe reaches cos = 1 - 2f.
@@ -333,6 +352,20 @@ fn assembly(sim: &Sim) -> Assembly {
     }
     out.flow_align = if align_w > 0.0 { align / align_w } else { 0.0 };
     out.flow_ratio = if moving > 0.0 { carried / moving } else { 0.0 };
+
+    let mut plate_area: HashMap<i32, f64> = HashMap::new();
+    for i in 0..n {
+        let id = d.plate_id[i];
+        if id >= 0 {
+            *plate_area.entry(id).or_insert(0.0) += mesh.area(i);
+        }
+    }
+    let mut shares: Vec<f64> = plate_area.values().map(|a| a / globe).collect();
+    shares.sort_by(|a, b| b.total_cmp(a));
+    out.plates_05 = shares.iter().filter(|s| **s >= 0.005).count();
+    out.plates_2 = shares.iter().filter(|s| **s >= 0.02).count();
+    out.plates_5 = shares.iter().filter(|s| **s >= 0.05).count();
+    out.top7 = shares.iter().take(7).sum();
 
     let (mut coast, mut passive, mut age, mut old) = (0usize, 0usize, 0.0, 0usize);
     for i in 0..n {
@@ -368,7 +401,11 @@ fn assembly(sim: &Sim) -> Assembly {
             weight += q;
         }
     }
-    out.sink_dipole = if weight > 0.0 { len(pole) / weight } else { 0.0 };
+    out.sink_dipole = if weight > 0.0 {
+        len(pole) / weight
+    } else {
+        0.0
+    };
 
     let mut slip = 0.0;
     for &key in plates.sutures.keys() {
@@ -510,7 +547,11 @@ fn parting(sim: &Sim, a: i32, b: i32) -> Option<Parting> {
         // Positive closing, as in `boundaries.rs`, with `a` on the arc's
         // first side.
         let vn = sign * (r[0] * nrm[0] + r[1] * nrm[1] + r[2] * nrm[2]);
-        let vt = len([r[0] - vn * sign * nrm[0], r[1] - vn * sign * nrm[1], r[2] - vn * sign * nrm[2]]);
+        let vt = len([
+            r[0] - vn * sign * nrm[0],
+            r[1] - vn * sign * nrm[1],
+            r[2] - vn * sign * nrm[2],
+        ]);
         let l = mesh.arc_length[arc] as f64;
         total += l;
         open -= vn * l;
@@ -626,7 +667,10 @@ fn print_breakups(label: &str, breakups: &[&Breakup], end: f64) {
         .iter()
         .map(|b| b.gaps.iter().map(|&(_, g)| g).fold(0.0, f64::max))
         .collect();
-    println!("    widest gap ever reached, median {:.0} km", median(widest));
+    println!(
+        "    widest gap ever reached, median {:.0} km",
+        median(widest)
+    );
 }
 
 /// Where this step's piled-up continent formed: area by rings from the
@@ -675,7 +719,11 @@ fn tally_piling(sim: &Sim, out: &mut Piling) {
     }
     for i in (0..n).filter(|&i| piled[i] != 0) {
         let a = mesh.area(i);
-        let r = if ring[i] < 0 { PILE_RINGS } else { ring[i] as usize };
+        let r = if ring[i] < 0 {
+            PILE_RINGS
+        } else {
+            ring[i] as usize
+        };
         out.by_ring[r] += a;
         if r == 0 {
             out.by_kind[sim.boundaries().cell_kind[i] as usize] += a;
@@ -929,12 +977,17 @@ fn main() {
 
     let start = Instant::now();
     let mut sim = Sim::new(level);
+    let mut seed = "bench".to_string();
     // Tuning overrides as `name=value` pairs after the positional arguments.
     for arg in args.iter().skip(4) {
         let Some((name, value)) = arg.split_once('=') else {
             continue;
         };
         if name == "threads" {
+            continue;
+        }
+        if name == "seed" {
+            seed = value.to_string();
             continue;
         }
         let Ok(value) = value.parse::<f64>() else {
@@ -963,8 +1016,10 @@ fn main() {
             "oceanic_strength_young" => t.oceanic_strength_young = value,
             "oceanic_strength_old" => t.oceanic_strength_old = value,
             "rift_duration" => t.rift_duration = value,
+            "min_rift_duration" => t.min_rift_duration = value,
             "rift_stretch" => t.rift_stretch = value,
             "weakness_decay_time" => t.weakness_decay_time = value,
+            "ocean_weakness_decay_time" => t.ocean_weakness_decay_time = value,
             "suture_weakness" => t.suture_weakness = value,
             "weakness_relief" => t.weakness_relief = value,
             "rift_margin_weakness" => t.rift_margin_weakness = value,
@@ -1049,18 +1104,23 @@ fn main() {
             "collision_drag" => t.collision_drag = value,
             "collision_lock_gain" => t.collision_lock_gain = value,
             "suture_coupling" => t.suture_coupling = value,
+            "edge_coupling" => t.edge_coupling = value,
             "merge_quiet_speed" => t.merge_quiet_speed = value,
             "boundary_death_time" => t.boundary_death_time = value,
             "insulation_cooling" => t.insulation_cooling = value,
             "insulation_weakening" => t.insulation_weakening = value,
             "passive_margin_collapse_age" => t.passive_margin_collapse_age = value,
+            "min_fragment_area" => t.min_fragment_area = value,
             "supercontinent_insulation" => sim.options.supercontinent_insulation = value != 0.0,
             "weld_on_net_closing" => sim.options.weld_on_net_closing = value != 0.0,
+            "two_sided_tension" => sim.options.two_sided_tension = value != 0.0,
+            "quiet_by_mean_speed" => sim.options.quiet_by_mean_speed = value != 0.0,
+            "collapse_stagnant_only" => sim.options.collapse_stagnant_only = value != 0.0,
             _ => eprintln!("unknown tuning override {name}"),
         }
     }
     let built = start.elapsed();
-    sim.crack_great_circles(planes, "bench");
+    sim.crack_great_circles(planes, &seed);
     let seeded = start.elapsed() - built;
 
     let mut pass_ms = [0.0f64; PASS_COUNT];
@@ -1226,7 +1286,8 @@ fn main() {
             println!(
                 "series {:>5.0} cont {:.3} strict {:.2} bridged {:.2} clump {:.2} plates {:>3} sutures {:>2} slip {:>6.1} \
                  passive {:.2} age {:>5.0} old {:.2} sink {:.2} align {:+.2} flow/speed {:.2} rifts {} collapses {} \
-                 remote {:.0} fragments {:.2} incap {:.2} compact {:.2} reach {:.0} capreach {:.0}",
+                 remote {:.0} fragments {:.2} incap {:.2} compact {:.2} reach {:.0} capreach {:.0} \
+                 ge05 {} ge2 {} ge5 {} top7 {:.3}",
                 sim.elapsed(),
                 sim.metrics().continental_area,
                 a.strict,
@@ -1249,6 +1310,21 @@ fn main() {
                 a.main_compact,
                 a.main_reach,
                 a.main_cap_reach,
+                a.plates_05,
+                a.plates_2,
+                a.plates_5,
+                a.top7,
+            );
+            println!(
+                "ledger {:>5.0} rift {} frag {} absorbed {} weld {} quiet {} craton {} consumed {}",
+                sim.elapsed(),
+                sim.rift_count(),
+                sim.fragment_count(),
+                sim.absorbed_fragment_count(),
+                sim.weld_merge_count(),
+                sim.quiet_merge_count(),
+                sim.craton_merge_count(),
+                sim.consumed_count(),
             );
             let (craton_count, craton_area, craton_aspect, craton_specks) = cratons(&sim);
             // Continental crust dating from the first ANCIENT_MYR, as a share
@@ -1296,7 +1372,10 @@ fn main() {
                     s.0 += sim.mesh.area(i) * dyn_topo[i] as f64;
                     s.1 += sim.mesh.area(i);
                 }
-                (sums[0].0 / sums[0].1.max(1e-12), sums[1].0 / sums[1].1.max(1e-12))
+                (
+                    sums[0].0 / sums[0].1.max(1e-12),
+                    sums[1].0 / sums[1].1.max(1e-12),
+                )
             };
             println!(
                 "heat {:>5.0} excess {:+.2} mantle {:.0} K core {:.0} K surface {:.1} TW radiogenic {:.1} TW core {:.1} TW cooling {:+.0} K/Gyr \
@@ -1466,6 +1545,25 @@ fn main() {
         RIFT_BURST_TICKS as f64 * sim.tuning.dt_myr,
         sim.failed_rift_count(),
     );
+    let end = assembly(&sim);
+    println!(
+        "  plates: {} total, >=0.5% {}, >=2% {}, >=5% {}, largest 7 hold {:.0}%",
+        end.plates,
+        end.plates_05,
+        end.plates_2,
+        end.plates_5,
+        end.top7 * 100.0,
+    );
+    println!(
+        "  births: {} rifts, {} fragments; deaths: {} weld, {} quiet, {} craton, {} absorbed, {} consumed",
+        sim.rift_count(),
+        sim.fragment_count(),
+        sim.weld_merge_count(),
+        sim.quiet_merge_count(),
+        sim.craton_merge_count(),
+        sim.absorbed_fragment_count(),
+        sim.consumed_count(),
+    );
     if land_samples > 0 {
         let s = land_samples as f64;
         // Supercontinent cycles: how often the largest landmass crosses up
@@ -1516,7 +1614,9 @@ fn main() {
             let mean = v.iter().sum::<f64>() / v.len() as f64;
             let (lo, hi) = v
                 .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| (l.min(x), h.max(x)));
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), &x| {
+                    (l.min(x), h.max(x))
+                });
             format!("{mean:.2} [{lo:.2}..{hi:.2}]")
         };
         // Swings: rises from under `low` to over `high`, a full gather after a
@@ -1536,11 +1636,14 @@ fn main() {
         };
         println!(
             "  assembly after {GROWN_MYR:.0} Myr, mean [min..max]: strict {} bridged {} clump {} plates {} \
+             >=2% {} largest7 {} \
              passive {} passive age {} old passive {} sink dipole {} align {} flow/speed {} suture slip {}",
             stat(&|a| a.strict),
             stat(&|a| a.bridged),
             stat(&|a| a.clump),
             stat(&|a| a.plates as f64),
+            stat(&|a| a.plates_2 as f64),
+            stat(&|a| a.top7),
             stat(&|a| a.passive),
             stat(&|a| a.passive_age),
             stat(&|a| a.passive_old),
