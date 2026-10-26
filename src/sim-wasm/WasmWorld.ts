@@ -61,6 +61,10 @@ export class WasmWorld implements SimWorld {
     this.world.set_tuning(tuning);
   }
 
+  refreshSurface(): void {
+    this.world.refresh_surface();
+  }
+
   setSimOptions(options: SimOptions): void {
     this.world.set_options(options);
   }
@@ -79,6 +83,7 @@ export class WasmWorld implements SimWorld {
       thickness: new Float32Array(buffer, w.thickness_ptr(), cells),
       keel: new Float32Array(buffer, w.keel_ptr(), cells),
       lithosphere: new Float32Array(buffer, w.lithosphere_ptr(), cells),
+      sediment: new Float32Array(buffer, w.sediment_ptr(), cells),
       heatFlow: new Float32Array(buffer, w.heat_flow_ptr(), cells),
       mantleTemp: new Float32Array(buffer, w.mantle_temp_ptr(), cells),
       lowerSlab: new Float32Array(buffer, w.lower_slab_ptr(), cells),

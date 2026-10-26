@@ -16,6 +16,7 @@ export type ColourMode =
   | "crust"
   | "density"
   | "lithosphere"
+  | "sediment"
   | "heat-flow"
   | "mantle-temp"
   | "slab-graveyard"
@@ -37,6 +38,7 @@ export interface ColourFields {
   density: ArrayLike<number>;
   keel: ArrayLike<number>;
   lithosphere: ArrayLike<number>;
+  sediment: ArrayLike<number>;
   heatFlow: ArrayLike<number>;
   mantleTemp: ArrayLike<number>;
   lowerSlab: ArrayLike<number>;
@@ -70,6 +72,14 @@ const LITHOSPHERE_STOPS: Stops = [
   [100, hex(0x2563a8)],
   [150, hex(0x3b2a7a)],
   [250, hex(0x120a2a)],
+];
+
+/** Share of the crust that is reworked sediment: bare crust to all silt. */
+const SEDIMENT_STOPS: Stops = [
+  [0, hex(0x2b2f3a)],
+  [0.1, hex(0x6b5b3e)],
+  [0.4, hex(0xc9a24d)],
+  [1, hex(0xf6e7b4)],
 ];
 
 /** Surface heat flow (mW/m²): cold old plates through hot ridge crust. */
@@ -214,7 +224,6 @@ export const writeCellColours = (
   cellCount: number,
   data: ColourFields,
   mode: ColourMode,
-  seaLevel: number,
   boundaryKind?: ArrayLike<number>,
   elevationStyle: ElevationStyle = "absolute",
 ): void => {
@@ -258,6 +267,11 @@ export const writeCellColours = (
         putRamp(out, i * 4, LITHOSPHERE_STOPS, data.lithosphere[i]);
       }
       return;
+    case "sediment":
+      for (let i = 0; i < cellCount; i++) {
+        putRamp(out, i * 4, SEDIMENT_STOPS, data.sediment[i]);
+      }
+      return;
     case "heat-flow":
       for (let i = 0; i < cellCount; i++) {
         putRamp(out, i * 4, HEAT_FLOW_STOPS, data.heatFlow[i]);
@@ -292,7 +306,6 @@ export const writeCellColours = (
         out,
         cellCount,
         data.elevation,
-        seaLevel,
         elevationStyle,
       );
   }
@@ -342,7 +355,7 @@ const putRamp = (out: Uint8Array, o: number, stops: Stops, x: number): void => {
 
 /**
  * Map elevations (km) to colours with fixed hypsometric and bathymetric tints,
- * measured from `seaLevel` so that raising the sea floods lowland blue. The
+ * already measured from sea level, which is 0. The
  * tints are absolute, as on a printed map: a given height above sea level is
  * always the same colour, whatever the rest of the world looks like.
  */
@@ -350,11 +363,10 @@ const writeElevationColours = (
   out: Uint8Array,
   cellCount: number,
   elevation: ArrayLike<number>,
-  seaLevel: number,
   style: ElevationStyle,
 ): void => {
   for (let i = 0; i < cellCount; i++) {
-    const h = elevation[i] - seaLevel;
+    const h = elevation[i];
     if (style === "land") {
       if (h <= 0) put(out, i * 4, LAND_DETAIL_OCEAN);
       else putRamp(out, i * 4, LAND_DETAIL_STOPS, h);
@@ -514,6 +526,16 @@ export const legendForView = (
         ],
         swatches: [],
         note: "Cold mantle lid under the crust: bare at ridges, thinned under rifts and plumes, deepest under cratonic keels.",
+      };
+    case "sediment":
+      return {
+        gradient: stopsToGradient(SEDIMENT_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "0" },
+          { at: 1, label: "100%" },
+        ],
+        swatches: [],
+        note: "Share of the crust, by mass, that eroded off land and was laid down again on a shelf, slope or basin.",
       };
     case "heat-flow":
       return {

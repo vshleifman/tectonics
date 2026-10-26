@@ -4,7 +4,7 @@ import type { Projection } from "../render/projection";
 /**
  * How cells render: elevation colour ("colour"), greyscale with per-cell
  * id/elevation labels ("data"), crust type ("crust"), crust density ramp
- * ("density"), mantle lid thickness ("lithosphere"), surface heat loss
+ * ("density"), mantle lid thickness ("lithosphere"), sediment share ("sediment"), surface heat loss
  * ("heat-flow"), upper-mantle temperature ("mantle-temp"), slab piled in the
  * lower mantle ("slab-graveyard"), the mantle's lift or drag on the surface
  * ("dyn-topo"), or boundary type ("boundary"). Plates are no longer a base view mode — they are an
@@ -16,6 +16,7 @@ export type ViewMode =
   | "crust"
   | "density"
   | "lithosphere"
+  | "sediment"
   | "heat-flow"
   | "mantle-temp"
   | "slab-graveyard"
@@ -33,7 +34,6 @@ export type { ElevationStyle };
 /** Every user-tunable UI setting. The store below is the sole owner of these. */
 export interface Settings {
   level: number;
-  seaLevel: number;
   autoRotate: boolean;
   projection: Projection;
   viewMode: ViewMode;

@@ -134,14 +134,15 @@ mod tests {
     }
 
     #[test]
-    fn a_cratonic_keel_floats() {
+    fn a_cratonic_keel_weighs_about_what_the_lid_it_replaces_does() {
         let t = Tuning::default();
         let craton = buoyancy(&t, 40.0, t.continental_density, continental_lithosphere(&t, 1.0), 1.0);
         let continent = buoyancy(&t, 40.0, t.continental_density, continental_lithosphere(&t, 0.0), 0.0);
         assert!(craton > 0.0, "a full keel sank: {craton:.2}");
-        assert!(craton > continent, "a keel's depletion does not offset its depth");
-        let lid_only = buoyancy(&t, 0.0, 0.0, continental_lithosphere(&t, 1.0), 1.0);
-        assert!(lid_only.abs() < 0.3, "a keel's lid on its own: {lid_only:.2}");
+        assert!(
+            (craton - continent).abs() < 0.15,
+            "craton floats {craton:.2}, ordinary continent {continent:.2}"
+        );
     }
 
     #[test]

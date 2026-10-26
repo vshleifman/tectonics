@@ -570,13 +570,14 @@ export class CellRenderer {
    * Rewrite the colour buffer for the given mode. Cheap: no geometry rebuild,
    * just one colour attribute upload.
    *
-   * - `"elevation"`: ocean/land ramp split at `seaLevel`. `"land"` flattens
+   * - `"elevation"`: ocean/land ramp split at sea level, 0. `"land"` flattens
    *   the ocean to one colour and stretches the continental colours.
    * - `"data"`: flat white faces (the black wireframe carries the structure).
    * - `"plate"`: a stable per-`plateId` hue so plates read as solid regions.
    * - `"crust"`: oceanic vs continental two-tone.
    * - `"density"`: a light-to-dark ramp over the crust density range.
    * - `"lithosphere"`: thickness of the cold mantle lid under the crust.
+   * - `"sediment"`: share of the crust that is reworked sediment.
    * - `"heat-flow"`: surface heat loss from cold old plates to hot ridges.
    * - `"mantle-temp"`: upper-mantle anomaly, cold under trenches, hot under continents.
    * - `"slab-graveyard"`: slab piled in the lower mantle beneath old trenches.
@@ -587,7 +588,6 @@ export class CellRenderer {
   updateColours(
     data: ColourFields,
     mode: ColourMode = "elevation",
-    seaLevel = 0,
     boundaryKind?: ArrayLike<number>,
     elevationStyle: ElevationStyle = "absolute",
   ): void {
@@ -596,7 +596,6 @@ export class CellRenderer {
       this.cellMesh.cellCount,
       data,
       mode,
-      seaLevel,
       boundaryKind,
       elevationStyle,
     );
@@ -614,7 +613,6 @@ export class CellRenderer {
       this.cellMesh.cellCount,
       data,
       "plate",
-      0,
     );
     this.platesTexture.needsUpdate = true;
   }

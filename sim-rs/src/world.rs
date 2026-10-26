@@ -8,6 +8,7 @@ use crate::cohesion::{keep_continents_whole, keep_cratons_whole};
 use crate::craton::update_cratons;
 use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins, lay_new_floor};
 use crate::elevation::{apply_elevation, dynamic_topography};
+use crate::erosion::erode_and_deposit;
 use crate::heat::{PlanetHeat, effective_tuning};
 use crate::lithosphere::update_lithosphere;
 use crate::mantle::MantleFlow;
@@ -32,7 +33,7 @@ use crate::tuning::{SimOptions, Tuning};
 use std::collections::HashMap;
 
 /// Passes timed per tick, in order; matches `PASS_NAMES` on the TypeScript side.
-pub const PASS_COUNT: usize = 9;
+pub const PASS_COUNT: usize = 10;
 /// Most steps one tick is split into, however fast the plates.
 const MAX_SUBSTEPS: usize = 64;
 /// Share of the globe whose plates must keep up when a tick is split: the
@@ -61,6 +62,9 @@ pub struct Sim {
     /// Dynamic topography (km) over each cell: where the surface stands for
     /// the mantle's flow, not its crust, so it is not carried with the plates.
     dyn_topo: Vec<f32>,
+    /// Sea level (km above the datum) that the planet's water fills the basins
+    /// to, as of the last tick.
+    sea_level: f64,
     scratch: Scratch,
     raw_labels: Vec<i32>,
     pub tuning: Tuning,
@@ -90,6 +94,7 @@ impl Sim {
             primordial: Primordial::default(),
             heat: PlanetHeat::new(n, &tuning),
             dyn_topo: vec![0.0; n],
+            sea_level: 0.0,
             scratch: Scratch::new(n),
             raw_labels: vec![0; n],
             tuning,
@@ -127,6 +132,8 @@ impl Sim {
             self.primordial.reset();
             self.heat.reset(&self.tuning);
             self.elapsed = 0.0;
+            self.sea_level = 0.0;
+            self.refresh_surface();
         }
         seed_slabs(&self.mesh, &mut self.front, &self.boundaries, &self.tuning);
         let dt = self.tuning.dt_myr;
@@ -225,6 +232,7 @@ impl Sim {
             boundaries,
             mantle,
             dyn_topo,
+            primordial,
             scratch,
             options,
             timings,
@@ -240,6 +248,7 @@ impl Sim {
                 dynamic_topography(t, mantle.upper_temp_at(i), mantle.sink_at(i) - balance) as f32
             });
         }
+        primordial.add_swell(dyn_topo, t);
         update_plate_motion(
             mesh, front, plates, boundaries, mantle, scratch, t, dt, options,
         );
@@ -307,6 +316,7 @@ impl Sim {
             primordial,
             heat,
             dyn_topo,
+            sea_level,
             options,
             timings,
             elapsed,
@@ -322,6 +332,9 @@ impl Sim {
         lap(timings, &mut mark, 5);
         recycle_continental_margins(mesh, front, dt, advection, t);
         infill_enclosed_basins(mesh, front, dt, advection, scratch, t);
+        lap(timings, &mut mark, 6);
+        erode_and_deposit(mesh, front, advection, dt, t);
+        lap(timings, &mut mark, 9);
         primordial.update(mesh, front, plates, advection, mantle, heat, dt, t);
         apply_crust_lifecycle(mesh, front, dt, advection, scratch, t);
         keep_continents_whole(mesh, front, advection, scratch, t);
@@ -331,7 +344,7 @@ impl Sim {
         update_lithosphere(front, advection, dt, t);
         heat.update(mesh, front, mantle.cell_temps(), dt, *elapsed, t);
         lap(timings, &mut mark, 6);
-        apply_elevation(&mesh.arc_cells, front, dyn_topo, dt, boundaries, t);
+        *sea_level = apply_elevation(mesh, front, dyn_topo, boundaries, *sea_level, t);
         lap(timings, &mut mark, 7);
         classify(mesh, front, plates, boundaries, scratch, t);
         lap(timings, &mut mark, 8);
@@ -346,6 +359,12 @@ impl Sim {
 
     pub fn heat(&self) -> &PlanetHeat {
         &self.heat
+    }
+
+    #[cfg(test)]
+    pub fn plant_tail(&mut self, centre: crate::math::Vec3) {
+        let t = self.effective_tuning();
+        self.primordial.plant_tail(&self.mesh, centre, &t);
     }
 
     pub fn active_plumes(&self) -> usize {
@@ -444,6 +463,26 @@ impl Sim {
         }
     }
 
+    /// Sea level (km above the datum) the water fills the basins to.
+    pub fn sea_level(&self) -> f64 {
+        self.sea_level
+    }
+
+    /// Re-solve sea level and rewrite every elevation from the current crust,
+    /// with no transport and no time passing, so a change to the ocean volume
+    /// shows at once.
+    pub fn refresh_surface(&mut self) {
+        let t = self.effective_tuning();
+        self.sea_level = apply_elevation(
+            &self.mesh,
+            &mut self.front,
+            &self.dyn_topo,
+            &self.boundaries,
+            self.sea_level,
+            &t,
+        );
+    }
+
     pub fn metrics(&self) -> WorldMetrics {
         let mut m = compute_metrics(
             &self.mesh,
@@ -454,6 +493,7 @@ impl Sim {
             &self.tuning,
             self.elapsed,
         );
+        m.sea_level = self.sea_level;
         m.mantle_excess = self.mantle_excess();
         m.active_plumes = self.active_plumes();
         let h = &self.heat;
@@ -499,6 +539,7 @@ impl Sim {
             &d.keel,
             &d.lithosphere,
             &d.plume_share,
+            &d.sediment_share,
         ] {
             field.iter().for_each(|x| eat(x.to_bits() as u64));
         }
@@ -567,6 +608,91 @@ impl Sim {
 mod tests {
     use super::*;
 
+    /// A world that has run a few ticks, for tests of the surface.
+    fn settled_world() -> Sim {
+        let mut sim = Sim::new(4);
+        sim.crack_great_circles(3, "sea level");
+        for _ in 0..3 {
+            sim.tick();
+        }
+        sim
+    }
+
+    fn land_share(sim: &Sim) -> f64 {
+        let land: f64 = (0..sim.mesh.cell_count)
+            .filter(|&i| sim.front.elevation[i] > 0.0)
+            .map(|i| sim.mesh.area(i))
+            .sum();
+        land / (0..sim.mesh.cell_count).map(|i| sim.mesh.area(i)).sum::<f64>()
+    }
+
+    #[test]
+    fn erosion_deposits_everything_it_removes_every_tick() {
+        let mut sim = Sim::new(4);
+        sim.crack_great_circles(4, "erosion ledger");
+        let mut eroded = 0.0;
+        for _ in 0..80 {
+            sim.tick();
+            let f = &sim.advection;
+            assert!(
+                (f.sediment_eroded - f.sediment_deposited).abs() <= 1e-9 * f.sediment_eroded.max(1.0),
+                "eroded {} but deposited {}",
+                f.sediment_eroded,
+                f.sediment_deposited
+            );
+            eroded += f.sediment_eroded;
+        }
+        assert!(eroded > 0.0, "nothing eroded");
+        assert!(sim.mass_drift().abs() < 1e-6, "mass drifted {}", sim.mass_drift());
+    }
+
+    #[test]
+    fn more_ocean_water_raises_the_sea_and_leaves_less_land() {
+        let mut sim = settled_world();
+        let (mut sea, mut land) = (f64::NEG_INFINITY, f64::INFINITY);
+        for volume in [1.0, 2.6, 5.0] {
+            sim.tuning.ocean_volume = volume;
+            sim.refresh_surface();
+            assert!(sim.sea_level() > sea, "{volume} km of water: sea at {}", sim.sea_level());
+            assert!(land_share(&sim) <= land);
+            sea = sim.sea_level();
+            land = land_share(&sim);
+        }
+    }
+
+    #[test]
+    fn younger_ocean_floor_raises_the_sea() {
+        let mut sim = settled_world();
+        sim.refresh_surface();
+        let old = sim.sea_level();
+        let land = land_share(&sim);
+        let d = &mut sim.front;
+        for i in 0..d.age.len() {
+            if d.crust_type[i] != crate::cell_data::CONTINENTAL {
+                d.age[i] *= 0.1;
+            }
+        }
+        crate::lithosphere::settle_lithosphere(d, &sim.tuning);
+        sim.refresh_surface();
+        assert!(sim.sea_level() > old, "young floor: sea {} against {old}", sim.sea_level());
+        assert!(land_share(&sim) <= land);
+    }
+
+    #[test]
+    fn refreshing_the_surface_changes_nothing_but_elevation() {
+        let mut sim = settled_world();
+        let (age, thickness, plate) = (
+            sim.front.age.clone(),
+            sim.front.thickness.clone(),
+            sim.front.plate_id.clone(),
+        );
+        let elapsed = sim.elapsed;
+        sim.tuning.ocean_volume = 4.0;
+        sim.refresh_surface();
+        assert_eq!((sim.front.age, sim.front.thickness, sim.front.plate_id), (age, thickness, plate));
+        assert_eq!(sim.elapsed, elapsed);
+    }
+
     /// A level 5 world after `ticks`, run on a pool of `threads`, at a tick
     /// long enough to be split into several steps.
     #[cfg(feature = "parallel")]
@@ -604,6 +730,7 @@ mod tests {
             ("keel", &a.keel, &b.keel),
             ("lithosphere", &a.lithosphere, &b.lithosphere),
             ("plume share", &a.plume_share, &b.plume_share),
+            ("sediment share", &a.sediment_share, &b.sediment_share),
         ] {
             assert!(bits(x) == bits(y), "{name} differs");
         }
@@ -667,8 +794,11 @@ mod tests {
     fn dynamic_topography_moves_the_surface_and_nothing_else() {
         let run = |on: bool| {
             let mut sim = Sim::new(4);
+            // Erosion reads elevation, so with it the surface moves the crust.
+            sim.tuning.erosion_time = 0.0;
             if !on {
                 sim.tuning.dyn_topo_gain = 0.0;
+                sim.tuning.plume_swell = 0.0;
                 sim.tuning.sink_topo_gain = 0.0;
             }
             sim.crack_great_circles(4, "dynamic topography");
@@ -735,12 +865,6 @@ mod tests {
                 d.crust_type[i] = crate::cell_data::CONTINENTAL;
                 d.thickness[i] = 35.0;
                 d.density[i] = t.continental_density as f32;
-                d.elevation[i] = crate::elevation::baseline_elevation(
-                    t,
-                    crate::cell_data::CONTINENTAL,
-                    0.0,
-                    35.0,
-                ) as f32;
                 d.mantle_heat[i] = heat;
             }
         }

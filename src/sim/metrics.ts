@@ -146,6 +146,10 @@ export interface WorldMetrics {
   dynTopoHigh: number;
   /** Share of the globe standing above sea level (0 km). */
   landArea: number;
+  /** Share of continental crust standing above sea level. */
+  continentalLand: number;
+  /** Eustatic sea level (km above the datum), set by the planet's water. */
+  seaLevel: number;
   /**
    * Share of the surface per Myr of continental crust recycled into the mantle
    * at active margins. Levelled off, it matches {@link continentalGrowth}.
@@ -158,6 +162,10 @@ export interface WorldMetrics {
   continentalGrowth: number;
   /** Share of the continental mass lost per Myr to subduction erosion. */
   continentalEroded: number;
+  /** Share of continental crust, by mass, that is reworked sediment. */
+  sedimentShare: number;
+  /** Crust eroded from land and re-laid at the coast, as a share of continental mass per Myr. */
+  sedimentFlux: number;
   /** Share of the continental mass shed per Myr by over-thick roots. */
   delaminated: number;
   /**

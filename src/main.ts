@@ -18,7 +18,6 @@ import type { Snapshot } from "./worker/protocol";
 import { platesFromOmegas, SimClient } from "./worker/SimClient";
 
 const INITIAL_LEVEL = 6;
-const INITIAL_SEA_LEVEL = 0;
 const INITIAL_AUTO_ROTATE = false;
 const INITIAL_PROJECTION: Projection = "sphere";
 const INITIAL_VIEW_MODE: ViewMode = "colour";
@@ -129,7 +128,6 @@ let showSeedOverlay = true;
 /** Single source of truth for every UI setting. */
 const settings = createSettingsStore({
   level: INITIAL_LEVEL,
-  seaLevel: INITIAL_SEA_LEVEL,
   autoRotate: INITIAL_AUTO_ROTATE,
   projection: INITIAL_PROJECTION,
   viewMode: INITIAL_VIEW_MODE,
@@ -155,7 +153,6 @@ const recolour = (): void => {
   cellRenderer.updateColours(
     snapshot.buffers,
     colourMode(),
-    settings.get("seaLevel"),
     snapshot.buffers.cellKind,
     settings.get("elevationStyle"),
   );
@@ -356,7 +353,6 @@ const ui = createControls(
 // React to setting changes. The store is the source of truth; these subscriptions
 // own the side effects each setting triggers.
 settings.on("level", (level) => rebuild(level));
-settings.on("seaLevel", () => recolour());
 settings.on("elevationStyle", () => recolour());
 settings.on("autoRotate", (enabled) => {
   controls.autoRotate = enabled;

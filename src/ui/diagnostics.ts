@@ -1039,6 +1039,23 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
     },
     pins,
   );
+  const seaLevel = makeLineChart(
+    {
+      title: "Eustatic sea level",
+      unit: "km",
+      series: [{ label: "Sea level", get: (m) => m.seaLevel }],
+      format: formatSigned,
+    },
+    pins,
+  );
+  const continentalLand = makeLineChart(
+    {
+      title: "Continental crust above water",
+      series: [{ label: "Above water", get: (m) => m.continentalLand }],
+      format: formatPercent,
+    },
+    pins,
+  );
   const landmasses = makeLineChart(
     {
       title: "Landmasses",
@@ -1090,6 +1107,7 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
       unit: "%/Myr",
       series: [
         { label: "Eroded", get: (m) => m.continentalEroded },
+        { label: "River flux (moved, not lost)", get: (m) => m.sedimentFlux },
         { label: "Delaminated", get: (m) => m.delaminated },
         { label: "Foundered", get: (m) => m.foundered },
         { label: "Decontinentalised", get: (m) => m.decontinentalised },
@@ -1317,12 +1335,16 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
       "Continents",
       stack(
         continentalArea.element,
+        seaLevel.element,
+        continentalLand.element,
         landmasses.element,
         continentShare.element,
         thickness.element,
       ),
       (samples) => {
         continentalArea.update(samples);
+        seaLevel.update(samples);
+        continentalLand.update(samples);
         landmasses.update(samples);
         continentShare.update(samples);
         thickness.update(samples);

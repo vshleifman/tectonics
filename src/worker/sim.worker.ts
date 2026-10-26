@@ -73,6 +73,7 @@ const allocateBuffers = (w: SimWorld): SnapshotBuffers => {
     thickness: new Float32Array(cells),
     keel: new Float32Array(cells),
     lithosphere: new Float32Array(cells),
+    sediment: new Float32Array(cells),
     heatFlow: new Float32Array(cells),
     mantleTemp: new Float32Array(cells),
     lowerSlab: new Float32Array(cells),
@@ -101,6 +102,7 @@ const publish = (): void => {
   buffers.thickness.set(fields.thickness);
   buffers.keel.set(fields.keel);
   buffers.lithosphere.set(fields.lithosphere);
+  buffers.sediment.set(fields.sediment);
   buffers.heatFlow.set(fields.heatFlow);
   buffers.mantleTemp.set(fields.mantleTemp);
   buffers.lowerSlab.set(fields.lowerSlab);
@@ -176,6 +178,23 @@ const reassign = (): void => {
   publish();
 };
 
+/**
+ * Re-solve sea level and redraw after a tuning change, once however many
+ * arrive together, so a dragged slider costs one refresh at a time.
+ */
+let refreshQueued = false;
+const refreshSoon = (): void => {
+  if (refreshQueued) return;
+  refreshQueued = true;
+  setTimeout(() => {
+    refreshQueued = false;
+    if (!world) return;
+    world.refreshSurface();
+    statsDue = true;
+    publish();
+  }, 0);
+};
+
 const handle = async (cmd: SimCommand): Promise<void> => {
   switch (cmd.type) {
     case "init": {
@@ -219,6 +238,7 @@ const handle = async (cmd: SimCommand): Promise<void> => {
       return;
     case "setTuning":
       world?.setTuning(cmd.tuning);
+      refreshSoon();
       return;
     case "setSimOptions":
       world?.setSimOptions(cmd.options);

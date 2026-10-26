@@ -80,6 +80,7 @@ export const bufferList = (b: SnapshotBuffers): ArrayBuffer[] => [
   b.thickness.buffer as ArrayBuffer,
   b.keel.buffer as ArrayBuffer,
   b.lithosphere.buffer as ArrayBuffer,
+  b.sediment.buffer as ArrayBuffer,
   b.heatFlow.buffer as ArrayBuffer,
   b.mantleTemp.buffer as ArrayBuffer,
   b.lowerSlab.buffer as ArrayBuffer,

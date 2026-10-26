@@ -47,6 +47,8 @@ export interface TrajectoryPoint {
   continentalRecycled: number;
   continentalGrowth: number;
   continentalEroded: number;
+  sedimentShare: number;
+  sedimentFlux: number;
   delaminated: number;
   foundered: number;
   decontinentalised: number;
@@ -71,6 +73,8 @@ export interface TrajectoryPoint {
   dynTopoLow: number;
   dynTopoHigh: number;
   landArea: number;
+  continentalLand: number;
+  seaLevel: number;
   activePlumes: number;
   meanOceanAge: number;
   maxOceanAge: number;
@@ -147,6 +151,8 @@ export const runBench = (
       continentalRecycled: m.continentalRecycled,
       continentalGrowth: m.continentalGrowth,
       continentalEroded: m.continentalEroded,
+      sedimentShare: m.sedimentShare,
+      sedimentFlux: m.sedimentFlux,
       delaminated: m.delaminated,
       foundered: m.foundered,
       decontinentalised: m.decontinentalised,
@@ -171,6 +177,8 @@ export const runBench = (
       dynTopoLow: m.dynTopoLow,
       dynTopoHigh: m.dynTopoHigh,
       landArea: m.landArea,
+      continentalLand: m.continentalLand,
+      seaLevel: m.seaLevel,
       activePlumes: m.activePlumes,
       meanOceanAge: m.meanOceanAge,
       maxOceanAge: m.maxOceanAge,
@@ -220,6 +228,7 @@ const describeContinentalBudget = (r: BenchResult): string => {
     `net growth ${percent(mean("continentalGrowth"), 4)}; ` +
     `recycled/Myr ${percent(mean("continentalRecycled"), 4)}; ` +
     `loss/Myr erosion ${percent(mean("continentalEroded"), 4)} ` +
+    `river flux/Myr ${percent(mean("sedimentFlux"), 4)} (sediment ${percent(mean("sedimentShare"), 1)} of continental mass) ` +
     `delamination ${percent(mean("delaminated"), 4)} ` +
     `founder ${percent(mean("foundered"), 4)}; ` +
     `revert/Myr ${percent(mean("decontinentalised"), 4)}; ` +
@@ -250,7 +259,8 @@ export const describeBench = (r: BenchResult): string => {
         `upper ${last.mantleAnomalyMin.toFixed(0)}..${last.mantleAnomalyMax.toFixed(0)} K, ` +
         `piled ${last.pileMass.toFixed(2)} globes, ${last.activePlumes} plumes), ` +
         `dynamic topography ${last.dynTopoLow.toFixed(2)}..${last.dynTopoHigh.toFixed(2)} km, ` +
-        `land ${percent(last.landArea, 1)}, ` +
+        `land ${percent(last.landArea, 1)} (${percent(last.continentalLand, 1)} of continental crust), ` +
+        `sea level ${last.seaLevel.toFixed(2)} km, ` +
         `drift ${(last.drift * 100).toFixed(3)}%` +
         describeContinentalBudget(r)
       : "")

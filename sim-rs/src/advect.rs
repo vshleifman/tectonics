@@ -40,6 +40,11 @@ pub struct AdvectionField {
     spill_share: Vec<f32>,
     spill_share_next: Vec<f32>,
     spill_share_in: Vec<f32>,
+    /// The same for the sediment tracer.
+    pub welded_sediment: Vec<f32>,
+    spill_sediment: Vec<f32>,
+    spill_sediment_next: Vec<f32>,
+    spill_sediment_in: Vec<f32>,
     pub rift_cell: Vec<u8>,
     pub subducted: Vec<u8>,
     /// Thickness each cell took in this step from lateral spreading, net of
@@ -56,6 +61,11 @@ pub struct AdvectionField {
     /// Continental mass lost this step to subduction erosion of eaten margins
     /// and to ocean-under-continent margin erosion.
     pub eroded_this_step: f64,
+    /// Continental crust eroded from land this tick and deposited on its way
+    /// to the coast (area x km), which match: erosion moves crust, nothing is
+    /// made or lost.
+    pub sediment_eroded: f64,
+    pub sediment_deposited: f64,
     /// Mass shed this step by roots past the thickness cap.
     pub delaminated_this_step: f64,
     /// Accreted mass this step that could not be taken up at the thickening cap
@@ -122,6 +132,10 @@ impl AdvectionField {
             spill_share: vec![0.0; n],
             spill_share_next: vec![0.0; n],
             spill_share_in: vec![0.0; n],
+            welded_sediment: vec![0.0; n],
+            spill_sediment: vec![0.0; n],
+            spill_sediment_next: vec![0.0; n],
+            spill_sediment_in: vec![0.0; n],
             rift_cell: vec![0; n],
             subducted: vec![0; n],
             spread_in: vec![0.0; n],
@@ -133,6 +147,8 @@ impl AdvectionField {
             created_total: 0.0,
             eroded_this_step: 0.0,
             delaminated_this_step: 0.0,
+            sediment_eroded: 0.0,
+            sediment_deposited: 0.0,
             foundered_this_step: 0.0,
             continentalised_by_accretion: 0.0,
             continentalised_by_spreading: 0.0,
@@ -185,7 +201,7 @@ impl AdvectionField {
 /// A key that sorts ascending by descending `score`, then ascending `index`:
 /// the float's bits made monotonic and inverted, above the index.
 #[inline]
-fn descending_key(score: f32, index: u32) -> u64 {
+pub(crate) fn descending_key(score: f32, index: u32) -> u64 {
     let bits = if score == 0.0 { 0 } else { score.to_bits() };
     let ordered = if bits & 0x8000_0000 != 0 {
         !bits
@@ -229,6 +245,7 @@ pub fn advect(
     out.welded_age.fill(0.0);
     out.welded_keel.fill(0.0);
     out.welded_share.fill(0.0);
+    out.welded_sediment.fill(0.0);
     out.rift_cell.fill(0);
     out.subducted.fill(0);
     out.spread_in.fill(0.0);
@@ -783,6 +800,7 @@ pub fn advect(
     gather(&mut dst.keel, &src.keel, 0.0);
     gather(&mut dst.lithosphere, &src.lithosphere, 0.0);
     gather(&mut dst.plume_share, &src.plume_share, 0.0);
+    gather(&mut dst.sediment_share, &src.sediment_share, 0.0);
     par::fill(&mut dst.crust_type, |d| match from[d] {
         RIFT => OCEANIC,
         f => src.crust_type[f as usize],
@@ -836,6 +854,7 @@ pub fn advect(
             };
             add_f32(&mut out.welded[cell], kept);
             add_f32(&mut out.welded_share[cell], kept * src.plume_share[cell] as f64);
+            add_f32(&mut out.welded_sediment[cell], kept * src.sediment_share[cell] as f64);
             add_f32(&mut out.welded_continental[cell], kept);
             add_f32(&mut out.welded_age[cell], kept * src.age[cell] as f64);
             add_f32(&mut out.welded_keel[cell], kept * src.keel[cell] as f64);
@@ -861,6 +880,10 @@ pub fn advect(
                 &mut out.welded_share[cell],
                 mass / area(cell) * src.plume_share[cell] as f64,
             );
+            add_f32(
+                &mut out.welded_sediment[cell],
+                mass / area(cell) * src.sediment_share[cell] as f64,
+            );
         }
     }
 
@@ -880,6 +903,7 @@ pub fn advect(
     let gains = {
         let thickness = Disjoint::new(&mut dst.thickness);
         let plume_share = Disjoint::new(&mut dst.plume_share);
+        let sediment_share = Disjoint::new(&mut dst.sediment_share);
         let margin_eroded = Disjoint::new(&mut out.margin_eroded);
         let surplus = Disjoint::new(&mut surplus);
         let (keel, rift_cell, accreted) = (&dst.keel, &out.rift_cell, &out.accreted);
@@ -914,6 +938,7 @@ pub fn advect(
                     };
                     let take = acc.min(room as f64).min(cap_room);
                     plume_share.set(d, mixed_share(plume_share.get(d), h, take, 0.0));
+                    sediment_share.set(d, mixed_share(sediment_share.get(d), h, take, 0.0));
                     thickness.set(d, (h + take) as f32);
                     margin_eroded.set(d, (room as f64 - take) as f32);
                     let left = (acc - take) as f32;
@@ -1009,6 +1034,8 @@ pub fn advect(
             let place = inc.min(accreting_room(dst, &out.rift_cell, &out.margin_eroded, d));
             dst.plume_share[d] =
                 mixed_share(dst.plume_share[d], dst.thickness[d] as f64, place, 0.0);
+            dst.sediment_share[d] =
+                mixed_share(dst.sediment_share[d], dst.thickness[d] as f64, place, 0.0);
             add_f32(&mut dst.thickness[d], place);
             add_f32(&mut out.margin_eroded[d], -place);
             add_f32(&mut next[d], inc - place);
@@ -1030,13 +1057,16 @@ pub fn advect(
     active.clear();
 
     out.spill_share.fill(0.0);
+    out.spill_sediment.fill(0.0);
     let spilling = {
         let age = Disjoint::new(&mut dst.age);
         let keel = Disjoint::new(&mut dst.keel);
         let plume_share = Disjoint::new(&mut dst.plume_share);
+        let sediment_share = Disjoint::new(&mut dst.sediment_share);
         let thickness = Disjoint::new(&mut dst.thickness);
         let surplus = Disjoint::new(&mut surplus);
         let spill_share = Disjoint::new(&mut out.spill_share);
+        let spill_sediment = Disjoint::new(&mut out.spill_sediment);
         let crust_type = &dst.crust_type;
         par::filter_map(n, |d| {
             let welded = out.welded[d] as f64;
@@ -1046,6 +1076,7 @@ pub fn advect(
             // Safety: iteration `d` alone touches index `d` of each.
             unsafe {
                 let welded_tracer = (out.welded_share[d] as f64 / welded).clamp(0.0, 1.0);
+                let welded_sediment = (out.welded_sediment[d] as f64 / welded).clamp(0.0, 1.0);
                 let h = thickness.get(d);
                 let held = if out.rift_cell[d] != 0 {
                     0.0
@@ -1076,10 +1107,12 @@ pub fn advect(
                     keel.set(d, if deepest >= CRATON_KEEL { deepest } else { mixed });
                 }
                 plume_share.set(d, mixed_share(plume_share.get(d), h as f64, held, welded_tracer));
+                sediment_share.set(d, mixed_share(sediment_share.get(d), h as f64, held, welded_sediment));
                 thickness.set(d, (h as f64 + held) as f32);
                 let left = (welded - held) as f32;
                 surplus.set(d, left);
                 spill_share.set(d, ((welded - held) * welded_tracer) as f32);
+                spill_sediment.set(d, ((welded - held) * welded_sediment) as f32);
                 (left > 0.0).then_some(d)
             }
         })
@@ -1096,6 +1129,8 @@ pub fn advect(
     };
     out.spill_share_in.fill(0.0);
     out.spill_share_next.fill(0.0);
+    out.spill_sediment_in.fill(0.0);
+    out.spill_sediment_next.fill(0.0);
     for round in 0..PLACEMENT_ROUNDS {
         if active.is_empty() {
             break;
@@ -1104,6 +1139,7 @@ pub fn advect(
         for &d in &active {
             let have = surplus[d] as f64;
             let tracer = (out.spill_share[d] as f64 / have).clamp(0.0, 1.0);
+            let sediment = (out.spill_sediment[d] as f64 / have).clamp(0.0, 1.0);
             let own = dst.plate_id[d];
             let accepts = |m: usize| dst.plate_id[m] == own && out.rift_cell[m] == 0;
             let mut room = 0.0f64;
@@ -1131,6 +1167,7 @@ pub fn advect(
             if weight <= 0.0 {
                 add_f32(&mut next[d], have);
                 add_f32(&mut out.spill_share_next[d], have * tracer);
+                add_f32(&mut out.spill_sediment_next[d], have * sediment);
                 continue;
             }
             for k in range(d) {
@@ -1145,6 +1182,7 @@ pub fn advect(
                 let moved = have * (w / weight) * area(d) / area(m);
                 add_f32(&mut incoming[m], moved);
                 add_f32(&mut out.spill_share_in[m], moved * tracer);
+                add_f32(&mut out.spill_sediment_in[m], moved * sediment);
                 if s.u8a[m] == 0 {
                     s.u8a[m] = 1;
                     touched.push(m);
@@ -1156,12 +1194,15 @@ pub fn advect(
             s.u8a[d] = 0;
             let inc = incoming[d] as f64;
             let carried = out.spill_share_in[d] as f64;
+            let carried_sediment = out.spill_sediment_in[d] as f64;
             incoming[d] = 0.0;
             out.spill_share_in[d] = 0.0;
+            out.spill_sediment_in[d] = 0.0;
             if inc == 0.0 {
                 continue;
             }
             let tracer = (carried / inc).clamp(0.0, 1.0);
+            let sediment = (carried_sediment / inc).clamp(0.0, 1.0);
             let place = if last {
                 inc
             } else {
@@ -1169,15 +1210,20 @@ pub fn advect(
             };
             dst.plume_share[d] =
                 mixed_share(dst.plume_share[d], dst.thickness[d] as f64, place, tracer);
+            dst.sediment_share[d] =
+                mixed_share(dst.sediment_share[d], dst.thickness[d] as f64, place, sediment);
             add_f32(&mut dst.thickness[d], place);
             add_f32(&mut next[d], inc - place);
             add_f32(&mut out.spill_share_next[d], (inc - place) * tracer);
+            add_f32(&mut out.spill_sediment_next[d], (inc - place) * sediment);
         }
         std::mem::swap(&mut surplus, &mut next);
         std::mem::swap(&mut out.spill_share, &mut out.spill_share_next);
+        std::mem::swap(&mut out.spill_sediment, &mut out.spill_sediment_next);
         for &d in &active {
             next[d] = 0.0;
             out.spill_share_next[d] = 0.0;
+            out.spill_sediment_next[d] = 0.0;
         }
         active.extend_from_slice(&touched);
         active.retain(|&d| surplus[d] > 0.0);
@@ -1186,8 +1232,11 @@ pub fn advect(
     }
     for &d in &active {
         let tracer = (out.spill_share[d] / surplus[d]).clamp(0.0, 1.0) as f64;
+        let sediment = (out.spill_sediment[d] / surplus[d]).clamp(0.0, 1.0) as f64;
         dst.plume_share[d] =
             mixed_share(dst.plume_share[d], dst.thickness[d] as f64, surplus[d] as f64, tracer);
+        dst.sediment_share[d] =
+            mixed_share(dst.sediment_share[d], dst.thickness[d] as f64, surplus[d] as f64, sediment);
         add_f32(&mut dst.thickness[d], surplus[d] as f64);
     }
 
@@ -1201,6 +1250,7 @@ pub fn advect(
         // Crust each cell takes in, and that times the share it carries.
         out.spill_share_next.fill(0.0);
         out.spill_share_in.fill(0.0);
+        out.spill_sediment_in.fill(0.0);
         for d in 0..n {
             let excess = before[d] as f64 - t.crust_spread_start;
             if excess <= 0.0 || out.rift_cell[d] != 0 {
@@ -1239,6 +1289,7 @@ pub fn advect(
                 add_f32(&mut flow[m], moved);
                 add_f32(&mut out.spill_share_next[m], moved);
                 add_f32(&mut out.spill_share_in[m], moved * dst.plume_share[d] as f64);
+                add_f32(&mut out.spill_sediment_in[m], moved * dst.sediment_share[d] as f64);
             }
         }
         for d in 0..n {
@@ -1248,6 +1299,8 @@ pub fn advect(
                 let kept = before[d] as f64 - (inflow - flow[d] as f64);
                 let tracer = out.spill_share_in[d] as f64 / inflow;
                 dst.plume_share[d] = mixed_share(dst.plume_share[d], kept, inflow, tracer);
+                let sediment = out.spill_sediment_in[d] as f64 / inflow;
+                dst.sediment_share[d] = mixed_share(dst.sediment_share[d], kept, inflow, sediment);
             }
             add_f32(&mut dst.thickness[d], flow[d] as f64);
             out.spread_in[d] = flow[d].max(0.0);
@@ -1374,14 +1427,16 @@ pub fn advect(
             continue;
         }
         let wanted = available.min(rim_mass / rim_area * area(d));
-        let (mut pulled, mut traced) = (0.0f64, 0.0f64);
+        let (mut pulled, mut traced, mut silt) = (0.0f64, 0.0f64, 0.0f64);
         for (&m, &own) in donors.iter().zip(&spare) {
             let take = wanted * own / available;
             add_f32(&mut dst.thickness[m], -take / area(m));
             pulled += take;
             traced += take * dst.plume_share[m] as f64;
+            silt += take * dst.sediment_share[m] as f64;
         }
         dst.plume_share[d] = (traced / pulled.max(1e-12)) as f32;
+        dst.sediment_share[d] = (silt / pulled.max(1e-12)) as f32;
 
         dst.elevation[d] = dst.elevation[model];
         dst.crust_type[d] = kind;
@@ -1420,7 +1475,7 @@ pub fn advect(
             continue;
         }
         let wanted = available.min(t.ridge_crust_thickness * area(d));
-        let (mut pulled, mut traced) = (0.0f64, 0.0f64);
+        let (mut pulled, mut traced, mut silt) = (0.0f64, 0.0f64, 0.0f64);
         for k in range(d) {
             let m = nbr[k] as usize;
             if !(dst.plate_id[m] == plate && dst.crust_type[m] == CONTINENTAL) {
@@ -1434,8 +1489,10 @@ pub fn advect(
             add_f32(&mut dst.thickness[m], -take / area(m));
             pulled += take;
             traced += take * dst.plume_share[m] as f64;
+            silt += take * dst.sediment_share[m] as f64;
         }
         dst.plume_share[d] = (traced / pulled.max(1e-12)) as f32;
+        dst.sediment_share[d] = (silt / pulled.max(1e-12)) as f32;
         out.rift_cell[d] = 0;
         dst.thickness[d] = (pulled / area(d)) as f32;
         dst.age[d] = 0.0;

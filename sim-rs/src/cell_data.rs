@@ -37,6 +37,10 @@ pub struct CellData {
     /// mixes by mass wherever crust is added, and is untouched by removal, so
     /// the plume crust still alive is the sum of area x thickness x share.
     pub plume_share: Vec<f32>,
+    /// Share of the cell's crust, by mass, that is reworked sediment, in
+    /// [0, 1]. Handled exactly like `plume_share`: it travels with the crust,
+    /// mixes by mass wherever crust is added, and is untouched by removal.
+    pub sediment_share: Vec<f32>,
 }
 
 pub const RIFT_NEAR: u8 = 1;
@@ -58,6 +62,7 @@ impl CellData {
             keel: vec![0.0; n],
             lithosphere: vec![0.0; n],
             plume_share: vec![0.0; n],
+            sediment_share: vec![0.0; n],
         }
     }
 }

@@ -52,8 +52,8 @@ const ARROW_LEGEND: ReadonlyArray<{ colour: string; label: string }> = [
 
 const MIN_LEVEL = 2;
 const MAX_LEVEL = 8;
-const MIN_SEA_LEVEL = -8;
-const MAX_SEA_LEVEL = 8;
+const MIN_OCEAN_VOLUME = 0;
+const MAX_OCEAN_VOLUME = 6;
 const MIN_BRANCHES = 1;
 const MAX_BRANCHES = 5;
 const MIN_TICK_RATE = 1;
@@ -89,14 +89,17 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "Age by which the sea floor has sunk to the abyssal plain, sinking as the square root of age until then.",
   mantleDensity:
     "Density of the mantle crust floats on; sets how high a given thickness of crust stands.",
-  continentThermalShare:
-    "How much higher young continent stands than old, as a share of the ocean floor's cooling relief.",
-  collisionUplift:
-    "Uplift where two continents collide and both sides pile up.",
-  arcUplift: "Uplift of the buoyant plate overriding a subduction zone.",
-  trenchDeepen: "Deepening of the denser plate as it bends into the trench.",
-  ridgePull: "How fast a divergent boundary is pulled toward the ridge crest.",
-  relaxRate: "How fast each cell drifts back toward its isostatic baseline.",
+  oceanVolume:
+    "Water on the planet as an even layer over the globe; sea level is what fills the basins with it.",
+  waterDensity: "Density of sea water; the heavier it is, the less a column sinks under it.",
+  erosionTime:
+    "How long land takes to wear down to 1/e of its height over sea level, isostatic rebound included. 0 turns erosion off.",
+  shelfDepth:
+    "Depth the first ring of sea floor off a coast is built up to by sediment before it passes the rest on.",
+  slopeCapture:
+    "Share of the sediment reaching each ring of sea floor past the shelf that settles there.",
+  sedimentReach: "How many rings of cells off the coast sediment can reach.",
+  trenchDepth: "How far the plate going down is bent below its column at a trench with a full slab.",
   elevationMin: "Lowest elevation the model will allow.",
   elevationMax: "Highest elevation the model will allow.",
   slabWeight: "Pull per unit of trench, and so the world's overall pace.",
@@ -282,6 +285,14 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   plumeThicknessCold:
     "Crust thickness a plume builds in a mantle as cool as today's; under the continental threshold it stays ocean plateau.",
   plumeKeel: "Cratonic keel plume crust is born with.",
+  plumeTailDuration:
+    "How long a plume's tail stays fixed in the mantle, building a hotspot chain as the plate moves over it.",
+  plumeTailRadius:
+    "Width of the hotspot track. About one cell at level 6, five at level 8: tracks read as lines from level 7 up.",
+  plumeTailThickness:
+    "Crust a tail builds over ridge crust; capped under the continental threshold so a tail never makes continent.",
+  plumeSwell: "Uplift of the broad swell where a tail stands.",
+  plumeSwellRadius: "Radius of the swell over a tail.",
   hotArcSuppression: "How much a hot mantle holds back arc accretion.",
   hotDrip:
     "How much thickened ocean floor drips into a hot mantle instead of becoming continent.",
@@ -331,34 +342,46 @@ const TUNING_GROUP_FIELDS: {
         step: 0.01,
       },
       {
-        key: "continentThermalShare",
-        label: "Young continent uplift",
+        key: "waterDensity",
+        label: "Water density",
+        min: 1.0,
+        max: 1.1,
+        step: 0.01,
+      },
+      {
+        key: "trenchDepth",
+        label: "Trench depth",
+        min: 0,
+        max: 10,
+        step: 0.1,
+      },
+      {
+        key: "erosionTime",
+        label: "Erosion time (Myr)",
+        min: 0,
+        max: 1000,
+        step: 10,
+      },
+      {
+        key: "shelfDepth",
+        label: "Shelf depth",
+        min: -1,
+        max: 0,
+        step: 0.01,
+      },
+      {
+        key: "slopeCapture",
+        label: "Slope capture",
         min: 0,
         max: 1,
         step: 0.05,
       },
       {
-        key: "collisionUplift",
-        label: "Collision uplift",
-        min: 0,
-        max: 10,
-        step: 0.1,
-      },
-      { key: "arcUplift", label: "Arc uplift", min: 0, max: 10, step: 0.1 },
-      {
-        key: "trenchDeepen",
-        label: "Trench deepen",
-        min: 0,
-        max: 10,
-        step: 0.1,
-      },
-      { key: "ridgePull", label: "Ridge pull", min: 0, max: 1, step: 0.01 },
-      {
-        key: "relaxRate",
-        label: "Isostatic relax rate",
-        min: 0,
-        max: 0.5,
-        step: 0.005,
+        key: "sedimentReach",
+        label: "Sediment reach (rings)",
+        min: 1,
+        max: 8,
+        step: 1,
       },
       {
         key: "elevationMin",
@@ -1220,6 +1243,41 @@ const TUNING_GROUP_FIELDS: {
         step: 0.05,
       },
       {
+        key: "plumeTailDuration",
+        label: "Hotspot tail (Myr)",
+        min: 0,
+        max: 200,
+        step: 5,
+      },
+      {
+        key: "plumeTailRadius",
+        label: "Hotspot track radius (rad)",
+        min: 0.01,
+        max: 0.1,
+        step: 0.005,
+      },
+      {
+        key: "plumeTailThickness",
+        label: "Hotspot track crust (km)",
+        min: 0,
+        max: 10,
+        step: 0.5,
+      },
+      {
+        key: "plumeSwell",
+        label: "Hotspot swell (km)",
+        min: 0,
+        max: 1.5,
+        step: 0.1,
+      },
+      {
+        key: "plumeSwellRadius",
+        label: "Hotspot swell radius (rad)",
+        min: 0.02,
+        max: 0.3,
+        step: 0.01,
+      },
+      {
         key: "hotArcSuppression",
         label: "Hot arc suppression",
         min: 0,
@@ -1488,6 +1546,8 @@ export const createControls = (
       slider.value = String(tuning[spec.key]);
       render();
     }
+    waterSlider.value = String(tuning.oceanVolume);
+    renderWaterLabel();
     onTuningChange();
     renderViewLegend();
   });
@@ -1598,6 +1658,7 @@ export const createControls = (
       { value: "crust", label: "Crust type" },
       { value: "density", label: "Crust density" },
       { value: "lithosphere", label: "Lithosphere" },
+      { value: "sediment", label: "Sediment" },
       { value: "heat-flow", label: "Heat flow" },
       { value: "mantle-temp", label: "Mantle temperature" },
       { value: "slab-graveyard", label: "Slab graveyard" },
@@ -1632,17 +1693,23 @@ export const createControls = (
     fontSize: "11px",
   } satisfies Partial<CSSStyleDeclaration>);
 
-  const seaLabel = makeLabel();
-  const seaSlider = makeSlider(
-    MIN_SEA_LEVEL,
-    MAX_SEA_LEVEL,
-    0.5,
-    initial.seaLevel,
+  const waterLabel = makeLabel();
+  const waterSlider = makeSlider(
+    MIN_OCEAN_VOLUME,
+    MAX_OCEAN_VOLUME,
+    0.1,
+    tuning.oceanVolume,
   );
-  const renderSeaLabel = (): void => {
-    seaLabel.textContent = `Sea level: ${store.get("seaLevel").toFixed(1)}`;
+  const renderWaterLabel = (): void => {
+    waterLabel.textContent = `Ocean volume: ${tuning.oceanVolume.toFixed(1)} km`;
   };
-  renderSeaLabel();
+  renderWaterLabel();
+  const waterBlock = document.createElement("div");
+  waterBlock.append(waterLabel, waterSlider);
+  tooltip.attach(
+    waterBlock,
+    "Water on the planet, as an even layer over the globe (Earth ~2.6 km). Sea level is whatever fills the basins with it, and the map re-colours at once, even while paused.",
+  );
 
   const rotateToggle = makeToggle("Auto-rotate", initial.autoRotate);
   const platesLabel = makeLabel();
@@ -1739,10 +1806,16 @@ export const createControls = (
   viewSelect.addEventListener("change", () => {
     store.set({ viewMode: viewSelect.value as ViewMode });
   });
-  seaSlider.addEventListener("input", () => {
-    store.set({
-      seaLevel: clamp(Number(seaSlider.value), MIN_SEA_LEVEL, MAX_SEA_LEVEL),
+  waterSlider.addEventListener("input", () => {
+    setTuning({
+      oceanVolume: clamp(
+        Number(waterSlider.value),
+        MIN_OCEAN_VOLUME,
+        MAX_OCEAN_VOLUME,
+      ),
     });
+    renderWaterLabel();
+    onTuningChange();
   });
   rotateToggle.input.addEventListener("change", () => {
     store.set({ autoRotate: rotateToggle.input.checked });
@@ -1851,8 +1924,7 @@ export const createControls = (
     viewSelect,
     elevationBlock,
     viewLegend,
-    seaLabel,
-    seaSlider,
+    waterBlock,
     rotateToggle.row,
     platesLabel,
     platesControl.row,
@@ -1871,10 +1943,6 @@ export const createControls = (
     if (changed.has("level")) {
       levelControl.setSelected(state.level);
       renderLevelLabel();
-    }
-    if (changed.has("seaLevel")) {
-      seaSlider.value = String(state.seaLevel);
-      renderSeaLabel();
     }
     if (changed.has("autoRotate")) {
       rotateToggle.input.checked = state.autoRotate;

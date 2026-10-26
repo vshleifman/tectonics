@@ -15,6 +15,7 @@ pub mod cohesion;
 pub mod craton;
 pub mod crust_lifecycle;
 pub mod elevation;
+pub mod erosion;
 pub mod heat;
 pub mod lithosphere;
 pub mod mantle;
@@ -151,6 +152,12 @@ impl World {
         Ok(())
     }
 
+    /// Recompute sea level and elevation from the current state, taking no
+    /// time, so a change to the ocean volume shows while paused.
+    pub fn refresh_surface(&mut self) {
+        self.sim.refresh_surface();
+    }
+
     pub fn set_options(&mut self, value: JsValue) -> Result<(), JsValue> {
         self.sim.options = serde_wasm_bindgen::from_value(value)?;
         Ok(())
@@ -187,6 +194,11 @@ impl World {
     /// Thickness (km) of the mantle lid beneath each cell.
     pub fn lithosphere_ptr(&self) -> *const f32 {
         self.sim.front().lithosphere.as_ptr()
+    }
+
+    /// Share of each cell's crust that is reworked sediment.
+    pub fn sediment_ptr(&self) -> *const f32 {
+        self.sim.front().sediment_share.as_ptr()
     }
 
     /// Heat flow out through each cell (mW/m^2), as of the last tick.

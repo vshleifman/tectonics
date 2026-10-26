@@ -5,7 +5,7 @@
 //! back into the outcome, so keeping the same order keeps the two comparable.
 
 use crate::cell_data::{CellData, OCEANIC};
-use crate::elevation::baseline_elevation;
+use crate::elevation::column_height;
 use crate::lithosphere::ocean_lithosphere;
 use crate::math::Vec3;
 use crate::registry::RelabelReport;
@@ -180,8 +180,17 @@ pub fn initialise_crust(t: &Tuning, centres: &[f32], data: &mut CellData, seed: 
         data.density[i] = t.oceanic_density as f32;
         data.lithosphere[i] = ocean_lithosphere(t, age) as f32;
         data.thickness[i] = t.oceanic_thickness as f32;
-        data.elevation[i] = baseline_elevation(t, OCEANIC, age, t.oceanic_thickness) as f32;
+        data.elevation[i] = column_height(
+            t,
+            t.oceanic_thickness,
+            t.oceanic_density,
+            data.lithosphere[i] as f64,
+            0.0,
+            0.0,
+            0.0,
+        ) as f32;
         data.slab[i] = 0.0;
         data.plume_share[i] = 0.0;
+        data.sediment_share[i] = 0.0;
     }
 }

@@ -17,6 +17,7 @@ export const PASS_NAMES = [
   "lifecycle",
   "elevation",
   "reclassify",
+  "erosion",
 ] as const;
 
 /**
@@ -34,6 +35,8 @@ export interface WorldFields {
   keel: Float32Array;
   /** Thickness (km) of the cold mantle lid beneath each cell. */
   lithosphere: Float32Array;
+  /** Share of each cell's crust that is reworked sediment, in [0, 1]. */
+  sediment: Float32Array;
   /** Heat leaving each cell (mW/m²). */
   heatFlow: Float32Array;
   /** Upper-mantle temperature beneath each cell (K), above or below the planet's mantle temperature. */
@@ -67,6 +70,11 @@ export interface SimWorld {
   reassignPlates(cracked: Uint8Array, initCrust: boolean): number;
   tick(): void;
   setTuning(tuning: Tuning): void;
+  /**
+   * Re-solve sea level and rewrite elevation from the current crust, taking
+   * no time, so a change to the ocean volume shows while paused.
+   */
+  refreshSurface(): void;
   setSimOptions(options: SimOptions): void;
   fields(): WorldFields;
   plateCount(): number;

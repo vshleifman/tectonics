@@ -75,6 +75,10 @@ pub struct WorldMetrics {
     pub dyn_topo_high: f64,
     /// Share of the globe standing above sea level (0 km).
     pub land_area: f64,
+    /// Share of continental crust standing above sea level.
+    pub continental_land: f64,
+    /// Sea level (km above the datum), set by the planet's water.
+    pub sea_level: f64,
     pub continental_recycled: f64,
     pub continental_growth: f64,
     pub continental_eroded: f64,
@@ -91,6 +95,11 @@ pub struct WorldMetrics {
     pub continent_count: usize,
     pub largest_continent_share: f64,
     pub craton_share: f64,
+    /// Share of continental crust, by mass, that is reworked sediment.
+    pub sediment_share: f64,
+    /// Crust eroded from land and laid down again on the way to the coast, as
+    /// a share of the continental mass per Myr.
+    pub sediment_flux: f64,
     pub ocean_pocket_area: f64,
     pub mean_ocean_age: f64,
     pub max_ocean_age: f64,
@@ -126,10 +135,12 @@ pub fn compute_metrics(
     let mut total_area = 0.0;
     let mut continental_area = 0.0;
     let mut land_area = 0.0;
+    let mut continental_land = 0.0;
     let mut coast_area = 0.0;
     let mut continental_mass = 0.0;
     let mut thin_continental_area = 0.0;
     let mut craton_area = 0.0;
+    let mut sediment_mass = 0.0;
     let mut ocean_area = 0.0;
     let mut ocean_age_area = 0.0;
     let mut max_ocean_age = 0.0f64;
@@ -150,6 +161,9 @@ pub fn compute_metrics(
         }
         if data.crust_type[i] == CONTINENTAL {
             continental_area += area;
+            if data.elevation[i] > 0.0 {
+                continental_land += area;
+            }
             if mesh
                 .nbrs(i)
                 .any(|k| data.crust_type[mesh.nbr[k] as usize] != CONTINENTAL)
@@ -158,6 +172,7 @@ pub fn compute_metrics(
             }
             continental_mass += area * data.thickness[i] as f64;
             craton_area += area * data.keel[i] as f64;
+            sediment_mass += area * data.thickness[i] as f64 * data.sediment_share[i] as f64;
             if (data.thickness[i] as f64) < t.continental_thickness_threshold {
                 thin_continental_area += area;
             }
@@ -337,6 +352,12 @@ pub fn compute_metrics(
         plume_weight_peak: 0.0,
         dyn_topo_low: 0.0,
         dyn_topo_high: 0.0,
+        continental_land: if continental_area > 0.0 {
+            continental_land / continental_area
+        } else {
+            0.0
+        },
+        sea_level: 0.0,
         land_area: if total_area > 0.0 {
             land_area / total_area
         } else {
@@ -365,6 +386,12 @@ pub fn compute_metrics(
         } else {
             0.0
         },
+        sediment_share: if continental_mass > 0.0 {
+            sediment_mass / continental_mass
+        } else {
+            0.0
+        },
+        sediment_flux: continental_share_per_myr(advection.sediment_eroded),
         craton_share: if continental_area > 0.0 {
             craton_area / continental_area
         } else {

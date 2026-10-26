@@ -873,6 +873,7 @@ const PASS_NAMES: [&str; PASS_COUNT] = [
     "lifecycle",
     "elevation",
     "reclassify",
+    "erosion",
 ];
 
 /// Where continental area comes from and where continental mass goes, at the
@@ -917,6 +918,7 @@ fn print_relief(sim: &Sim) {
     let d = sim.front();
     let mut continental: Vec<(f32, f64)> = Vec::new();
     let (mut globe, mut land, mut ocean, mut depth) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut continental_land = 0.0f64;
     for i in 0..sim.mesh.cell_count {
         let a = sim.mesh.area(i);
         globe += a;
@@ -925,6 +927,9 @@ fn print_relief(sim: &Sim) {
         }
         if d.crust_type[i] == CONTINENTAL {
             continental.push((d.thickness[i], a));
+            if d.elevation[i] > 0.0 {
+                continental_land += a;
+            }
         } else {
             ocean += a;
             depth += a * d.elevation[i] as f64;
@@ -943,11 +948,13 @@ fn print_relief(sim: &Sim) {
         0.0
     };
     println!(
-        "  relief: continental thickness p10 {:.1} p50 {:.1} p90 {:.1} km, land above sea level {:.1}%, mean ocean floor {:.2} km",
+        "  relief: continental thickness p10 {:.1} p50 {:.1} p90 {:.1} km, land above sea level {:.1}%, continental crust above water {:.1}%, sea level {:.2} km, mean ocean floor {:.2} km",
         percentile(0.1),
         percentile(0.5),
         percentile(0.9),
         land / globe * 100.0,
+        continental_land / total.max(1e-12) * 100.0,
+        sim.sea_level(),
         depth / ocean.max(1e-12),
     );
 }
@@ -1004,7 +1011,10 @@ fn main() {
             "ridge_weight" => t.ridge_weight = value,
             "seafloor_flattening_age" => t.seafloor_flattening_age = value,
             "mantle_density" => t.mantle_density = value,
-            "continent_thermal_share" => t.continent_thermal_share = value,
+            "erosion_time" => t.erosion_time = value,
+            "shelf_depth" => t.shelf_depth = value,
+            "slope_capture" => t.slope_capture = value,
+            "sediment_reach" => t.sediment_reach = value,
             "max_rift_aspect" => t.max_rift_aspect = value,
             "rift_strength" => t.rift_strength = value,
             "dome_push" => t.dome_push = value,

@@ -27,6 +27,7 @@ export interface LabelFields {
   thickness: ArrayLike<number>;
   keel: ArrayLike<number>;
   lithosphere: ArrayLike<number>;
+  sediment: ArrayLike<number>;
   heatFlow: ArrayLike<number>;
   mantleTemp: ArrayLike<number>;
   lowerSlab: ArrayLike<number>;
@@ -44,6 +45,7 @@ const labelText = (data: LabelFields, i: number): string =>
   `thick ${data.thickness[i].toFixed(1)}\n` +
   `keel ${data.keel[i].toFixed(2)}\n` +
   `lith ${data.lithosphere[i].toFixed(0)} km\n` +
+  `silt ${(data.sediment[i] * 100).toFixed(0)}%\n` +
   `heat ${data.heatFlow[i].toFixed(1)} mW/m²\n` +
   `mantle ${data.mantleTemp[i] >= 0 ? "+" : ""}${data.mantleTemp[i].toFixed(0)} K\n` +
   `pile ${data.lowerSlab[i].toFixed(1)}\n` +

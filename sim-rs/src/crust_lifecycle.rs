@@ -5,7 +5,7 @@
 
 use crate::advect::AdvectionField;
 use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, total_crust_mass};
-use crate::elevation::baseline_elevation;
+use crate::elevation::column_height;
 use crate::lithosphere::neutral_age;
 use crate::mesh::Mesh;
 use crate::par::{self, Disjoint};
@@ -143,12 +143,13 @@ pub fn infill_enclosed_basins(
 pub fn lay_new_floor(mesh: &Mesh, data: &mut CellData, field: &mut AdvectionField, age: f64, t: &Tuning) {
     let gaps = par::filter_map(mesh.cell_count, |i| (field.rift_cell[i] != 0).then_some(i));
     let thickness = t.ridge_crust_thickness as f32;
-    let elevation = baseline_elevation(t, OCEANIC, 0.0, thickness as f64) as f32;
+    let elevation = column_height(t, thickness as f64, t.oceanic_density, 0.0, 0.0, 0.0, 0.0) as f32;
     let mut created = 0.0f64;
     for i in gaps {
         data.crust_type[i] = OCEANIC;
         data.age[i] = age as f32;
         data.plume_share[i] = 0.0;
+        data.sediment_share[i] = 0.0;
         data.density[i] = t.oceanic_density as f32;
         data.lithosphere[i] = 0.0;
         data.thickness[i] = thickness;

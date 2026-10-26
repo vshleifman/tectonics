@@ -14,7 +14,11 @@ export interface Tuning {
   // --- Elevation / relief (see sim-rs/src/elevation.rs) ---
   /** Shallow mid-ocean-ridge crest: where young (age 0) oceanic crust sits. */
   ridgeElevation: number;
-  /** Deep abyssal plain: where fully cooled oceanic crust sinks. */
+  /**
+   * Deep abyssal plain: where fully cooled oceanic crust sinks. Used by ridge
+   * push only; the map's own sea floor follows from the lid, and a test holds
+   * the two within 0.5 km.
+   */
   abyssElevation: number;
   /**
    * Age (Myr) by which the sea floor has subsided all the way to
@@ -27,29 +31,43 @@ export interface Tuning {
    * Density of the mantle the crust floats on. Every cell's baseline height is
    * Airy isostasy: a column of crust stands above a column of ordinary ocean
    * floor by its thickness times how much lighter than the mantle it is, as a
-   * share of the mantle's density. At 3.3 continental crust gains ~0.18 km of
-   * height per km of thickness, and ~35 km of it, old and cool, sits near sea
-   * level; thinner continent is drowned shelf.
+   * share of the mantle's density. Elevation is this plus the weight of the cold
+   * lid, so continent stands as high as its crust is thick.
    */
   mantleDensity: number;
+  /** Density of sea water (g/cm³). A column under water is held up by the mantle it displaces less this, so it moves 1.45x as far as in air. */
+  waterDensity: number;
   /**
-   * How much of the ocean floor's cooling curve continental lithosphere
-   * follows, in [0, 1]. Continental lithosphere is never wholly remade, so
-   * young continent stands only somewhat higher than old, settling as it
-   * ages. Ocean floor turning continental then changes height only by its
-   * change of density, plus this share of how young it is.
+   * Water on the planet, as a layer (km) over the whole globe if it were
+   * spread evenly (Earth ~2.6). Sea level is whatever fills the basins with it,
+   * so it rises when ridges are young and the floor shallow, and falls when
+   * the floor is old. Constant over a run.
    */
-  continentThermalShare: number;
-  /** Uplift gain for a continent-continent collision (both sides pile up). */
-  collisionUplift: number;
-  /** Uplift gain for the buoyant overriding plate at a subduction zone. */
-  arcUplift: number;
-  /** Deepening gain for the subducting (denser) plate: the oceanic trench. */
-  trenchDeepen: number;
-  /** Fraction per Myr a divergent boundary is pulled toward the ridge crest. */
-  ridgePull: number;
-  /** Isostatic relaxation: fraction per Myr each cell drifts to its baseline. */
-  relaxRate: number;
+  oceanVolume: number;
+  /**
+   * E-folding time (Myr) of the relief of land, isostatic rebound included:
+   * land loses crust in proportion to its height over sea level, taking
+   * `erosionTime` to shed 1/e of it. A 4 km range keeps about 1.5 km after 150
+   * Myr, as old orogens do. Cratons wear slowest. 0 disables erosion. Sediment that reaches a trench and subducts is counted again by the recycling controller, so with a fixed `continentalRecyclingRate` (no area target) consider lowering it.
+   */
+  erosionTime: number;
+  /**
+   * Depth (km, relative to sea level) the first ring of sea floor off a coast
+   * is built up to by sediment before it passes the rest seaward: the shelf.
+   */
+  shelfDepth: number;
+  /**
+   * Share of the sediment reaching each ring of sea floor past the shelf that
+   * stays there, the rest passing on, so the slope tails off with distance.
+   */
+  slopeCapture: number;
+  /**
+   * Rings of cells off the coast that sediment can reach. What is left past
+   * the last ring stays in it, so nothing is lost.
+   */
+  sedimentReach: number;
+  /** Depth (km) the plate going down is bent below its column at a trench with a full slab. Fresh each tick, scaled by how much slab there is. */
+  trenchDepth: number;
   /** Hard clamp on elevation (km). */
   elevationMin: number;
   elevationMax: number;
@@ -125,7 +143,8 @@ export interface Tuning {
    * plate's total is this times the ridge's height over its oldest floor,
    * times the ridge's length. It comes in over the first
    * {@link seafloorFlatteningAge}, while the world's starting sea floor, whose
-   * ages no ridge laid down, is replaced. At 0.05 plates run ~10% faster than
+   * ages no ridge laid down, is replaced. At 0.0583 (0.05 per km of relief at
+   * the old 3.5 km, kept when the relief became 3.0) plates run ~10% faster than
    * with none; past ~0.1 they outrun their slabs. 0 disables.
    */
   ridgeWeight: number;
@@ -352,8 +371,9 @@ export interface Tuning {
   lidDeltaT: number;
   /**
    * How much lighter (g/cm³) a full keel's depleted melt residue is than
-   * ordinary lid: about enough to offset its cold, so a craton floats however
-   * deep its keel.
+   * ordinary lid. Set so that a craton, with its 250 km lid, weighs about what
+   * 150 km of ordinary continental lid does, and so stands as high as the
+   * continent around it.
    */
   keelDepletion: number;
 
@@ -730,6 +750,27 @@ export interface Tuning {
    */
   plumeKeel: number;
   /**
+   * Myr a plume's tail stays fixed in the mantle, building a chain of
+   * thickened crust as the plate moves over it. It outlives the head.
+   */
+  plumeTailDuration: number;
+  /**
+   * Radius (radians; 0.02 is ~130 km) of the track a tail builds. About one
+   * cell at level 6 and five at level 8, so tracks read as lines from level 7
+   * up.
+   */
+  plumeTailRadius: number;
+  /**
+   * Crust thickness (km) a tail builds over ridge crust. Held under
+   * {@link continentalThicknessThreshold}, so a tail never makes continent
+   * by itself.
+   */
+  plumeTailThickness: number;
+  /** Uplift (km) of the broad swell where a tail currently stands. */
+  plumeSwell: number;
+  /** Radius (radians; 0.1 is ~640 km) of that swell. */
+  plumeSwellRadius: number;
+  /**
    * How much a hot mantle suppresses arc accretion, per unit of excess heat:
    * hot, buoyant slabs built continent poorly.
    */
@@ -751,15 +792,16 @@ export interface Tuning {
 /** The reasoned starting values, used for "reset to defaults". */
 export const defaultTuning: Tuning = {
   ridgeElevation: -2.5,
-  abyssElevation: -6,
+  abyssElevation: -5.5,
   seafloorFlatteningAge: 100,
   mantleDensity: 3.3,
-  continentThermalShare: 0.3,
-  collisionUplift: 4,
-  arcUplift: 3,
-  trenchDeepen: 3.5,
-  ridgePull: 0.05,
-  relaxRate: 0.02,
+  waterDensity: 1.03,
+  oceanVolume: 2.6,
+  trenchDepth: 3,
+  erosionTime: 150,
+  shelfDepth: -0.15,
+  slopeCapture: 0.5,
+  sedimentReach: 3,
   elevationMin: -10,
   elevationMax: 10,
 
@@ -772,7 +814,7 @@ export const defaultTuning: Tuning = {
   motionResponseTime: 40,
   trenchSuction: 0,
   maxTurnRate: 0,
-  ridgeWeight: 0.05,
+  ridgeWeight: 0.058333333,
   mantleDrag: 30,
   continentalDrag: 3,
   collisionDrag: 400,
@@ -801,7 +843,7 @@ export const defaultTuning: Tuning = {
   dynTopoMax: 1.5,
 
   maxOceanicAge: 200,
-  continentalDensity: 2.7,
+  continentalDensity: 2.8,
   oceanicDensity: 2.9,
   oceanicThickness: 7,
   continentalThicknessThreshold: 15,
@@ -819,7 +861,7 @@ export const defaultTuning: Tuning = {
   lithosphereThinningTime: 10,
   thermalExpansion: 3e-5,
   lidDeltaT: 1300,
-  keelDepletion: 0.065,
+  keelDepletion: 0.025,
 
   accretionFraction: 0.2,
   maxThickeningPerMyr: 0.5,
@@ -888,6 +930,11 @@ export const defaultTuning: Tuning = {
   plumeThickness: 35,
   plumeThicknessCold: 13,
   plumeKeel: 1,
+  plumeTailDuration: 80,
+  plumeTailRadius: 0.02,
+  plumeTailThickness: 4,
+  plumeSwell: 1,
+  plumeSwellRadius: 0.1,
   hotArcSuppression: 1,
   hotDrip: 1,
 
