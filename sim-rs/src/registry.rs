@@ -4,6 +4,7 @@
 
 use crate::mesh::Mesh;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Flood-fill connected components, never crossing a cracked arc. Writes raw
@@ -46,7 +47,7 @@ pub struct RelabelReport {
     pub parent_of: Vec<i32>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     next_id: i32,
     has_prev: bool,

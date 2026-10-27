@@ -1,6 +1,9 @@
 //! The same tiny deterministic PRNG the TypeScript side uses (mulberry32 seeded
 //! from a string), so a seed string produces the same stream in both.
 
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Rng {
     state: u32,
 }

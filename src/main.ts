@@ -9,6 +9,7 @@ import type { ElevationStyle } from "./render/colour";
 import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
 import { simOptions, tuning } from "./sim/tuning";
 import { createControls } from "./ui/controls";
+import { loadSettings, loadTuning, persistSettings } from "./ui/persist";
 import {
   createSettingsStore,
   type PlateOverlay,
@@ -128,24 +129,31 @@ let seedCount = 0;
  */
 let showSeedOverlay = true;
 
+// What the user last chose, laid over the defaults below. The tuning goes in
+// before the control panel is built, which reads it for the sliders.
+loadTuning();
+
 /** Single source of truth for every UI setting. */
-const settings = createSettingsStore({
-  level: INITIAL_LEVEL,
-  autoRotate: INITIAL_AUTO_ROTATE,
-  projection: INITIAL_PROJECTION,
-  viewMode: INITIAL_VIEW_MODE,
-  elevationStyle: INITIAL_ELEVATION_STYLE,
-  hillshade: INITIAL_HILLSHADE,
-  hillshadeStrength: INITIAL_HILLSHADE_STRENGTH,
-  hillshadeExaggeration: INITIAL_HILLSHADE_EXAGGERATION,
-  seedMode: INITIAL_SEED_MODE,
-  branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
-  showVelocities: INITIAL_SHOW_VELOCITIES,
-  plateOverlay: INITIAL_PLATE_OVERLAY,
-  running: INITIAL_RUNNING,
-  ticksPerSecond: INITIAL_TICKS_PER_SECOND,
-  uiHidden: INITIAL_UI_HIDDEN,
-});
+const settings = createSettingsStore(
+  loadSettings({
+    level: INITIAL_LEVEL,
+    autoRotate: INITIAL_AUTO_ROTATE,
+    projection: INITIAL_PROJECTION,
+    viewMode: INITIAL_VIEW_MODE,
+    elevationStyle: INITIAL_ELEVATION_STYLE,
+    hillshade: INITIAL_HILLSHADE,
+    hillshadeStrength: INITIAL_HILLSHADE_STRENGTH,
+    hillshadeExaggeration: INITIAL_HILLSHADE_EXAGGERATION,
+    seedMode: INITIAL_SEED_MODE,
+    branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
+    showVelocities: INITIAL_SHOW_VELOCITIES,
+    plateOverlay: INITIAL_PLATE_OVERLAY,
+    running: INITIAL_RUNNING,
+    ticksPerSecond: INITIAL_TICKS_PER_SECOND,
+    uiHidden: INITIAL_UI_HIDDEN,
+  }),
+);
+const persistence = persistSettings(settings);
 
 /** Map the UI view mode onto the renderer's colour mode. */
 const colourMode = (): ColourMode => {
@@ -200,6 +208,7 @@ const applyShowPlates = (): void => {
  * paused. Tuning stays mirrored here because the colour ramps read it too.
  */
 const onTuningChange = (): void => {
+  persistence.tuningChanged();
   client.setTuning(tuning);
   client.setSimOptions(simOptions);
   recolour();
@@ -297,8 +306,28 @@ const onSnapshot = (snapshot: Snapshot): void => {
   ui.setTimings(snapshot.simMs, performance.now() - start);
 };
 
+/**
+ * Whether the world being built is a saved one that has just been carried on.
+ * Its level is then the saved world's, which the level setting must take
+ * without that counting as a request to build a new world.
+ */
+let applyingResume = false;
+
+const onResumed = (level: number, tick: number): void => {
+  applyingResume = true;
+  settings.set({ level });
+  applyingResume = false;
+  // The seed aid sits on the junctions the seeds were dropped on, which a
+  // world that has ticked has carried its boundaries away from.
+  if (tick > 0) {
+    showSeedOverlay = false;
+    applySeedOverlay();
+  }
+};
+
 const client = new SimClient({
   onMesh,
+  onResumed,
   onSnapshot,
   onBench: (result) => {
     console.log(describeBench(result));
@@ -363,7 +392,9 @@ const ui = createControls(
 
 // React to setting changes. The store is the source of truth; these subscriptions
 // own the side effects each setting triggers.
-settings.on("level", (level) => rebuild(level));
+settings.on("level", (level) => {
+  if (!applyingResume) rebuild(level);
+});
 settings.on("elevationStyle", () => recolour());
 settings.on("hillshade", () => recolour());
 settings.on("hillshadeStrength", () => recolour());
@@ -382,10 +413,29 @@ settings.on("ticksPerSecond", () => {
   if (settings.get("running")) applyRunning();
 });
 
-rebuild(INITIAL_LEVEL);
+// Carry on from the saved world if there is one; otherwise build a new one.
+client.init(
+  settings.get("level"),
+  settings.get("branchesPerSeed"),
+  tuning,
+  simOptions,
+  true,
+);
 applyProjection();
 applyRunning();
 if (BENCH !== null) client.bench(parseBenchSpec(BENCH));
+
+// A reload or a closed tab: write out what is pending, and ask the worker to
+// do the same. The worker's save may not finish in time, which is why it also
+// saves on its own while the world changes.
+const saveEverything = (): void => {
+  persistence.flush();
+  client.save();
+};
+window.addEventListener("pagehide", saveEverything);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") saveEverything();
+});
 
 // --- Seed placement: a click (not an orbit drag) in seed mode --------------
 

@@ -83,6 +83,11 @@ export interface SimWorld {
   metrics(): WorldMetrics;
   summaries(): PlateSummary[];
   mass(): MassReadout;
+  /**
+   * Everything that carries history, as bytes only the same build of the
+   * simulation can read back (see {@link Engine.restore}).
+   */
+  saveState(): Uint8Array;
   /** Milliseconds the last tick spent in each of {@link PASS_NAMES}. */
   passTimings(): Float64Array;
   dispose(): void;

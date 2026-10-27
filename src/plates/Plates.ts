@@ -106,6 +106,16 @@ export class Plates {
     return this.seedJunctions;
   }
 
+  /**
+   * Put back a fault network that was saved. The crack walk's random stream is
+   * not saved, so seeds dropped afterwards grow differently than they would have.
+   */
+  restore(cracked: Uint8Array, seeds: readonly number[]): void {
+    this.crackedArcs.set(cracked);
+    this.seedJunctions.length = 0;
+    this.seedJunctions.push(...seeds);
+  }
+
   /** Change how many branches future seeds spawn. */
   setBranchesPerSeed(count: number): void {
     this.options.branchesPerSeed = Math.max(1, Math.round(count));

@@ -50,8 +50,8 @@ const ARROW_LEGEND: ReadonlyArray<{ colour: string; label: string }> = [
   { colour: "rgb(255, 219, 92)", label: "Transform" },
 ];
 
-const MIN_LEVEL = 2;
-const MAX_LEVEL = 8;
+export const MIN_LEVEL = 2;
+export const MAX_LEVEL = 8;
 const MIN_OCEAN_VOLUME = 0;
 const MAX_OCEAN_VOLUME = 6;
 const MIN_BRANCHES = 1;

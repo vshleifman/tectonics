@@ -43,11 +43,13 @@ use crate::mesh::Mesh;
 use crate::plates::PlateData;
 use crate::rng::Rng;
 use crate::tuning::Tuning;
+use serde::{Deserialize, Serialize};
 
 /// Share of a plume's radius over which the plateau is at full thickness,
 /// tapering to ordinary ocean floor at its edge.
 const PLATEAU_TOP: f64 = 0.6;
 
+#[derive(Clone, Serialize, Deserialize)]
 struct Plume {
     /// The head, which rides with the plate it builds its plateau on.
     centre: Vec3,
@@ -171,6 +173,7 @@ fn raise(
     Some(h + gain)
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Primordial {
     plumes: Vec<Plume>,
     rng: Rng,

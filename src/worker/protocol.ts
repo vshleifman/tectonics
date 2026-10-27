@@ -18,6 +18,12 @@ export type SimCommand =
       branches: number;
       tuning: Tuning;
       options: SimOptions;
+      /**
+       * Carry on from the saved world if there is one this build can read,
+       * ignoring `level`, rather than build a new one. The saved world runs on
+       * `tuning` and `options`, which are what the user last chose.
+       */
+      resume?: boolean;
     }
   | { type: "addSeed"; junction: number }
   | { type: "clearFaults" }
@@ -26,6 +32,8 @@ export type SimCommand =
   | { type: "setSimOptions"; options: SimOptions }
   | { type: "run"; ticksPerSecond: number }
   | { type: "pause" }
+  /** Write the world to storage now, if it has changed since the last save. */
+  | { type: "save" }
   | { type: "step" }
   /** Hand a snapshot's buffers back to the worker for reuse (ping-pong). */
   | { type: "release"; generation: number; buffers: SnapshotBuffers }
@@ -66,6 +74,11 @@ export type SimReply =
       /** The simulation build running the world, for display. */
       engine: string;
     }
+  /**
+   * Sent after `meshReady`, instead of a fresh world's first snapshot, when
+   * `init` resumed a saved world.
+   */
+  | { type: "resumed"; generation: number; level: number; tick: number }
   | { type: "snapshot"; snapshot: Snapshot }
   | { type: "benchResult"; result: BenchResult }
   | { type: "error"; message: string };

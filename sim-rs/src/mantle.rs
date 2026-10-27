@@ -50,6 +50,7 @@ use crate::mesh::Mesh;
 use crate::par;
 use crate::slabs::subduction;
 use crate::tuning::{SimOptions, Tuning};
+use serde::{Deserialize, Serialize};
 
 /// Mantle sites: the vertices of a level-3 icosphere.
 const SITES: usize = 642;
@@ -57,6 +58,7 @@ const SITES: usize = 642;
 /// the flow right over a downwelling stays finite.
 const NEAR_SITES: f64 = 1.5;
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MantleFlow {
     /// The mantle site each cell lies over.
     site_of: Vec<u32>,

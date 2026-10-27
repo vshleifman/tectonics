@@ -9,12 +9,14 @@ use crate::par;
 use crate::plates::{PlateData, suture_key};
 use crate::scratch::Scratch;
 use crate::tuning::Tuning;
+use serde::{Deserialize, Serialize};
 
 pub const NONE: i8 = 0;
 pub const CONVERGENT: i8 = 1;
 pub const DIVERGENT: i8 = 2;
 pub const TRANSFORM: i8 = 3;
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BoundaryField {
     pub arc_kind: Vec<i8>,
     /// Signed normal relative speed per arc (+ closing, - opening).

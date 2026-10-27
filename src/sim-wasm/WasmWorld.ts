@@ -21,12 +21,20 @@ export class WasmWorld implements SimWorld {
   readonly mesh: ArrayCellMesh;
   private readonly world: World;
 
+  /**
+   * A new world at the given subdivision level, or, from the bytes of a
+   * {@link saveState}, that world as it was saved (throws if this build
+   * refuses them).
+   */
   constructor(
-    level: number,
+    source: number | Uint8Array,
     private readonly memory: WebAssembly.Memory,
     WorldOf: WorldClass,
   ) {
-    const w = new WorldOf(level);
+    const w =
+      typeof source === "number"
+        ? new WorldOf(source)
+        : WorldOf.fromState(source);
     this.world = w;
     this.mesh = new ArrayCellMesh({
       cellCount: w.cell_count(),
@@ -91,6 +99,10 @@ export class WasmWorld implements SimWorld {
       cellKind: new Uint8Array(buffer, w.cell_kind_ptr(), cells),
       arcKind: new Int8Array(buffer, w.arc_kind_ptr(), arcs),
     };
+  }
+
+  saveState(): Uint8Array {
+    return this.world.save_state();
   }
 
   plateCount(): number {

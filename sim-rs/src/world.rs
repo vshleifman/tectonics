@@ -31,7 +31,47 @@ use crate::slabs::{seed_slabs, update_slabs};
 use crate::sutures::update_sutures;
 use crate::timer::now_ms;
 use crate::tuning::{SimOptions, Tuning};
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
+
+/// Opens every saved world, ahead of the hash of the source that wrote it.
+const STATE_MAGIC: [u8; 4] = *b"TECT";
+/// Magic, source hash (u64), level (u32).
+const STATE_HEADER: usize = 16;
+/// Hash of `sim-rs/src` when this build was made (see `build.rs`).
+const SOURCE_HASH: u64 = {
+    let digits = env!("SIM_SOURCE_HASH").as_bytes();
+    let mut hash = 0u64;
+    let mut i = 0;
+    while i < digits.len() {
+        hash = hash * 10 + (digits[i] - b'0') as u64;
+        i += 1;
+    }
+    hash
+};
+
+/// Everything of a [`Sim`] that carries history. What is left out is the mesh,
+/// which `level` rebuilds, the buffer the tick writes into (a copy of the front
+/// one on load), and scratch space.
+#[derive(Serialize, Deserialize)]
+struct State<'a> {
+    front: Cow<'a, CellData>,
+    plates: Cow<'a, PlateData>,
+    registry: Cow<'a, Registry>,
+    boundaries: Cow<'a, BoundaryField>,
+    advection: Cow<'a, AdvectionField>,
+    mantle: Cow<'a, MantleFlow>,
+    primordial: Cow<'a, Primordial>,
+    heat: Cow<'a, PlanetHeat>,
+    dyn_topo: Cow<'a, [f32]>,
+    sea_level: f64,
+    tuning: Cow<'a, Tuning>,
+    options: Cow<'a, SimOptions>,
+    initial_mass: f64,
+    elapsed: f64,
+    substeps: usize,
+}
 
 /// Passes timed per tick, in order; matches `PASS_NAMES` on the TypeScript side.
 pub const PASS_COUNT: usize = 10;
@@ -106,6 +146,80 @@ impl Sim {
             substeps: 1,
             mesh,
         }
+    }
+
+    /// Subdivision level the mesh was built at.
+    pub fn level(&self) -> u32 {
+        // An icosphere of level L has 10 * 4^L + 2 cells.
+        ((self.mesh.cell_count - 2) / 10).ilog(4)
+    }
+
+    /// The world as bytes, for [`Sim::from_state`].
+    pub fn save_state(&self) -> Vec<u8> {
+        let state = State {
+            front: Cow::Borrowed(&self.front),
+            plates: Cow::Borrowed(&self.plates),
+            registry: Cow::Borrowed(&self.registry),
+            boundaries: Cow::Borrowed(&self.boundaries),
+            advection: Cow::Borrowed(&self.advection),
+            mantle: Cow::Borrowed(&self.mantle),
+            primordial: Cow::Borrowed(&self.primordial),
+            heat: Cow::Borrowed(&self.heat),
+            dyn_topo: Cow::Borrowed(&self.dyn_topo),
+            sea_level: self.sea_level,
+            tuning: Cow::Borrowed(&self.tuning),
+            options: Cow::Borrowed(&self.options),
+            initial_mass: self.initial_mass,
+            elapsed: self.elapsed,
+            substeps: self.substeps,
+        };
+        let mut out = Vec::with_capacity(STATE_HEADER + self.mesh.cell_count * 240);
+        out.extend_from_slice(&STATE_MAGIC);
+        out.extend_from_slice(&SOURCE_HASH.to_le_bytes());
+        out.extend_from_slice(&self.level().to_le_bytes());
+        postcard::to_extend(&state, out).expect("a world serialises")
+    }
+
+    /// The level a saved world was built at, if `bytes` is a save made by this
+    /// build of the simulation.
+    pub fn state_level(bytes: &[u8]) -> Result<u32, String> {
+        if bytes.len() < STATE_HEADER || bytes[..4] != STATE_MAGIC {
+            return Err("not a saved world".into());
+        }
+        let hash = u64::from_le_bytes(bytes[4..12].try_into().expect("8 bytes"));
+        if hash != SOURCE_HASH {
+            return Err("saved by a different build of the simulation".into());
+        }
+        Ok(u32::from_le_bytes(bytes[12..16].try_into().expect("4 bytes")))
+    }
+
+    /// Rebuild a world from [`Sim::save_state`].
+    pub fn from_state(bytes: &[u8]) -> Result<Sim, String> {
+        let level = Sim::state_level(bytes)?;
+        let state: State = postcard::from_bytes(&bytes[STATE_HEADER..])
+            .map_err(|e| format!("saved world is unreadable: {e}"))?;
+        let mut sim = Sim::new(level);
+        let n = sim.mesh.cell_count;
+        if state.front.elevation.len() != n || state.dyn_topo.len() != n {
+            return Err("saved world does not fit its mesh".into());
+        }
+        sim.back = state.front.as_ref().clone();
+        sim.front = state.front.into_owned();
+        sim.plates = state.plates.into_owned();
+        sim.registry = state.registry.into_owned();
+        sim.boundaries = state.boundaries.into_owned();
+        sim.advection = state.advection.into_owned();
+        sim.mantle = state.mantle.into_owned();
+        sim.primordial = state.primordial.into_owned();
+        sim.heat = state.heat.into_owned();
+        sim.dyn_topo = state.dyn_topo.into_owned();
+        sim.sea_level = state.sea_level;
+        sim.tuning = state.tuning.into_owned();
+        sim.options = state.options.into_owned();
+        sim.initial_mass = state.initial_mass;
+        sim.elapsed = state.elapsed;
+        sim.substeps = state.substeps;
+        Ok(sim)
     }
 
     pub fn reassign_plates(&mut self, cracked: &[u8], init_crust: bool) -> usize {
@@ -628,6 +742,45 @@ mod tests {
             .map(|i| sim.mesh.area(i))
             .sum();
         land / (0..sim.mesh.cell_count).map(|i| sim.mesh.area(i)).sum::<f64>()
+    }
+
+    #[test]
+    fn a_restored_world_ticks_exactly_as_the_original_does() {
+        let mut original = Sim::new(4);
+        original.crack_great_circles(4, "round trip");
+        for _ in 0..30 {
+            original.tick();
+        }
+        let saved = original.save_state();
+        let mut restored = Sim::from_state(&saved).expect("restores");
+        assert_eq!(restored.level(), 4);
+        assert_eq!(restored.save_state(), saved, "restoring changed the state");
+        for tick in 0..20 {
+            original.tick();
+            restored.tick();
+            assert_eq!(
+                original.front.elevation, restored.front.elevation,
+                "elevation diverged {tick} ticks after the restore"
+            );
+        }
+        assert_eq!(
+            original.save_state(),
+            restored.save_state(),
+            "state diverged after the restore"
+        );
+    }
+
+    #[test]
+    fn a_save_from_another_build_is_refused() {
+        let saved = settled_world().save_state();
+        let mut other_build = saved.clone();
+        other_build[4] ^= 1;
+        assert!(Sim::from_state(&other_build).is_err());
+        assert!(Sim::from_state(&saved[..8]).is_err());
+        assert!(Sim::from_state(b"not a world at all").is_err());
+        let mut truncated = saved;
+        truncated.truncate(truncated.len() / 2);
+        assert!(Sim::from_state(&truncated).is_err());
     }
 
     #[test]

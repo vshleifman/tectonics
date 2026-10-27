@@ -2,10 +2,12 @@
 //! Single precision for storage, as the TypeScript typed arrays are; all
 //! arithmetic widens to `f64` and rounds back on store.
 
+use serde::{Deserialize, Serialize};
+
 pub const OCEANIC: u8 = 0;
 pub const CONTINENTAL: u8 = 1;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CellData {
     pub elevation: Vec<f32>,
     pub plate_id: Vec<i32>,

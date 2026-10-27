@@ -7,7 +7,7 @@ import {
 import { copyMeshArrays } from "../mesh/ArrayCellMesh";
 import { Plates } from "../plates/Plates";
 import type { SimWorld } from "../sim/SimWorld";
-import { loadEngine } from "./engines";
+import { type Engine, loadEngine } from "./engines";
 import {
   bufferList,
   meshBufferList,
@@ -16,6 +16,7 @@ import {
   type Snapshot,
   type SnapshotBuffers,
 } from "./protocol";
+import { clearSave, readSave, type SavedWorld, writeSave } from "./saveStore";
 
 /**
  * The simulation thread. Owns the whole world -- mesh, crust, plates, faults
@@ -27,6 +28,9 @@ import {
  * for one to be on screen, one in flight and one being filled. When the main
  * thread falls behind the worker keeps ticking and only publishes the latest
  * state once a set comes back.
+ *
+ * The world is also saved to IndexedDB, from here, so that a reload can carry
+ * on from it: see {@link persist}.
  */
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -37,9 +41,16 @@ const POOL_SIZE = 3;
 /** Metrics and the plate list are refreshed at most this often (ms). */
 const STATS_INTERVAL_MS = 500;
 
+/** A changing world is saved at least this often while it runs (ms). */
+const AUTOSAVE_MS = 10_000;
+
+/** A change to a world that is not running is saved after this long (ms). */
+const IDLE_SAVE_MS = 1_500;
+
 let world: SimWorld | null = null;
 let plates: Plates | null = null;
 let generation = 0;
+let level = 0;
 let tick = 0;
 let lastSimMs = 0;
 
@@ -53,6 +64,10 @@ let pending = false;
 let faultsChanged = false;
 let statsDue = true;
 let lastStats = 0;
+
+/** The world has changed since it was last saved. */
+let dirty = false;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Commands are handled strictly in order, even across an async world build. */
 let queue: Promise<void> = Promise.resolve();
@@ -142,12 +157,47 @@ const publish = (): void => {
   post({ type: "snapshot", snapshot }, transfer);
 };
 
+/**
+ * Write the world to storage if it has changed. Serialising is synchronous and
+ * takes a few tens of milliseconds at level 6; the write itself is not.
+ */
+const persist = async (): Promise<void> => {
+  if (!dirty || !world || !plates) return;
+  dirty = false;
+  const stored = await writeSave({
+    level,
+    tick,
+    cracked: plates.cracked.slice(),
+    seeds: [...plates.seeds],
+    sim: world.saveState(),
+  });
+  if (!stored) dirty = true;
+};
+
+/**
+ * Note a change worth saving, and make sure a save is coming: soon if the
+ * world is idle, otherwise on the autosave interval, so a running world is
+ * written out once per interval however often it changes.
+ */
+const markDirty = (): void => {
+  dirty = true;
+  if (saveTimer !== null) return;
+  saveTimer = setTimeout(
+    () => {
+      saveTimer = null;
+      void persist();
+    },
+    running ? AUTOSAVE_MS : IDLE_SAVE_MS,
+  );
+};
+
 const advance = (): void => {
   if (!world) return;
   const start = performance.now();
   world.tick();
   lastSimMs = performance.now() - start;
   tick++;
+  markDirty();
 };
 
 const stopLoop = (): void => {
@@ -173,6 +223,7 @@ const loop = (): void => {
 const reassign = (): void => {
   if (!world || !plates) return;
   world.reassignPlates(plates.cracked, false);
+  markDirty();
   faultsChanged = true;
   statsDue = true;
   publish();
@@ -190,9 +241,35 @@ const refreshSoon = (): void => {
     refreshQueued = false;
     if (!world) return;
     world.refreshSurface();
+    markDirty();
     statsDue = true;
     publish();
   }, 0);
+};
+
+/**
+ * The saved world, if there is one this build can run. A save that cannot be
+ * used (another build wrote it, or it is damaged) is deleted, so that it is
+ * reported once and the world built in its place is saved over it.
+ */
+const resumeSaved = async (
+  engine: Engine,
+): Promise<{ world: SimWorld; saved: SavedWorld } | null> => {
+  const saved = await readSave();
+  if (!saved) return null;
+  try {
+    const restored = engine.restore(saved.sim);
+    if (saved.cracked.length !== restored.mesh.boundaryGraph().arcCount) {
+      restored.dispose();
+      throw new Error("the fault network does not fit the mesh");
+    }
+    return { world: restored, saved };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.info(`Starting a new world; the saved one is unusable: ${reason}`);
+    await clearSave();
+    return null;
+  }
 };
 
 const handle = async (cmd: SimCommand): Promise<void> => {
@@ -202,15 +279,24 @@ const handle = async (cmd: SimCommand): Promise<void> => {
       world?.dispose();
       world = null;
       const engine = await loadEngine();
-      const next = engine.create(cmd.level);
+      const resumed = cmd.resume ? await resumeSaved(engine) : null;
+      const next = resumed?.world ?? engine.create(cmd.level);
       next.setTuning(cmd.tuning);
       next.setSimOptions(cmd.options);
       plates = new Plates(next.mesh);
       plates.setBranchesPerSeed(cmd.branches);
-      next.reassignPlates(plates.cracked, true);
+      if (resumed) {
+        plates.restore(resumed.saved.cracked, resumed.saved.seeds);
+        // The world was saved under whatever tuning it last ran on; the user's
+        // may have moved since.
+        next.refreshSurface();
+      } else {
+        next.reassignPlates(plates.cracked, true);
+      }
       world = next;
       generation++;
-      tick = 0;
+      level = resumed?.saved.level ?? cmd.level;
+      tick = resumed?.saved.tick ?? 0;
       lastSimMs = 0;
       pool.length = 0;
       for (let i = 0; i < POOL_SIZE; i++) pool.push(allocateBuffers(next));
@@ -219,6 +305,9 @@ const handle = async (cmd: SimCommand): Promise<void> => {
         { type: "meshReady", generation, mesh, engine: engine.label },
         meshBufferList(mesh),
       );
+      if (resumed) post({ type: "resumed", generation, level, tick });
+      // A new world replaces the saved one; a resumed one is already saved.
+      if (!resumed) markDirty();
       faultsChanged = true;
       statsDue = true;
       publish();
@@ -242,6 +331,7 @@ const handle = async (cmd: SimCommand): Promise<void> => {
       return;
     case "setSimOptions":
       world?.setSimOptions(cmd.options);
+      markDirty();
       return;
     case "run":
       ticksPerSecond = Math.max(0.1, cmd.ticksPerSecond);
@@ -251,6 +341,10 @@ const handle = async (cmd: SimCommand): Promise<void> => {
     case "pause":
       running = false;
       stopLoop();
+      await persist();
+      return;
+    case "save":
+      await persist();
       return;
     case "step":
       advance();

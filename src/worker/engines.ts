@@ -3,9 +3,13 @@ import type { SimWorld } from "../sim/SimWorld";
 /** Builds a world of the given subdivision level. */
 export type WorldFactory = (level: number) => SimWorld;
 
+/** Rebuilds a world from {@link SimWorld.saveState}; throws if it was saved by another build. */
+export type WorldRestorer = (state: Uint8Array) => SimWorld;
+
 /** A loaded build of the simulation. */
 export interface Engine {
   create: WorldFactory;
+  restore: WorldRestorer;
   /** Which build it is and how many threads it runs on, for display. */
   label: string;
 }
@@ -27,6 +31,7 @@ const loadThreaded = async (): Promise<Engine> => {
   const threads = pkg.thread_count();
   return {
     create: (level) => new WasmWorld(level, memory, pkg.World),
+    restore: (state) => new WasmWorld(state, memory, pkg.World),
     label: `WASM, ${threads} threads`,
   };
 };
@@ -39,6 +44,7 @@ const loadSingle = async (): Promise<Engine> => {
   const { memory } = await pkg.default();
   return {
     create: (level) => new WasmWorld(level, memory, pkg.World),
+    restore: (state) => new WasmWorld(state, memory, pkg.World),
     label: "WASM, 1 thread",
   };
 };

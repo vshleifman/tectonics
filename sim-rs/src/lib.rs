@@ -84,6 +84,24 @@ impl World {
         }
     }
 
+    /// A world rebuilt from [`World::save_state`], or an error saying why the
+    /// bytes were refused (another build wrote them, or they are damaged).
+    #[wasm_bindgen(js_name = fromState)]
+    pub fn from_state(bytes: &[u8]) -> Result<World, JsError> {
+        Ok(World {
+            sim: world::Sim::from_state(bytes).map_err(|e| JsError::new(&e))?,
+        })
+    }
+
+    /// The whole world as bytes, for [`World::from_state`].
+    pub fn save_state(&self) -> Vec<u8> {
+        self.sim.save_state()
+    }
+
+    pub fn level(&self) -> u32 {
+        self.sim.level()
+    }
+
     pub fn cell_count(&self) -> u32 {
         self.sim.mesh.cell_count as u32
     }

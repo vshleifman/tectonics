@@ -13,6 +13,7 @@ use crate::par::{self, Disjoint};
 use crate::plates::PlateData;
 use crate::scratch::{MAX_NBRS, PackedPlates, Scratch};
 use crate::tuning::{CRATON_KEEL, Tuning};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const MIN_FOOTHOLD: i32 = 2;
@@ -24,6 +25,7 @@ const HOLE_CHAIN_LIMIT: usize = 256;
 const HOLE_DONOR_RINGS: usize = 2;
 
 /// Per-step events and the conservation ledger.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AdvectionField {
     /// Source cell each destination drew from, or -1.
     pub winner: Vec<i32>,

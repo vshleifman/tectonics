@@ -2,9 +2,9 @@
 //! values and forwards them whole; field names match the TypeScript ones so the
 //! object deserialises straight across. See the TypeScript for what each means.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Tuning {
     pub ridge_elevation: f64,
@@ -375,7 +375,7 @@ impl Tuning {
 }
 
 /// Modelling choices that are on or off rather than a number to dial.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SimOptions {
     pub supercontinent_insulation: bool,

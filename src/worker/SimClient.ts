@@ -36,6 +36,11 @@ export interface SimClientHandlers {
    * the simulation build running it.
    */
   onMesh: (mesh: MeshArrays, generation: number, engine: string) => void;
+  /**
+   * The world just announced by `onMesh` is a saved one carried on, at this
+   * level and tick, not a new one.
+   */
+  onResumed?: (level: number, tick: number) => void;
   /** The latest world state; valid until the next snapshot arrives. */
   onSnapshot: (snapshot: Snapshot) => void;
   onBench?: (result: BenchResult) => void;
@@ -64,14 +69,30 @@ export class SimClient {
     return this.latest;
   }
 
-  init(level: number, branches: number, tuning: Tuning, options: SimOptions) {
+  /**
+   * Build a world, or with `resume` carry on from the saved one if there is a
+   * usable one (and then `level` is only the fallback).
+   */
+  init(
+    level: number,
+    branches: number,
+    tuning: Tuning,
+    options: SimOptions,
+    resume = false,
+  ) {
     this.send({
       type: "init",
       level,
       branches,
       tuning: { ...tuning },
       options: { ...options },
+      resume,
     });
+  }
+
+  /** Have the worker write the world to storage now, if it has changed. */
+  save(): void {
+    this.send({ type: "save" });
   }
 
   addSeed(junction: number): void {
@@ -120,6 +141,10 @@ export class SimClient {
         this.generation = reply.generation;
         this.latest = null;
         this.handlers.onMesh(reply.mesh, reply.generation, reply.engine);
+        return;
+      case "resumed":
+        if (reply.generation === this.generation)
+          this.handlers.onResumed?.(reply.level, reply.tick);
         return;
       case "snapshot": {
         const snapshot = reply.snapshot;

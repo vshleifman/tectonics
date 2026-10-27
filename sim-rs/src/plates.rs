@@ -12,9 +12,9 @@ use crate::registry::RelabelReport;
 use crate::rng::Rng;
 use crate::tuning::Tuning;
 use indexmap::IndexMap;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlateProps {
     /// Angular velocity (rad/Myr): direction is the Euler pole.
     pub omega: Vec3,
@@ -26,7 +26,7 @@ pub struct PlateProps {
     pub steps: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlateStress {
     /// Slab pull that cancels out across the plate: a force, which becomes a
     /// stress once spread over the width of the plate it has to cross.
@@ -35,7 +35,7 @@ pub struct PlateStress {
 }
 
 /// A rift laid out across a plate that has not yet broken it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OpeningRift {
     /// Myr it has been stretching.
     pub elapsed: f64,
@@ -46,7 +46,7 @@ pub struct OpeningRift {
     pub axis: Vec3,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct PlateData {
     pub by_id: IndexMap<i32, PlateProps>,
     /// Myr each sutured plate pair has been welded, keyed by [`suture_key`].
@@ -58,7 +58,7 @@ pub struct PlateData {
     /// and, after `craton_merge_time`, made one plate.
     pub craton_welds: IndexMap<i64, f64>,
     /// Extensional state from the last force balance.
-    pub stress: HashMap<i32, PlateStress>,
+    pub stress: IndexMap<i32, PlateStress>,
     /// Plates with a rift still stretching.
     pub opening: IndexMap<i32, OpeningRift>,
     /// Myr since each pair of plates broke apart over trapped heat, keyed by

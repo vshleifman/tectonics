@@ -29,6 +29,7 @@ use crate::math::clamp01;
 use crate::mesh::Mesh;
 use crate::par;
 use crate::tuning::Tuning;
+use serde::{Deserialize, Serialize};
 
 /// Surface area of Earth (m^2), which the unit sphere stands in for.
 const EARTH_AREA_M2: f64 = 5.10e14;
@@ -88,6 +89,7 @@ pub fn cell_heat_flow(t: &Tuning, crust_type: u8, age: f64, keel: f32, mantle_he
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PlanetHeat {
     /// Potential temperature of the mantle (K).
     pub mantle_temp: f64,
