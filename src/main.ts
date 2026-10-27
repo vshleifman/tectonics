@@ -22,6 +22,9 @@ const INITIAL_AUTO_ROTATE = false;
 const INITIAL_PROJECTION: Projection = "sphere";
 const INITIAL_VIEW_MODE: ViewMode = "colour";
 const INITIAL_ELEVATION_STYLE: ElevationStyle = "absolute";
+const INITIAL_HILLSHADE = true;
+const INITIAL_HILLSHADE_STRENGTH = 0.8;
+const INITIAL_HILLSHADE_EXAGGERATION = 15;
 const INITIAL_SEED_MODE = true;
 const INITIAL_BRANCHES_PER_SEED = 3;
 const INITIAL_SHOW_VELOCITIES = false;
@@ -132,6 +135,9 @@ const settings = createSettingsStore({
   projection: INITIAL_PROJECTION,
   viewMode: INITIAL_VIEW_MODE,
   elevationStyle: INITIAL_ELEVATION_STYLE,
+  hillshade: INITIAL_HILLSHADE,
+  hillshadeStrength: INITIAL_HILLSHADE_STRENGTH,
+  hillshadeExaggeration: INITIAL_HILLSHADE_EXAGGERATION,
   seedMode: INITIAL_SEED_MODE,
   branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
   showVelocities: INITIAL_SHOW_VELOCITIES,
@@ -155,6 +161,11 @@ const recolour = (): void => {
     colourMode(),
     snapshot.buffers.cellKind,
     settings.get("elevationStyle"),
+    {
+      hillshade: settings.get("hillshade"),
+      strength: settings.get("hillshadeStrength"),
+      exaggeration: settings.get("hillshadeExaggeration"),
+    },
   );
 };
 
@@ -354,6 +365,9 @@ const ui = createControls(
 // own the side effects each setting triggers.
 settings.on("level", (level) => rebuild(level));
 settings.on("elevationStyle", () => recolour());
+settings.on("hillshade", () => recolour());
+settings.on("hillshadeStrength", () => recolour());
+settings.on("hillshadeExaggeration", () => recolour());
 settings.on("autoRotate", (enabled) => {
   controls.autoRotate = enabled;
 });

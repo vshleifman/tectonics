@@ -1763,8 +1763,61 @@ export const createControls = (
       store.set({ elevationStyle });
     },
   );
+  const hillshadeToggle = makeToggle("Hillshading", initial.hillshade);
+  hillshadeToggle.input.addEventListener("change", () => {
+    store.set({ hillshade: hillshadeToggle.input.checked });
+  });
+
+  const strengthLabel = makeLabel();
+  const strengthSlider = makeSlider(0.1, 1.5, 0.05, initial.hillshadeStrength);
+  const renderStrengthLabel = (): void => {
+    strengthLabel.textContent = `Shading strength: ${store.get("hillshadeStrength").toFixed(2)}`;
+  };
+  renderStrengthLabel();
+  strengthSlider.addEventListener("input", () => {
+    store.set({ hillshadeStrength: Number(strengthSlider.value) });
+    renderStrengthLabel();
+  });
+  const exaggerationLabel = makeLabel();
+  const exaggerationSlider = makeSlider(
+    2,
+    60,
+    1,
+    initial.hillshadeExaggeration,
+  );
+  const renderExaggerationLabel = (): void => {
+    exaggerationLabel.textContent = `Relief exaggeration: ${store.get("hillshadeExaggeration")}x`;
+  };
+  renderExaggerationLabel();
+  exaggerationSlider.addEventListener("input", () => {
+    store.set({ hillshadeExaggeration: Number(exaggerationSlider.value) });
+    renderExaggerationLabel();
+  });
+  const shadingSliders = document.createElement("div");
+  shadingSliders.append(
+    strengthLabel,
+    strengthSlider,
+    exaggerationLabel,
+    exaggerationSlider,
+  );
+  tooltip.attach(
+    shadingSliders,
+    "Strength is how far the light and shadow swing the colours. Exaggeration steepens the slopes before they are lit, since real slopes are gentle.",
+  );
+
+  // The sliders only matter while shading is on.
+  const syncReliefSliders = (): void => {
+    shadingSliders.style.display = store.get("hillshade") ? "" : "none";
+  };
+  syncReliefSliders();
+
   const elevationBlock = document.createElement("div");
-  elevationBlock.append(elevationLabel, elevationControl.row);
+  elevationBlock.append(
+    elevationLabel,
+    elevationControl.row,
+    hillshadeToggle.row,
+    shadingSliders,
+  );
   tooltip.attach(
     elevationBlock,
     "Full keeps ocean depth. Land paints sea level as the lowest colour and stretches the continental colours.",
@@ -2035,6 +2088,18 @@ export const createControls = (
     }
     if (changed.has("viewMode")) {
       viewSelect.value = state.viewMode;
+    }
+    if (changed.has("hillshade")) {
+      hillshadeToggle.input.checked = state.hillshade;
+      syncReliefSliders();
+    }
+    if (changed.has("hillshadeStrength")) {
+      strengthSlider.value = String(state.hillshadeStrength);
+      renderStrengthLabel();
+    }
+    if (changed.has("hillshadeExaggeration")) {
+      exaggerationSlider.value = String(state.hillshadeExaggeration);
+      renderExaggerationLabel();
     }
     if (changed.has("elevationStyle")) {
       elevationControl.setSelected(state.elevationStyle);

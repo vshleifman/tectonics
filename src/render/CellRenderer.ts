@@ -10,6 +10,7 @@ import {
   type Rgb,
   writeCellColours,
 } from "./colour";
+import { type HillshadeOptions, writeHillshade } from "./hillshade";
 import { longitudeOf, type Projection, projectPoint } from "./projection";
 
 export type { ColourMode } from "./colour";
@@ -29,6 +30,11 @@ const VELOCITY_LIFT = 0.012;
  * boundary stays readable and does not z-fight the fault drawn on the same arc.
  */
 const PLATE_LINE_LIFT = 0.008;
+
+/** How the elevation view shows relief, on top of its colours. */
+export interface ReliefOptions extends HillshadeOptions {
+  hillshade: boolean;
+}
 
 /**
  * How far the semi-transparent plates overlay floats above the faces. On the
@@ -320,6 +326,9 @@ export class CellRenderer {
 
   private readonly cellMesh: CellMesh;
 
+  /** Per-cell hillshade multipliers, allocated on first use. */
+  private shadeBuffer: Float32Array | undefined;
+
   constructor(cellMesh: CellMesh) {
     this.cellMesh = cellMesh;
     const { cellCount } = cellMesh;
@@ -572,6 +581,7 @@ export class CellRenderer {
    *
    * - `"elevation"`: ocean/land ramp split at sea level, 0. `"land"` flattens
    *   the ocean to one colour and stretches the continental colours.
+   *   With `hillshade`, relief is lit from the north-west (elevation only).
    * - `"data"`: flat white faces (the black wireframe carries the structure).
    * - `"plate"`: a stable per-`plateId` hue so plates read as solid regions.
    * - `"crust"`: oceanic vs continental two-tone.
@@ -590,7 +600,13 @@ export class CellRenderer {
     mode: ColourMode = "elevation",
     boundaryKind?: ArrayLike<number>,
     elevationStyle: ElevationStyle = "absolute",
+    relief?: ReliefOptions,
   ): void {
+    let shade: Float32Array | undefined;
+    if (relief?.hillshade && mode === "elevation") {
+      shade = this.shadeBuffer ??= new Float32Array(this.cellMesh.cellCount);
+      writeHillshade(shade, this.cellMesh, data.elevation, relief);
+    }
     writeCellColours(
       this.colourTexture.image.data as Uint8Array,
       this.cellMesh.cellCount,
@@ -598,6 +614,7 @@ export class CellRenderer {
       mode,
       boundaryKind,
       elevationStyle,
+      shade,
     );
     this.colourTexture.needsUpdate = true;
   }

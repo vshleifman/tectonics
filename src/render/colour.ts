@@ -226,6 +226,7 @@ export const writeCellColours = (
   mode: ColourMode,
   boundaryKind?: ArrayLike<number>,
   elevationStyle: ElevationStyle = "absolute",
+  shade?: ArrayLike<number>,
 ): void => {
   switch (mode) {
     case "data":
@@ -307,6 +308,7 @@ export const writeCellColours = (
         cellCount,
         data.elevation,
         elevationStyle,
+        shade,
       );
   }
 };
@@ -364,6 +366,7 @@ const writeElevationColours = (
   cellCount: number,
   elevation: ArrayLike<number>,
   style: ElevationStyle,
+  shade?: ArrayLike<number>,
 ): void => {
   for (let i = 0; i < cellCount; i++) {
     const h = elevation[i];
@@ -374,6 +377,13 @@ const writeElevationColours = (
     }
     if (h < 0) putRamp(out, i * 4, SEA_STOPS, -h);
     else putRamp(out, i * 4, LAND_STOPS, h);
+  }
+  if (!shade) return;
+  for (let i = 0; i < cellCount; i++) {
+    const o = i * 4;
+    out[o] = Math.min(255, Math.round(out[o] * shade[i]));
+    out[o + 1] = Math.min(255, Math.round(out[o + 1] * shade[i]));
+    out[o + 2] = Math.min(255, Math.round(out[o + 2] * shade[i]));
   }
 };
 

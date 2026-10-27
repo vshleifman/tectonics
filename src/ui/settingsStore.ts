@@ -43,6 +43,12 @@ export interface Settings {
    * continental colours.
    */
   elevationStyle: ElevationStyle;
+  /** Light the elevation view from the north-west so relief reads as relief. */
+  hillshade: boolean;
+  /** How far shading swings the colour, 0 (none) to 1.5. */
+  hillshadeStrength: number;
+  /** Vertical exaggeration applied to slopes before lighting. */
+  hillshadeExaggeration: number;
   seedMode: boolean;
   branchesPerSeed: number;
   showVelocities: boolean;
