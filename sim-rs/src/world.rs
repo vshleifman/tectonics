@@ -2,6 +2,7 @@
 //! scratch, with the same tick as `TsWorld.ts`.
 
 use crate::advect::{AdvectionField, advect};
+use crate::arcs::extend_back_arcs;
 use crate::boundaries::{BoundaryField, classify};
 use crate::cell_data::{CellData, total_crust_mass};
 use crate::cohesion::{keep_continents_whole, keep_cratons_whole};
@@ -21,7 +22,7 @@ use crate::plate_forces::update_plate_motion;
 use crate::plate_lifecycle::update_plate_identity;
 use crate::plates::{PlateData, initialise_crust, reconcile};
 use crate::primordial::Primordial;
-use crate::recycling::{recycle_continental_margins, track_continental_growth};
+use crate::recycling::{recycle_continental_margins, steer_accretion, track_continental_growth};
 use crate::registry::{Registry, assign_plates};
 use crate::rifting::update_rifting;
 use crate::rng::Rng;
@@ -217,7 +218,9 @@ impl Sim {
 
     /// The tuning as the world sees it now, over the mantle as it is now.
     fn effective_tuning(&self) -> Tuning {
-        effective_tuning(&self.tuning, self.elapsed, self.heat.excess())
+        let mut eff = effective_tuning(&self.tuning, self.elapsed, self.heat.excess());
+        steer_accretion(&mut eff, &self.options, &self.advection);
+        eff
     }
 
     /// The forces on the plates over the coming tick, and the boundaries and
@@ -330,8 +333,9 @@ impl Sim {
         );
         collapse_passive_margins(mesh, front, plates, registry, scratch, t, options);
         lap(timings, &mut mark, 5);
-        recycle_continental_margins(mesh, front, dt, advection, t);
+        recycle_continental_margins(mesh, front, dt, advection, t, options);
         infill_enclosed_basins(mesh, front, dt, advection, scratch, t);
+        advection.back_arc_thinned = extend_back_arcs(mesh, front, plates, boundaries, dt, t);
         lap(timings, &mut mark, 6);
         erode_and_deposit(mesh, front, advection, dt, t);
         lap(timings, &mut mark, 9);
@@ -759,6 +763,7 @@ mod tests {
     fn continental_area_after(target: f64, myr: f64, window: f64) -> Vec<f64> {
         let mut sim = Sim::new(4);
         sim.tuning.primordial_heat = 0.0;
+        sim.options.hold_continental_area = true;
         sim.tuning.continental_area_target = target;
         sim.crack_great_circles(4, "growth");
         let ticks = (myr / sim.tuning.dt_myr) as usize;
@@ -788,6 +793,23 @@ mod tests {
                 "target {target}: levelled off at {mean:.3} ({samples:.3?})"
             );
         }
+    }
+
+    /// With the target not held, nothing reads it: the continents grow from
+    /// the balance of everything else.
+    #[test]
+    fn the_target_is_not_read_unless_it_is_held() {
+        let run = |target: f64| {
+            let mut sim = Sim::new(4);
+            sim.tuning.primordial_heat = 0.0;
+            sim.tuning.continental_area_target = target;
+            sim.crack_great_circles(4, "natural");
+            for _ in 0..300 {
+                sim.tick();
+            }
+            sim.fingerprint()
+        };
+        assert_eq!(run(0.05), run(0.6));
     }
 
     #[test]
@@ -850,6 +872,8 @@ mod tests {
         let mut sim = Sim::new(4);
         sim.tuning.mantle_flow_coupling = 0.0;
         sim.tuning.primordial_heat = 0.0;
+        // Recycling wears the coast, which jostles the plates a little.
+        sim.tuning.continental_recycling_rate = 0.0;
         tune(&mut sim.tuning);
         sim.crack_great_circles(1, "dome");
         let continent = sim.front.plate_id[0];
@@ -1385,7 +1409,6 @@ mod tests {
         sim.options.supercontinent_insulation = false;
         sim.tuning.mantle_flow_coupling = 0.0;
         // Recycling would eat the coast back to the cratons, which it spares.
-        sim.tuning.continental_area_target = 0.0;
         sim.tuning.continental_recycling_rate = 0.0;
         // The hot mantle that grows keels, without plumes raising keeled
         // plateaus of their own along the coast.

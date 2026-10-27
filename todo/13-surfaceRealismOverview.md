@@ -96,20 +96,52 @@ flowchart TD
   breakups (two continent-bearing plates splitting) in 2 Gyr, along with 0
   weld merges and 0 passive-margin collapses. Run a multi-seed ensemble
   (`sim-rs/target/ensemble.py`) before deciding whether anything is wrong.
-- **Arc placement and back-arcs.** Arcs sit on the cell beside the trench;
-  real arcs are 100-200 km behind it. Back-arc spreading on rollback is
-  missing too.
-- **Microplate jitter.** There were 157 heading reversals (>120 deg in
-  10 Myr), 145 of them on plates under 1% of the globe, plus ~2,700
-  absorbed fragments: artefacts of moving crust a whole cell at a time.
+- **Absorbed fragments (microplate specks).** ~2,700 pieces pinched off a
+  plate and absorbed in 2 Gyr, over half of them a single cell, are still
+  there. They come from the transport, which moves crust a whole cell at a
+  time: a plate that claims a margin cell (`advect.rs`, pass 1) can strand a
+  protruding cell of the plate it takes from, and the ridge hand-over (pass
+  2d) leaves cells of fresh floor alone. Each is absorbed by the next
+  identity pass, so they do no harm beyond the count. Refusing the claims that
+  strand a cell removed only ~10% of the specks at the cost of a changed
+  trajectory, so it was dropped. A fix means moving crust by less than a cell.
 - **Ridge-transform segmentation.**
-- **Continental area well short of target** (13.9% against 0.4). This is
-  partly a mesh-resolution ceiling. Revisit after 16, since sediment shelves
-  will change it.
-- **`continental_area_target` is an imposed outcome.** The recycling
-  controller (`recycling.rs`) adjusts recycling to hold continents at a
-  chosen share of the globe, which runs against decision 2. With explicit
-  sediment subduction from 16 in place, consider dropping the target and
-  letting the area come from the balance of arcs, plumes, sediment and
-  subduction.
-- **Plume drift with mantle flow** (the Hawaii-Emperor bend), after 17.
+
+## Done after this iteration
+
+Taken from the list above once tickets 14-17 were in. Each was checked against
+`sim-rs/src/bin/bench.rs` over twelve plate layouts at level 6, 1000 ticks (2
+Gyr), against the commit before.
+
+- **Arc placement and back-arcs** (`arcs.rs`, `arc_setback`, `back_arc_width`,
+  `back_arc_extension`). Accreted crust now lands `arc_setback` (0.025 rad,
+  ~160 km) inland of the trench, counted in whole cells (one ring at level 6,
+  none below level 5). Where a slab dips beneath a plate that is moving away
+  from its trench, the band behind the arc stretches and what it thins goes
+  onto the arc. Thinned to ocean thickness it reverts to ocean, a marginal
+  sea. Mass is moved, never made. Plates, area, rifts and ocean age stayed
+  inside the spread of the baseline.
+- **Microplate jitter** (`microplate_area`, `microplate_damping`). Plates under
+  1% of the globe settle onto their force target up to 6x more slowly,
+  tapering to none at 1%: their targets are a few cells of slab pull, which
+  change with every cell the margins move. Heading reversals fell from 218 to
+  46 (212 to 37 on small plates), and in a regime with many small plates from
+  784 to 375. Plate count, area, rifts and fragments did not move outside
+  noise. The absorbed fragments are not fixed (see above).
+- **Continental area** (`SimOptions.hold_continental_area`,
+  `continental_area_target`, `continental_target_time`,
+  `continental_target_gain`). The target is off by default, and nothing reads
+  it: the area comes from arcs, plumes, sediment and the fixed
+  `continental_recycling_rate`, and landed at 13.3% against 13.4% under the old
+  controller. With the option on, margins recycle what everything else grows
+  plus the gap to the target over `continental_target_time`, and arcs accrete
+  more of the ocean they consume while below it (the old controller could only
+  recycle less, and sat at 14% against a 40% target). Targets of 0.2, 0.3 and
+  0.4 settled at 19.9%, 29.9% and 39.3%; 0.5 and 0.65 both reached ~42%, the
+  natural ceiling at the default accretion.
+- **Plume drift** (`plume_drift`). Hotspot tails are carried by the mantle
+  flow beneath them, `plume_drift` times its speed (0.7 cm/yr on average, 1.5
+  at most), instead of staying fixed on the mesh. Heads still ride with their
+  plate. At 1, a chain can bend where plate motion and mantle flow part, as the
+  Hawaii-Emperor chain does (not yet checked by eye at level 7). No
+  systematic effect on the dynamics metrics over 12 and 24 layouts.

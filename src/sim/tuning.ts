@@ -48,7 +48,7 @@ export interface Tuning {
    * E-folding time (Myr) of the relief of land, isostatic rebound included:
    * land loses crust in proportion to its height over sea level, taking
    * `erosionTime` to shed 1/e of it. A 4 km range keeps about 1.5 km after 150
-   * Myr, as old orogens do. Cratons wear slowest. 0 disables erosion. Sediment that reaches a trench and subducts is counted again by the recycling controller, so with a fixed `continentalRecyclingRate` (no area target) consider lowering it.
+   * Myr, as old orogens do. Cratons wear slowest. 0 disables erosion. Sediment that reaches a trench and subducts is counted again by the recycling controller, so with the fixed `continentalRecyclingRate` (no area target held) consider lowering it.
    */
   erosionTime: number;
   /**
@@ -123,6 +123,23 @@ export interface Tuning {
    * heading turns ~19° over 50 Myr; at 15 it wanders ~28°.
    */
   motionResponseTime: number;
+  /**
+   * Share of the globe (0.01 is 1%) below which a plate counts as a microplate
+   * for {@link microplateDamping}. The forces on a plate of a few cells are
+   * the sum of a few cells' slab pull and drag, which change with every cell
+   * the margins move, so they swing the plate's heading about far more than
+   * Earth's microplates turn. 0 turns the damping off.
+   */
+  microplateArea: number;
+  /**
+   * How much longer a plate with no area takes to settle onto its target
+   * than {@link motionResponseTime}, as a multiple of it, tapering to none at
+   * {@link microplateArea}. At 5, a plate of a few cells averages its forces
+   * over 240 Myr instead of 40, which removes about three quarters of the
+   * heading reversals (more than 120° in 10 Myr) that microplates otherwise
+   * make. Large plates are untouched.
+   */
+  microplateDamping: number;
   /**
    * Pull on the overriding plate toward a trench, as a share of the slab pull
    * on the plate going down: a rolling-back slab draws the plate above after
@@ -381,12 +398,35 @@ export interface Tuning {
   /**
    * Fraction of a subducting cell's mass that accretes onto the survivor. This
    * sets how fast arcs build continent, and so how fast continents turn over
-   * once {@link continentalAreaTarget} has levelled them off. Earth's arcs keep
+   * once recycling has levelled them off. Earth's arcs keep
    * roughly a tenth of what they consume; at 0.2 continents reach their target
-   * in ~3 Gyr and their crust lasts ~1.5 Gyr before it is recycled (Earth's
+   * in ~3 Gyr with the target held and their crust lasts ~1.5 Gyr before it is recycled (Earth's
    * averages ~2 Gyr). Higher grows them faster and turns them over faster.
    */
   accretionFraction: number;
+  /**
+   * How far behind the trench, in radians along the surface, an arc builds
+   * (0.025 is ~160 km). Crust a trench consumes is melted at depth and rises
+   * above the slab on the overriding plate, 100-200 km inland of the trench,
+   * not at it. Counted in whole cells, rounded, so a mesh coarser than this
+   * (below level 5) puts the arc beside the trench as before. 0 builds arcs
+   * beside the trench at every resolution.
+   */
+  arcSetback: number;
+  /**
+   * Width (radians; 0.05 is ~320 km) of the band behind an arc that stretches
+   * into a back-arc basin where the overriding plate retreats from its trench.
+   * Counted in whole cells, at least one.
+   */
+  backArcWidth: number;
+  /**
+   * Share of the overriding plate's speed away from its trench taken up as
+   * stretching of the back-arc band, where a slab is dipping beneath it. The
+   * band thins and what it loses is piled onto the arc; continental crust
+   * thinned to the thickness of ocean floor reverts to it, opening a marginal
+   * sea. 0 turns back-arc stretching off.
+   */
+  backArcExtension: number;
   /**
    * Fastest a cell may thicken by accretion (km/Myr). Several cells can subduct
    * into one destination in a single tick; without this, their mass lands as one
@@ -412,7 +452,7 @@ export interface Tuning {
    * at a trench -- subduction erosion of the overriding margin and subducted
    * continental sediment -- both of which are minor next to how much crust
    * survives a collision. Keep it small: the steady recycling at active
-   * margins is {@link continentalAreaTarget}'s job, and at a high value
+   * margins is {@link continentalRecyclingRate}'s job, and at a high value
    * continents stop growing.
    */
   subductionErosion: number;
@@ -467,23 +507,36 @@ export interface Tuning {
    */
   cohesionReach: number;
   /**
-   * Share of the globe at which continental growth levels off, in [0, 1];
-   * Earth's is ~0.4. Continental crust goes back into the mantle at active
-   * margins, as sediment carried down trenches and as forearc scraped off the
-   * overriding plate, at a rate proportional to how much continent there is.
-   * That rate is matched to the growth everything else produces (averaged over
-   * 200 Myr), so the two balance at this area: growth is fast while continents
-   * are small and slows as they near it, as Earth's did. 0 uses the fixed
-   * {@link continentalRecyclingRate} instead. Arcs cannot build past a natural
-   * ceiling of roughly half the globe at the default accretion, as the ocean
-   * that feeds them runs out; a target above it leaves growth uncapped.
+   * Share of the globe, in [0, 1], that the continents are steered toward when
+   * {@link SimOptions.holdContinentalArea} is on (Earth's is ~0.4); ignored
+   * otherwise. Margins recycle what everything else grows plus the gap to the
+   * target spread over {@link continentalTargetTime}, so the area levels off
+   * here from above and below. Below the target, arcs also accrete more of
+   * the ocean they consume (see {@link continentalTargetGain}). Arcs cannot
+   * build past a natural ceiling of roughly half the globe at the default
+   * accretion, as the ocean that feeds them runs out, so a target above it may
+   * not be reached.
    */
   continentalAreaTarget: number;
   /**
-   * Share of the continental area recycled per Myr when
-   * {@link continentalAreaTarget} is 0. Earth returns ~3 km³/yr of its ~7×10⁹
-   * km³ of continental crust, ~0.0004 per Myr; where growth then levels off is
-   * up to the rest of the model.
+   * Myr over which the gap between the continental area and its target is
+   * closed, with {@link SimOptions.holdContinentalArea} on. Shorter holds the
+   * target harder; very short chases every swing of the supercontinent cycle.
+   */
+  continentalTargetTime: number;
+  /**
+   * With {@link SimOptions.holdContinentalArea} on, how strongly arcs make up a
+   * shortfall: they accrete all of the ocean they consume (instead of
+   * {@link accretionFraction} of it) once the continents are 1 over this
+   * share of the target short. 0 leaves accretion alone, so a shortfall can
+   * close only by recycling less.
+   */
+  continentalTargetGain: number;
+  /**
+   * Share of the continental area recycled per Myr, whenever
+   * {@link SimOptions.holdContinentalArea} is off. Earth returns ~3 km³/yr of
+   * its ~7×10⁹ km³ of continental crust, ~0.0004 per Myr; where growth then
+   * levels off is up to the rest of the model.
    */
   continentalRecyclingRate: number;
 
@@ -771,6 +824,16 @@ export interface Tuning {
   /** Radius (radians; 0.1 is ~640 km) of that swell. */
   plumeSwellRadius: number;
   /**
+   * How far a hotspot tail is carried by the mantle flow beneath it, as a
+   * share of that flow's speed (0.7 cm/yr on average, 1.5 at most, in a
+   * default world). 0 holds tails fixed on the mesh, so every chain is a clean
+   * arc of the plate's motion; at 1 a tail drifts with the flow toward the
+   * downwellings, and a chain bends where the plate's heading and the flow part
+   * ways, as the Hawaii-Emperor chain does. Heads ride with their plate
+   * either way.
+   */
+  plumeDrift: number;
+  /**
    * How much a hot mantle suppresses arc accretion, per unit of excess heat:
    * hot, buoyant slabs built continent poorly.
    */
@@ -812,6 +875,8 @@ export const defaultTuning: Tuning = {
   slabInitiationTime: 20,
   slabInitiationAge: 0,
   motionResponseTime: 40,
+  microplateArea: 0.01,
+  microplateDamping: 5,
   trenchSuction: 0,
   maxTurnRate: 0,
   ridgeWeight: 0.058333333,
@@ -864,6 +929,9 @@ export const defaultTuning: Tuning = {
   keelDepletion: 0.025,
 
   accretionFraction: 0.2,
+  arcSetback: 0.025,
+  backArcWidth: 0.05,
+  backArcExtension: 0.25,
   maxThickeningPerMyr: 0.5,
   subductionErosion: 0.05,
   marginErosion: 0.12,
@@ -876,6 +944,8 @@ export const defaultTuning: Tuning = {
   minCratonArea: 0.0003,
   cohesionReach: 2,
   continentalAreaTarget: 0.4,
+  continentalTargetTime: 200,
+  continentalTargetGain: 4,
   continentalRecyclingRate: 0.0004,
   cratonMinAge: 500,
   cratonInland: 0.02,
@@ -935,6 +1005,7 @@ export const defaultTuning: Tuning = {
   plumeTailThickness: 4,
   plumeSwell: 1,
   plumeSwellRadius: 0.1,
+  plumeDrift: 1,
   hotArcSuppression: 1,
   hotDrip: 1,
 
@@ -975,6 +1046,12 @@ export interface SimOptions {
    * with a working ridge keeps an old coast or two without breaking up.
    */
   collapseStagnantOnly: boolean;
+  /**
+   * Steer the continental area toward {@link Tuning.continentalAreaTarget}.
+   * Off, nothing sets the area: it comes from the balance of arcs, plumes,
+   * sediment and the fixed {@link Tuning.continentalRecyclingRate}.
+   */
+  holdContinentalArea: boolean;
 }
 
 export const defaultSimOptions: SimOptions = {
@@ -982,6 +1059,7 @@ export const defaultSimOptions: SimOptions = {
   twoSidedTension: false,
   quietByMeanSpeed: false,
   collapseStagnantOnly: true,
+  holdContinentalArea: false,
 };
 
 /** Live, mutable modelling options the simulation reads each tick. */

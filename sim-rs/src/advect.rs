@@ -4,6 +4,7 @@
 //! nowhere to go subducts through the ledger or piles up. See the TypeScript
 //! for the geology behind each pass.
 
+use crate::arcs::{arc_site, rings_for};
 use crate::boundaries::{BoundaryField, CONVERGENT};
 use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, mixed_share};
 use crate::lithosphere::thinned;
@@ -107,6 +108,9 @@ pub struct AdvectionField {
     pub continental_share_before: Option<f64>,
     /// Area of thinned continental crust that reverted to oceanic this step.
     pub decontinentalised: f64,
+    /// Crust stretched thin behind arcs this step, as area x km moved onto
+    /// the arcs.
+    pub back_arc_thinned: f64,
     /// Area vacated this step with no other plate beside it: a gap the
     /// quantised transport tore in a plate's interior, not a divergent margin.
     pub interior_holes: f64,
@@ -165,6 +169,7 @@ impl AdvectionField {
             continental_growth: 0.0,
             continental_share_before: None,
             decontinentalised: 0.0,
+            back_arc_thinned: 0.0,
             interior_holes: 0.0,
             interior_holes_unfilled: 0.0,
             torn_continent: 0.0,
@@ -345,6 +350,7 @@ pub fn advect(
     };
 
     let thickness_cap = t.max_crust_thickness.max(t.continental_thickness_threshold);
+    let arc_rings = rings_for(mesh, t.arc_setback);
 
     // --- Pass 1: who takes which cell, decided a whole margin at a time ------
     s.new_plate.copy_from_slice(&src.plate_id);
@@ -866,7 +872,9 @@ pub fn advect(
             };
             let accreted = t.accretion_fraction * mass;
             subducted_this_step += mass - accreted;
-            add_f32(&mut out.accreted[into], accreted / area(into));
+            // The arc builds behind the trench, not at it.
+            let arc = arc_site(mesh, &dst.plate_id, &out.rift_cell, into, arc_rings);
+            add_f32(&mut out.accreted[arc], accreted / area(arc));
             out.subducted[into] = 1;
             if dst.crust_type[into] == CONTINENTAL && out.rift_cell[into] == 0 {
                 add_f32(

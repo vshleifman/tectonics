@@ -464,15 +464,21 @@ pub fn update_plate_motion(
         }
     }
 
-    // Plates settle onto their targets rather than jumping there.
-    let response = if t.motion_response_time > 0.0 {
-        1.0 - (-dt_myr / t.motion_response_time).exp()
-    } else {
-        1.0
+    // Plates settle onto their targets rather than jumping there. A plate of a
+    // few cells has a target made of a few cells' forces, which change with
+    // every cell the margins move, so the smaller the plate, the longer it
+    // averages over: up to `1 + microplate_damping` times the response time
+    // for a plate with no area, and none for a plate of `microplate_area`
+    // and over. Only the plate's own motion is slowed; its target is not
+    // touched, so neighbours coupled to it by sutures still see it as it is.
+    let globe: f64 = area.iter().sum();
+    let response_of = |id: i32| {
+        motion_response(t, dt_myr, slot_of(id).map_or(0.0, |p| area[p]), globe)
     };
     let max_turn = (t.max_turn_rate.to_radians() * dt_myr).max(0.0);
     for (&id, props) in plates.by_id.iter_mut() {
         let p = id as usize * 3;
+        let response = response_of(id);
         let mut next = props.omega;
         for k in 0..3 {
             next[k] += response * (target[p + k] - props.omega[k]);
@@ -482,6 +488,24 @@ pub fn update_plate_motion(
         }
         props.omega = next;
     }
+}
+
+/// Share of the way to its target a plate of `plate_area` (on a globe of
+/// `globe`) settles in `dt_myr`: `motion_response_time` for a plate of
+/// `microplate_area` of the globe or more, up to `1 + microplate_damping`
+/// times longer for one of no area.
+pub fn motion_response(t: &Tuning, dt_myr: f64, plate_area: f64, globe: f64) -> f64 {
+    if t.motion_response_time <= 0.0 {
+        return 1.0;
+    }
+    let small = t.microplate_area * globe;
+    let smallness = if small > 0.0 {
+        clamp01(1.0 - plate_area / small)
+    } else {
+        0.0
+    };
+    let time = t.motion_response_time * (1.0 + t.microplate_damping.max(0.0) * smallness);
+    1.0 - (-dt_myr / time).exp()
 }
 
 /// `v` with the part along `centre` removed, so it lies in the tangent plane.
@@ -620,6 +644,29 @@ mod tests {
     fn angle(a: Vec3, b: Vec3) -> f64 {
         let (la, lb) = (len3(a[0], a[1], a[2]), len3(b[0], b[1], b[2]));
         (dot(a, b) / (la * lb)).clamp(-1.0, 1.0).acos()
+    }
+
+    #[test]
+    fn small_plates_settle_onto_their_targets_more_slowly() {
+        let t = Tuning {
+            motion_response_time: 40.0,
+            microplate_area: 0.01,
+            microplate_damping: 4.0,
+            ..Tuning::default()
+        };
+        let globe = 4.0 * std::f64::consts::PI;
+        let at = |share: f64| motion_response(&t, 2.0, share * globe, globe);
+        let plain = 1.0 - (-2.0f64 / 40.0).exp();
+        assert!((at(0.01) - plain).abs() < 1e-12, "a plate at the limit is damped");
+        assert!((at(0.3) - plain).abs() < 1e-12, "a large plate is damped");
+        let slowest = 1.0 - (-2.0f64 / 200.0).exp();
+        assert!((at(0.0) - slowest).abs() < 1e-12);
+        assert!(at(0.0) < at(0.002) && at(0.002) < at(0.008) && at(0.008) < plain);
+        let off = Tuning {
+            microplate_damping: 0.0,
+            ..t.clone()
+        };
+        assert!((motion_response(&off, 2.0, 0.0, globe) - plain).abs() < 1e-12);
     }
 
     #[test]

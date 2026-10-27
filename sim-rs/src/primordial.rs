@@ -23,7 +23,8 @@
 //! depends on how hot the mantle is, rising faster than its excess: from
 //! `plume_thickness` at full excess, enough to melt into continent, down to
 //! `plume_thickness_cold` in a mantle as cool as today's, an ocean plateau
-//! that stays ocean.
+//! that stays ocean. A plume's tail stays in the mantle instead, carried by
+//! the flow beneath it (`plume_drift`), while the plate moves over it.
 //! Arc accretion is scaled down by `hot_arc_suppression` times the excess,
 //! and the mafic part of ocean floor thickened anywhere but over a plume drips
 //! back into the mantle, `hot_drip` times the excess of its extra thickness
@@ -51,10 +52,16 @@ struct Plume {
     /// The head, which rides with the plate it builds its plateau on.
     centre: Vec3,
     elapsed: f64,
-    /// The tail, fixed in the mantle where the head was born. Its footprint
-    /// is a point on the mesh, so it is worked out once: cells with their
+    /// The tail, born where the head was and carried by the mantle flow
+    /// (`plume_drift`), not by the plate. Its footprint is a set of mesh cells
+    /// worked out where the tail stood when it was last laid: cells with their
     /// share of the tail's thickness, and of its swell.
     tail_elapsed: f64,
+    tail_centre: Vec3,
+    /// Where `tail_cells` and `swell_cells` were laid out, and the cell
+    /// nearest it, whose mantle flow carries the tail.
+    laid_at: Vec3,
+    tail_cell: usize,
     tail_cells: Vec<(u32, f32)>,
     swell_cells: Vec<(u32, f32)>,
 }
@@ -63,16 +70,54 @@ impl Plume {
     fn head_live(&self, duration: f64) -> bool {
         self.elapsed < duration
     }
+
+    /// Work out the tail's footprint and swell where it stands now.
+    fn lay_tail(&mut self, mesh: &Mesh, t: &Tuning) {
+        let tail_radius = t.plume_tail_radius.max(1e-6);
+        let swell_radius = t.plume_swell_radius.max(1e-6);
+        let (tail_cells, nearest) = footprint(mesh, self.tail_centre, tail_radius, tail_profile);
+        self.tail_cells = tail_cells;
+        self.tail_cell = nearest;
+        self.swell_cells = footprint(mesh, self.tail_centre, swell_radius, |r| {
+            0.5 * (1.0 + (std::f64::consts::PI * r.min(1.0)).cos())
+        })
+        .0;
+        self.laid_at = self.tail_centre;
+    }
+
+    /// Carry the tail `plume_drift` of the way with the mantle flow beneath
+    /// it, and lay its footprint again once it has moved far enough to matter.
+    fn drift(&mut self, mesh: &Mesh, mantle: &MantleFlow, dt_myr: f64, t: &Tuning) {
+        if t.plume_drift <= 0.0 {
+            return;
+        }
+        let wind = mantle.wind_at(self.tail_cell);
+        let step = t.plume_drift * dt_myr;
+        let moved = [
+            self.tail_centre[0] + wind[0] * step,
+            self.tail_centre[1] + wind[1] * step,
+            self.tail_centre[2] + wind[2] * step,
+        ];
+        self.tail_centre = normalise(moved);
+        let off = dot(self.tail_centre, self.laid_at).clamp(-1.0, 1.0).acos();
+        if off >= REPLANT * t.plume_tail_radius.max(1e-6) {
+            self.lay_tail(mesh, t);
+        }
+    }
 }
 
+/// Share of the tail's radius it may drift from where its footprint was laid
+/// before the footprint is laid again.
+const REPLANT: f64 = 0.25;
+
 /// Cells within `radius` of `centre`, each with `profile(r)` for `r` the
-/// distance over `radius`. The cell nearest the centre is always in.
+/// distance over `radius`, and the cell nearest the centre, which is always in.
 fn footprint(
     mesh: &Mesh,
     centre: Vec3,
     radius: f64,
     profile: impl Fn(f64) -> f64,
-) -> Vec<(u32, f32)> {
+) -> (Vec<(u32, f32)>, usize) {
     let reach = radius.cos();
     let mut nearest = (0usize, f64::NEG_INFINITY);
     let mut cells = Vec::new();
@@ -89,7 +134,16 @@ fn footprint(
     if !cells.iter().any(|&(i, _)| i as usize == nearest.0) {
         cells.push((nearest.0 as u32, profile(0.0) as f32));
     }
-    cells
+    (cells, nearest.0)
+}
+
+/// The tail's thickness profile over its footprint.
+fn tail_profile(r: f64) -> f64 {
+    if r <= PLATEAU_TOP {
+        1.0
+    } else {
+        ((1.0 - r) / (1.0 - PLATEAU_TOP)).max(0.0)
+    }
 }
 
 /// Thicken cell `i` toward `target` by `share` of the shortfall, booking the
@@ -164,23 +218,18 @@ impl Primordial {
     }
 
     fn born(mesh: &Mesh, centre: Vec3, t: &Tuning) -> Plume {
-        let tail_radius = t.plume_tail_radius.max(1e-6);
-        let swell_radius = t.plume_swell_radius.max(1e-6);
-        Plume {
+        let mut plume = Plume {
             centre,
             elapsed: 0.0,
             tail_elapsed: 0.0,
-            tail_cells: footprint(mesh, centre, tail_radius, |r| {
-                if r <= PLATEAU_TOP {
-                    1.0
-                } else {
-                    ((1.0 - r) / (1.0 - PLATEAU_TOP)).max(0.0)
-                }
-            }),
-            swell_cells: footprint(mesh, centre, swell_radius, |r| {
-                0.5 * (1.0 + (std::f64::consts::PI * r.min(1.0)).cos())
-            }),
-        }
+            tail_centre: centre,
+            laid_at: centre,
+            tail_cell: 0,
+            tail_cells: Vec::new(),
+            swell_cells: Vec::new(),
+        };
+        plume.lay_tail(mesh, t);
+        plume
     }
 
     /// Raise new plumes where the lower mantle sends them up, carry the live
@@ -264,11 +313,7 @@ impl Primordial {
                         continue;
                     }
                     let r = cos.clamp(-1.0, 1.0).acos() / radius;
-                    let profile = if r <= PLATEAU_TOP {
-                        1.0
-                    } else {
-                        ((1.0 - r) / (1.0 - PLATEAU_TOP)).max(0.0)
-                    };
+                    let profile = tail_profile(r);
                     let base = t.ridge_crust_thickness;
                     let target = base + (peak - base) * profile;
                     let Some(grown) = raise(mesh, data, field, i, target, share, &mut created)
@@ -283,8 +328,10 @@ impl Primordial {
                 }
                 plume.elapsed += dt_myr;
             }
-            // The tail stays put in the mantle, and the plate moves over it.
+            // The tail stays in the mantle, which carries it slowly, and the
+            // plate moves over it.
             if plume.tail_elapsed < tail_duration {
+                plume.drift(mesh, mantle, dt_myr, t);
                 for &(i, profile) in &plume.tail_cells {
                     let i = i as usize;
                     if field.rift_cell[i] != 0 {
@@ -347,7 +394,12 @@ fn dot(a: Vec3, b: Vec3) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::{Primordial, dot};
     use crate::cell_data::CONTINENTAL;
+    use crate::mantle::MantleFlow;
+    use crate::math::{normalise, read3};
+    use crate::mesh::Mesh;
+    use crate::tuning::Tuning;
     use crate::world::Sim;
 
     #[test]
@@ -513,5 +565,50 @@ mod tests {
         }
         assert!(made > 0.0, "the tail built nothing");
         assert!(sim.mass_drift().abs() < 1e-4, "drift {}", sim.mass_drift());
+    }
+
+    #[test]
+    fn a_tail_drifts_with_the_mantle_flow_and_its_footprint_follows() {
+        let mesh = Mesh::icosphere(5);
+        let mut mantle = MantleFlow::new(&mesh);
+        let (sites, _) = mantle.sinks();
+        let sink = sites[0];
+        mantle.set_sink_for_test(0, 0.5);
+        // Start a quarter turn from the downwelling, which draws it in.
+        let start = normalise([sink[1] + 1.0e-3, -sink[0] + 1.0e-3, sink[2] + 1.0]);
+        let mut t = Tuning::default();
+        let mut fixed = Primordial::born(&mesh, start, &t);
+        t.plume_drift = 0.5;
+        let mut drifting = Primordial::born(&mesh, start, &t);
+        let before = fixed.tail_cells.clone();
+        for _ in 0..40 {
+            fixed.drift(&mesh, &mantle, 2.0, &Tuning { plume_drift: 0.0, ..t.clone() });
+            drifting.drift(&mesh, &mantle, 2.0, &t);
+        }
+        assert_eq!(fixed.tail_cells, before, "a tail with no drift moved");
+        let gap = |p: [f64; 3]| dot(p, sink).clamp(-1.0, 1.0).acos();
+        assert!(
+            gap(drifting.tail_centre) < gap(start) - 0.05,
+            "the tail did not move toward the downwelling: {:.3} from {:.3}",
+            gap(drifting.tail_centre),
+            gap(start)
+        );
+        // Every cell of the footprint lies within the radius of the tail, give
+        // or take how far it may drift before the footprint is laid again.
+        let reach = (1.0 + super::REPLANT) * t.plume_tail_radius;
+        assert!(
+            drifting
+                .tail_cells
+                .iter()
+                .all(|&(i, _)| dot(read3(&mesh.centres, i as usize), drifting.tail_centre)
+                    >= (reach + 1e-9).cos()),
+            "the footprint was left behind"
+        );
+        assert_ne!(drifting.tail_cell, fixed.tail_cell, "the footprint never moved");
+        // The swell goes with it.
+        assert!(drifting.swell_cells.iter().all(|&(i, _)| {
+            dot(read3(&mesh.centres, i as usize), drifting.tail_centre)
+                >= (t.plume_swell_radius + 0.5 * t.plume_tail_radius).cos()
+        }));
     }
 }

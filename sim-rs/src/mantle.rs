@@ -379,6 +379,13 @@ impl MantleFlow {
         (&self.sites, &self.sink)
     }
 
+    /// Put a downwelling of `rate` at site `site` and work out the flow.
+    #[cfg(test)]
+    pub fn set_sink_for_test(&mut self, site: usize, rate: f64) {
+        self.sink[site] = rate;
+        self.flow();
+    }
+
     /// The mantle flow beneath cell `i`.
     #[inline]
     pub fn wind_at(&self, i: usize) -> Vec3 {

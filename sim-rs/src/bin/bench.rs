@@ -1008,6 +1008,8 @@ fn main() {
             "slab_decay_time" => t.slab_decay_time = value,
             "slab_initiation_time" => t.slab_initiation_time = value,
             "motion_response_time" => t.motion_response_time = value,
+            "microplate_area" => t.microplate_area = value,
+            "microplate_damping" => t.microplate_damping = value,
             "ridge_weight" => t.ridge_weight = value,
             "seafloor_flattening_age" => t.seafloor_flattening_age = value,
             "mantle_density" => t.mantle_density = value,
@@ -1062,6 +1064,12 @@ fn main() {
             "min_craton_area" => t.min_craton_area = value,
             "cohesion_reach" => t.cohesion_reach = value,
             "continental_area_target" => t.continental_area_target = value,
+            "continental_target_time" => t.continental_target_time = value,
+            "continental_target_gain" => t.continental_target_gain = value,
+            "plume_drift" => t.plume_drift = value,
+            "arc_setback" => t.arc_setback = value,
+            "back_arc_width" => t.back_arc_width = value,
+            "back_arc_extension" => t.back_arc_extension = value,
             "continental_recycling_rate" => t.continental_recycling_rate = value,
             "max_thickening_per_myr" => t.max_thickening_per_myr = value,
             "mantle_drag" => t.mantle_drag = value,
@@ -1126,6 +1134,7 @@ fn main() {
             "two_sided_tension" => sim.options.two_sided_tension = value != 0.0,
             "quiet_by_mean_speed" => sim.options.quiet_by_mean_speed = value != 0.0,
             "collapse_stagnant_only" => sim.options.collapse_stagnant_only = value != 0.0,
+            "hold_continental_area" => sim.options.hold_continental_area = value != 0.0,
             _ => eprintln!("unknown tuning override {name}"),
         }
     }
@@ -1155,6 +1164,8 @@ fn main() {
     let globe: f64 = (0..sim.mesh.cell_count).map(|i| sim.mesh.area(i)).sum();
     // Continental area made so far, by how, as shares of the globe.
     let (mut made_by_plume, mut made_by_arc, mut made_by_piling) = (0.0f64, 0.0f64, 0.0f64);
+    // Crust stretched thin behind arcs, as km over the whole globe.
+    let mut back_arc_km = 0.0f64;
     let mut piling = Piling::default();
     // Crust mass plumes have made, for the share of it still alive.
     let mut plume_mass_made = 0.0f64;
@@ -1222,6 +1233,7 @@ fn main() {
             made_by_arc += adv.continentalised_by_accretion / globe;
             made_by_piling += adv.continentalised_by_piling / globe;
             plume_mass_made += adv.plume_created_this_step;
+            back_arc_km += adv.back_arc_thinned / globe;
         }
         tally_piling(&sim, &mut piling);
         let fresh: Vec<i64> = sim
@@ -1543,11 +1555,30 @@ fn main() {
         m.mean_ocean_age,
         sim.mass_drift() * 100.0
     );
+    {
+        // Mantle flow at the surface, which carries hotspots when `plume_drift`
+        // is above 0: rad/Myr over the globe, then in cm/yr (1 rad = 6371 km).
+        let n = sim.mesh.cell_count;
+        let speeds: Vec<f64> = (0..n).map(|i| len(sim.mantle().wind_at(i))).collect();
+        let mean = speeds.iter().sum::<f64>() / n as f64;
+        let max = speeds.iter().copied().fold(0.0, f64::max);
+        let cm = |x: f64| x * 6371.0 * 1e5 / 1e6;
+        println!(
+            "  mantle flow: mean {:.1} cm/yr, max {:.1} cm/yr",
+            cm(mean),
+            cm(max)
+        );
+    }
     println!(
         "  motion: mean speed {:.4} rad/Myr, reversals (>{REVERSAL_ANGLE:.0} deg in {} Myr) {reversals}, {small_reversals} on plates under {:.0}% of the globe",
         speed_sum / speed_samples.max(1) as f64,
         REVERSAL_LAG as f64 * sim.tuning.dt_myr,
         SMALL_PLATE_SHARE * 100.0,
+    );
+    println!(
+        "  back arcs: {:.2} km of crust over the globe stretched thin and moved onto arcs ({:.3} km/Gyr)",
+        back_arc_km,
+        back_arc_km / (sim.elapsed() / 1000.0).max(1e-9)
     );
     println!(
         "  rifts: {} total, most in any {} Myr {rift_burst}, {} failed",

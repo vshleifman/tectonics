@@ -31,6 +31,8 @@ pub struct Tuning {
     pub dome_push_duration: f64,
     pub max_turn_rate: f64,
     pub motion_response_time: f64,
+    pub microplate_area: f64,
+    pub microplate_damping: f64,
     pub ridge_weight: f64,
     pub mantle_drag: f64,
     pub continental_drag: f64,
@@ -86,6 +88,9 @@ pub struct Tuning {
     pub keel_depletion: f64,
 
     pub accretion_fraction: f64,
+    pub arc_setback: f64,
+    pub back_arc_width: f64,
+    pub back_arc_extension: f64,
     pub max_thickening_per_myr: f64,
     pub crust_spread_start: f64,
     pub crust_spread_rate: f64,
@@ -98,6 +103,8 @@ pub struct Tuning {
     pub min_craton_area: f64,
     pub cohesion_reach: f64,
     pub continental_area_target: f64,
+    pub continental_target_time: f64,
+    pub continental_target_gain: f64,
     pub continental_recycling_rate: f64,
     pub craton_min_age: f64,
     pub craton_inland: f64,
@@ -170,6 +177,7 @@ pub struct Tuning {
     pub plume_tail_thickness: f64,
     pub plume_swell: f64,
     pub plume_swell_radius: f64,
+    pub plume_drift: f64,
     pub hot_arc_suppression: f64,
     pub hot_drip: f64,
 
@@ -209,6 +217,8 @@ impl Default for Tuning {
             dome_push_duration: 60.0,
             max_turn_rate: 0.0,
             motion_response_time: 40.0,
+            microplate_area: 0.01,
+            microplate_damping: 5.0,
             ridge_weight: 0.058333333,
             mantle_drag: 30.0,
             continental_drag: 3.0,
@@ -259,6 +269,9 @@ impl Default for Tuning {
             keel_depletion: 0.025,
 
             accretion_fraction: 0.2,
+            arc_setback: 0.025,
+            back_arc_width: 0.05,
+            back_arc_extension: 0.25,
             max_thickening_per_myr: 0.5,
             subduction_erosion: 0.05,
             margin_erosion: 0.12,
@@ -271,6 +284,8 @@ impl Default for Tuning {
             min_craton_area: 0.0003,
             cohesion_reach: 2.0,
             continental_area_target: 0.4,
+            continental_target_time: 200.0,
+            continental_target_gain: 4.0,
             continental_recycling_rate: 0.0004,
             craton_min_age: 500.0,
             craton_inland: 0.02,
@@ -329,6 +344,7 @@ impl Default for Tuning {
             plume_tail_thickness: 4.0,
             plume_swell: 1.0,
             plume_swell_radius: 0.1,
+            plume_drift: 1.0,
             hot_arc_suppression: 1.0,
             hot_drip: 1.0,
 
@@ -382,6 +398,10 @@ pub struct SimOptions {
     /// stopped renewing it, such as one covering the globe. A plate with a
     /// working ridge keeps an old coast or two without breaking up.
     pub collapse_stagnant_only: bool,
+    /// Steer the continental area toward `continental_area_target`. Off, the
+    /// area is whatever arcs, plumes, sediment and the fixed
+    /// `continental_recycling_rate` leave.
+    pub hold_continental_area: bool,
 }
 
 impl Default for SimOptions {
@@ -392,6 +412,7 @@ impl Default for SimOptions {
             two_sided_tension: false,
             quiet_by_mean_speed: false,
             collapse_stagnant_only: true,
+            hold_continental_area: false,
         }
     }
 }

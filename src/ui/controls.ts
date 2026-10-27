@@ -115,6 +115,9 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "Youngest ocean that can founder into a trench with nothing pushing it.",
   motionResponseTime:
     "How long a plate takes to settle onto the motion its forces call for.",
+  microplateArea: "Share of the globe below which a plate is damped.",
+  microplateDamping:
+    "How much longer a plate with no area takes to settle, as a multiple of the response time.",
   trenchSuction: "Pull on the overriding plate toward a rolling-back slab.",
   maxTurnRate: "Fastest a plate's heading may swing; zero means no limit.",
   ridgeWeight:
@@ -191,6 +194,10 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "How much lighter a full keel's depleted residue is than ordinary lid.",
   accretionFraction:
     "Share of a subducting cell that sticks onto the plate above.",
+  arcSetback: "How far behind the trench an arc builds (radians).",
+  backArcWidth: "Width of the band behind an arc that stretches (radians).",
+  backArcExtension:
+    "Share of a retreating plate's speed taken up as back-arc stretching.",
   maxThickeningPerMyr: "Fastest a cell may thicken by accretion.",
   crustSpreadStart:
     "Thickness above which crust spreads sideways under its own weight.",
@@ -211,9 +218,13 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   cohesionReach:
     "Rings of cells a stray crumb of continent or craton searches for a body to rejoin.",
   continentalAreaTarget:
-    "Share of the globe at which continental growth levels off.",
+    "Share of the globe the continents are steered toward, when the target is held.",
+  continentalTargetTime:
+    "Myr over which a gap between the continental area and its target is closed.",
+  continentalTargetGain:
+    "How strongly arcs accrete more ocean to make up a shortfall below the target.",
   continentalRecyclingRate:
-    "Share of continental area recycled per Myr when no target is set.",
+    "Share of continental area recycled per Myr when no target is held.",
   cratonMinAge: "Age continental crust must reach before it can grow a keel.",
   cratonInland: "How far inland crust must lie from the ocean to grow a keel.",
   cratonGrowthTime:
@@ -293,6 +304,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "Crust a tail builds over ridge crust; capped under the continental threshold so a tail never makes continent.",
   plumeSwell: "Uplift of the broad swell where a tail stands.",
   plumeSwellRadius: "Radius of the swell over a tail.",
+  plumeDrift:
+    "How far the mantle flow carries a hotspot tail, as a share of the flow's speed.",
   hotArcSuppression: "How much a hot mantle holds back arc accretion.",
   hotDrip:
     "How much thickened ocean floor drips into a hot mantle instead of becoming continent.",
@@ -444,6 +457,20 @@ const TUNING_GROUP_FIELDS: {
         min: 0,
         max: 100,
         step: 1,
+      },
+      {
+        key: "microplateArea",
+        label: "Microplate area (globe share)",
+        min: 0,
+        max: 0.05,
+        step: 0.001,
+      },
+      {
+        key: "microplateDamping",
+        label: "Microplate damping (x response)",
+        min: 0,
+        max: 10,
+        step: 0.5,
       },
       {
         key: "trenchSuction",
@@ -822,14 +849,28 @@ const TUNING_GROUP_FIELDS: {
       },
       {
         key: "continentalAreaTarget",
-        label: "Continental area target",
+        label: "Continental area target (if held)",
         min: 0,
         max: 0.7,
         step: 0.01,
       },
       {
+        key: "continentalTargetTime",
+        label: "Target closing time (Myr)",
+        min: 20,
+        max: 1000,
+        step: 10,
+      },
+      {
+        key: "continentalTargetGain",
+        label: "Target accretion gain",
+        min: 0,
+        max: 10,
+        step: 0.5,
+      },
+      {
         key: "continentalRecyclingRate",
-        label: "Recycling /Myr (no target)",
+        label: "Recycling /Myr (no target held)",
         min: 0,
         max: 0.005,
         step: 0.0001,
@@ -901,6 +942,27 @@ const TUNING_GROUP_FIELDS: {
         min: 0,
         max: 1,
         step: 0.01,
+      },
+      {
+        key: "arcSetback",
+        label: "Arc setback (rad)",
+        min: 0,
+        max: 0.06,
+        step: 0.005,
+      },
+      {
+        key: "backArcWidth",
+        label: "Back-arc width (rad)",
+        min: 0.01,
+        max: 0.15,
+        step: 0.005,
+      },
+      {
+        key: "backArcExtension",
+        label: "Back-arc extension",
+        min: 0,
+        max: 1,
+        step: 0.05,
       },
       {
         key: "subductionErosion",
@@ -1278,6 +1340,13 @@ const TUNING_GROUP_FIELDS: {
         step: 0.01,
       },
       {
+        key: "plumeDrift",
+        label: "Hotspot drift (x mantle flow)",
+        min: 0,
+        max: 3,
+        step: 0.1,
+      },
+      {
         key: "hotArcSuppression",
         label: "Hot arc suppression",
         min: 0,
@@ -1442,6 +1511,19 @@ export const createControls = (
   tooltip.attach(
     collapseToggle.row,
     "Old passive margins founder only on plates whose sea floor is old on average, such as one covering the globe.",
+  );
+
+  const holdAreaToggle = makeToggle(
+    "Hold continental area at target",
+    simOptions.holdContinentalArea,
+  );
+  holdAreaToggle.input.addEventListener("change", () => {
+    setSimOptions({ holdContinentalArea: holdAreaToggle.input.checked });
+    onTuningChange();
+  });
+  tooltip.attach(
+    holdAreaToggle.row,
+    "Steer the continental area toward the target. Off, it grows from the balance of arcs, plumes and recycling.",
   );
 
   const readout = document.createElement("div");
@@ -1623,6 +1705,7 @@ export const createControls = (
     tensionToggle.row,
     quietToggle.row,
     collapseToggle.row,
+    holdAreaToggle.row,
     readout,
     massEl,
     diagnostics.pinned,

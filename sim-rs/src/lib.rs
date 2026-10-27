@@ -9,6 +9,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod advect;
+pub mod arcs;
 pub mod boundaries;
 pub mod cell_data;
 pub mod cohesion;

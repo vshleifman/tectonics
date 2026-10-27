@@ -107,6 +107,5 @@ says, and 15, which gives islands a coastline.
 
 ## Future
 
-- Let tails drift slowly with the mantle flow (`mantle.rs`) to produce bends
-  like the Hawaii-Emperor's.
+- Done: tails drift with the mantle flow (`plume_drift`, see 13).
 - Continental hotspot volcanism and uplift.

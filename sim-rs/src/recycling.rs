@@ -11,15 +11,22 @@
 //! share of the continental area, removed where it happens: at margins facing
 //! a trench or the ocean of another plate, the thinnest forearc first.
 //!
-//! That share is the one free parameter of the planet. With a target area set,
-//! it is matched to the growth the rest of the model produces, averaged over
-//! [`GROWTH_MEMORY_MYR`], so the two balance when continents cover the target;
-//! without one it is the fixed `continental_recycling_rate`.
+//! By default that share is the fixed `continental_recycling_rate`, an input
+//! like any other, and the continental area is whatever the balance of arcs,
+//! plumes, sediment and recycling makes it.
+//!
+//! The one imposed outcome is optional: with `hold_continental_area` on, the
+//! controller steers the area toward `continental_area_target`. It recycles
+//! what everything else grows, averaged over [`GROWTH_MEMORY_MYR`], plus the
+//! gap to the target spread over `continental_target_time`: more when the
+//! continents are too big, less (down to none) when they are too small. Below
+//! target it also lets arcs accrete more of the ocean they consume (see
+//! [`steer_accretion`]), since recycling can only stop, not grow anything.
 
 use crate::advect::AdvectionField;
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::mesh::Mesh;
-use crate::tuning::Tuning;
+use crate::tuning::{SimOptions, Tuning};
 
 /// Time (Myr) over which the continental growth rate is averaged before the
 /// recycling is matched to it: long enough to see through the supercontinent
@@ -29,13 +36,33 @@ pub const GROWTH_MEMORY_MYR: f64 = 200.0;
 /// Keel above which a margin is cratonic, and too deep-rooted to recycle.
 const CRATON_KEEL: f32 = 0.5;
 
-/// Share of the continental area recycled per Myr.
-pub fn recycling_rate(t: &Tuning, field: &AdvectionField) -> f64 {
-    if t.continental_area_target > 0.0 {
-        field.continental_growth.max(0.0) / t.continental_area_target
-    } else {
-        t.continental_recycling_rate
+/// Share of the continental area recycled per Myr, given the continents now
+/// cover `share` of the globe.
+pub fn recycling_rate(t: &Tuning, o: &SimOptions, field: &AdvectionField, share: f64) -> f64 {
+    if !o.hold_continental_area {
+        return t.continental_recycling_rate;
     }
+    // Share of the globe to recycle per Myr: what everything else grows, so
+    // that it stays level, and the gap to the target closed over its time.
+    let closing = (share - t.continental_area_target) / t.continental_target_time.max(1e-6);
+    let globe_share = (field.continental_growth.max(0.0) + closing).max(0.0);
+    if share > 0.0 { globe_share / share } else { 0.0 }
+}
+
+/// With `hold_continental_area` on, let arcs accrete a larger part of the ocean
+/// they consume the further the continents fall short of
+/// `continental_area_target`: all of it once they are `1 / continental_target_gain`
+/// of the target short. At or above the target it leaves accretion alone.
+pub fn steer_accretion(eff: &mut Tuning, o: &SimOptions, field: &AdvectionField) {
+    let (Some(share), true) = (field.continental_share_before, o.hold_continental_area) else {
+        return;
+    };
+    let target = eff.continental_area_target;
+    if target <= 0.0 || share >= target {
+        return;
+    }
+    let need = ((target - share) / target * eff.continental_target_gain).clamp(0.0, 1.0);
+    eff.accretion_fraction += (1.0 - eff.accretion_fraction) * need;
 }
 
 /// Share of the globe covered by continental crust.
@@ -64,12 +91,13 @@ pub fn recycle_continental_margins(
     dt_myr: f64,
     field: &mut AdvectionField,
     t: &Tuning,
+    o: &SimOptions,
 ) {
     field.continental_recycled = 0.0;
     let n = mesh.cell_count;
     let globe: f64 = mesh.areas.iter().map(|&a| a as f64).sum();
     let share = continental_share(mesh, data);
-    let due = recycling_rate(t, field) * share * globe * dt_myr;
+    let due = recycling_rate(t, o, field, share) * share * globe * dt_myr;
     if due <= 0.0 {
         field.recycle_debt = 0.0;
         return;

@@ -98,12 +98,13 @@ at 2 Myr ticks.
 
 ### Interactions to watch
 
-- **Recycling controller.** `recycling.rs` already models sediment carried
-  into trenches, as a share of continental area, matched to growth when
-  `continental_area_target` is set. Explicit sediment that reaches a trench
-  and subducts is counted again, as advection's subduction. With a target set,
-  the controller rebalances itself. With a fixed `continental_recycling_rate`
-  it double-counts, so document this and consider lowering the default rate.
+- **Recycling.** `recycling.rs` models sediment carried into trenches as a
+  fixed share of continental area per Myr (`continental_recycling_rate`), unless
+  `hold_continental_area` is on, when it matches that to growth and the gap to
+  `continental_area_target`. Explicit sediment that reaches a trench and
+  subducts is counted again, as advection's subduction. With the target held,
+  the controller rebalances itself. With the fixed rate it double-counts, so
+  document this and consider lowering the default rate.
 - **Craton growth** needs thick, quiet interiors. Erosion thins interiors
   slowly (they are low), but check `craton_area` and `ancient_keeled` in the
   bench.
