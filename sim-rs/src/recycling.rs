@@ -1,8 +1,8 @@
-//! Continental recycling: the sink that makes continental growth level off.
+//! Continental recycling: an extra sink on continental area, and the
+//! controller that can hold it at a target.
 //!
-//! Arcs add continental crust wherever ocean subducts, and nothing in the rest
-//! of the model takes much of it away again, so left alone continents spread
-//! until there is no ocean left to make more. On Earth they stopped growing
+//! Arcs add continental crust wherever ocean subducts; without losses
+//! continents spread until there is no ocean left to make more. On Earth they stopped growing
 //! billions of years ago: what arcs add (~3 km³/yr) is matched by what goes
 //! back into the mantle at active margins, as sediment eroded off the land and
 //! carried down with the subducting plate, and as forearc crust scraped from
@@ -11,9 +11,12 @@
 //! share of the continental area, removed where it happens: at margins facing
 //! a trench or the ocean of another plate, the thinnest forearc first.
 //!
-//! By default that share is the fixed `continental_recycling_rate`, an input
-//! like any other, and the continental area is whatever the balance of arcs,
-//! plumes, sediment and recycling makes it.
+//! Without a target that share is the fixed `continental_recycling_rate`,
+//! 0 by default: sediment subducted at trenches (`erosion.rs`) and subduction
+//! erosion of margins and arcs (`advect.rs`) now take those losses where they
+//! happen, so the fixed rate is left as an extra sink to experiment with. The
+//! continental area is whatever the balance of arcs, plumes, sediment and
+//! those losses makes it.
 //!
 //! The one imposed outcome is optional: with `hold_continental_area` on, the
 //! controller steers the area toward `continental_area_target`. It recycles
@@ -94,6 +97,7 @@ pub fn recycle_continental_margins(
     o: &SimOptions,
 ) {
     field.continental_recycled = 0.0;
+    field.continental_recycled_mass = 0.0;
     let n = mesh.cell_count;
     let globe: f64 = mesh.areas.iter().map(|&a| a as f64).sum();
     let share = continental_share(mesh, data);
@@ -145,6 +149,7 @@ pub fn recycle_continental_margins(
     }
     field.subducted_total += recycled_mass;
     field.continental_recycled = recycled_area;
+    field.continental_recycled_mass = recycled_mass;
 }
 
 /// Fold this tick's change in continental area into the running growth rate,

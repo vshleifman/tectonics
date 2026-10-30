@@ -1,6 +1,11 @@
 import { makeRng } from "../math/rng";
 import { Plates } from "../plates/Plates";
-import { PASS_NAMES, type SimWorld } from "../sim/SimWorld";
+import {
+  FACIES,
+  PASS_NAMES,
+  RESOURCE_NAMES,
+  type SimWorld,
+} from "../sim/SimWorld";
 import { defaultSimOptions, defaultTuning } from "../sim/tuning";
 
 /**
@@ -48,6 +53,21 @@ export interface TrajectoryPoint {
   continentalGrowth: number;
   continentalEroded: number;
   sedimentShare: number;
+  felsicShare: number;
+  maficShare: number;
+  coverKmContinental: number;
+  coverKmOceanic: number;
+  coverErosionShare: number;
+  faciesShare: number[];
+  meanExhumation: number;
+  cratonExhumation: number;
+  youngArcExhumation: number;
+  meanContinentalDensity: number;
+  continentalDensitySpread: number;
+  meanOceanicDensity: number;
+  oceanicDensitySpread: number;
+  resourceLandShare: number[];
+  resourceContinentalShare: number[];
   sedimentFlux: number;
   delaminated: number;
   foundered: number;
@@ -152,6 +172,21 @@ export const runBench = (
       continentalGrowth: m.continentalGrowth,
       continentalEroded: m.continentalEroded,
       sedimentShare: m.sedimentShare,
+      felsicShare: m.felsicShare,
+      maficShare: m.maficShare,
+      coverKmContinental: m.coverKmContinental,
+      coverKmOceanic: m.coverKmOceanic,
+      coverErosionShare: m.coverErosionShare,
+      faciesShare: m.faciesShare,
+      meanExhumation: m.meanExhumation,
+      cratonExhumation: m.cratonExhumation,
+      youngArcExhumation: m.youngArcExhumation,
+      meanContinentalDensity: m.meanContinentalDensity,
+      continentalDensitySpread: m.continentalDensitySpread,
+      meanOceanicDensity: m.meanOceanicDensity,
+      oceanicDensitySpread: m.oceanicDensitySpread,
+      resourceLandShare: m.resourceLandShare,
+      resourceContinentalShare: m.resourceContinentalShare,
       sedimentFlux: m.sedimentFlux,
       delaminated: m.delaminated,
       foundered: m.foundered,
@@ -228,7 +263,7 @@ const describeContinentalBudget = (r: BenchResult): string => {
     `net growth ${percent(mean("continentalGrowth"), 4)}; ` +
     `recycled/Myr ${percent(mean("continentalRecycled"), 4)}; ` +
     `loss/Myr erosion ${percent(mean("continentalEroded"), 4)} ` +
-    `river flux/Myr ${percent(mean("sedimentFlux"), 4)} (sediment ${percent(mean("sedimentShare"), 1)} of continental mass) ` +
+    `river flux/Myr ${percent(mean("sedimentFlux"), 4)} (of continental mass: sediment ${percent(mean("sedimentShare"), 1)}, felsic ${percent(mean("felsicShare"), 1)}, mafic ${percent(mean("maficShare"), 1)}; cover ${mean("coverKmContinental").toFixed(2)} km on land, ${mean("coverKmOceanic").toFixed(2)} km at sea, ${percent(mean("coverErosionShare"), 0)} of erosion) ` +
     `delamination ${percent(mean("delaminated"), 4)} ` +
     `founder ${percent(mean("foundered"), 4)}; ` +
     `revert/Myr ${percent(mean("decontinentalised"), 4)}; ` +
@@ -237,7 +272,11 @@ const describeContinentalBudget = (r: BenchResult): string => {
     `pockets ${last.oceanPocketCount} (${percent(last.oceanPocketArea, 2)}); ` +
     `continents ${mean("continentCount").toFixed(1)}, ` +
     `largest ${percent(mean("largestContinentShare"), 0)} of continental area, ` +
-    `cratons ${percent(mean("cratonShare"), 0)}`
+    `cratons ${percent(mean("cratonShare"), 0)}; ` +
+    `facies of continental area ${FACIES.map((name, f) => `${name} ${percent(last.faciesShare[f] ?? 0, 0)}`).join(", ")}; ` +
+    `exhumed km: all ${last.meanExhumation.toFixed(1)}, cratons ${last.cratonExhumation.toFixed(1)}, young arcs ${last.youngArcExhumation.toFixed(1)}; ` +
+    `density g/cm³: continental ${last.meanContinentalDensity.toFixed(3)} ±${last.continentalDensitySpread.toFixed(3)}, oceanic ${last.meanOceanicDensity.toFixed(3)} ±${last.oceanicDensitySpread.toFixed(3)}; ` +
+    `resources (land with odds over half): ${RESOURCE_NAMES.map((name, r) => `${name} ${percent(last.resourceLandShare[r] ?? 0, 1)}`).join(", ")}`
   );
 };
 

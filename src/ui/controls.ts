@@ -13,6 +13,7 @@ import {
 } from "../render/colour";
 import type { Projection } from "../render/projection";
 import type { WorldMetrics } from "../sim/metrics";
+import { RESOURCE_NAMES } from "../sim/SimWorld";
 import {
   resetTuning,
   setSimOptions,
@@ -91,7 +92,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "Density of the mantle crust floats on; sets how high a given thickness of crust stands.",
   oceanVolume:
     "Water on the planet as an even layer over the globe; sea level is what fills the basins with it.",
-  waterDensity: "Density of sea water; the heavier it is, the less a column sinks under it.",
+  waterDensity:
+    "Density of sea water; the heavier it is, the less a column sinks under it.",
   erosionTime:
     "How long land takes to wear down to 1/e of its height over sea level, isostatic rebound included. 0 turns erosion off.",
   shelfDepth:
@@ -99,7 +101,10 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   slopeCapture:
     "Share of the sediment reaching each ring of sea floor past the shelf that settles there.",
   sedimentReach: "How many rings of cells off the coast sediment can reach.",
-  trenchDepth: "How far the plate going down is bent below its column at a trench with a full slab.",
+  trenchSedimentSubduction:
+    "Share of the sediment reaching a trench that goes down with the plate; the rest builds the accretionary prism.",
+  trenchDepth:
+    "How far the plate going down is bent below its column at a trench with a full slab.",
   elevationMin: "Lowest elevation the model will allow.",
   elevationMax: "Highest elevation the model will allow.",
   slabWeight: "Pull per unit of trench, and so the world's overall pace.",
@@ -165,8 +170,14 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   sinkTopoGain: "How far a mantle downwelling drags the surface above it down.",
   dynTopoMax: "Most the mantle's flow may lift or lower the surface.",
   maxOceanicAge: "Age at which oceanic crust is treated as fully cooled.",
-  continentalDensity: "Density of buoyant continental crust.",
-  oceanicDensity: "Density of oceanic crust, at every age.",
+  maficDensity:
+    "Density of mafic rock (basalt, gabbro), the stuff of ocean crust.",
+  felsicDensity: "Density of felsic rock (granitoid), the stuff of continents.",
+  metasedimentDensity: "Density of sediment buried into the basement.",
+  coverDensity: "Density of loose, uncompacted sediment cover.",
+  eclogiteDensity:
+    "Density of mafic rock that has turned to eclogite at depth.",
+  eclogiteDepth: "Depth below which mafic rock turns to eclogite.",
   oceanicThickness: "Starting thickness of oceanic crust.",
   continentalThicknessThreshold:
     "Thickness at which accreted ocean counts as continent.",
@@ -174,6 +185,14 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "Thickness below which continent reverts to ocean.",
   continentalNucleationThickness:
     "Thickness at which ocean floor away from any continent turns continental.",
+  continentalFelsicShare:
+    "Evolved (felsic or buried sediment) share of the basement at which ocean crust counts as continental. Bulk continental crust is andesitic, roughly 35-50% felsic.",
+  arcHeatFlow:
+    "Heat flow over active arc magmatism, which warms the base of thick arc crust enough to melt and evolve it. Arcs run about 80 mW/m2, forearcs 40-70.",
+  arcHeatDuration:
+    "Million years over which that extra arc heat fades once the arc stops.",
+  oceanicFelsicShare:
+    "Evolved share below which continental crust reverts to ocean. Kept below the value above so cells near the line do not flicker.",
   maxCrustThickness:
     "Thickness a crustal root can carry before it starts to founder.",
   delaminationRate: "How fast crust above that ceiling peels into the mantle.",
@@ -224,7 +243,7 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   continentalTargetGain:
     "How strongly arcs accrete more ocean to make up a shortfall below the target.",
   continentalRecyclingRate:
-    "Share of continental area recycled per Myr when no target is held.",
+    "Extra share of continental area recycled per Myr when no target is held, on top of trench sediment and subduction erosion. 0 by default.",
   cratonMinAge: "Age continental crust must reach before it can grow a keel.",
   cratonInland: "How far inland crust must lie from the ocean to grow a keel.",
   cratonGrowthTime:
@@ -283,6 +302,57 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   heatFlowSensitivity:
     "How strongly convective surface heat loss rises with mantle temperature.",
   continentalHeatFlow: "Heat flow through uninsulated continental crust.",
+  lithificationDepth:
+    "Depth of loose sediment cover at which it is buried and cemented into rock.",
+  islandArcFelsic:
+    "Share of the crust an arc builds on ocean floor that is felsic.",
+  continentalArcFelsic:
+    "Share of the crust an arc builds on continent that is felsic: it assimilates the crust it rises through.",
+  differentiationRate:
+    "How fast hot continental crust turns its mafic rock felsic, per Myr, once its base is fully past the solidus.",
+  maficSolidus:
+    "Temperature at the base of the crust where its mafic rock starts to melt.",
+  meltingSpan:
+    "Temperature range above the solidus over which melting goes from none to full.",
+  surfaceTemp: "Surface temperature the crustal geotherm starts from.",
+  crustConductivity: "Thermal conductivity of the crust.",
+  crustHeatProduction:
+    "Heat the crust makes by radioactive decay, per unit volume.",
+  faciesZeoliteTemp:
+    "Peak temperature at which rock first changes; below it the rock has no facies.",
+  faciesGreenschistTemp: "Peak temperature above which rock is greenschist.",
+  faciesAmphiboliteTemp: "Peak temperature above which rock is amphibolite.",
+  faciesGranuliteTemp: "Peak temperature above which rock is granulite.",
+  faciesBlueschistPressure:
+    "Peak pressure above which cold rock is blueschist.",
+  faciesBlueschistMaxTemp:
+    "Peak temperature below which high-pressure rock is blueschist rather than eclogite.",
+  faciesEclogitePressure: "Peak pressure above which warm rock is eclogite.",
+  subductionPeakPressure:
+    "Pressure carried by the crust arcs build from, the wedge ocean floor passes through on its way down.",
+  subductionPeakTemp: "Temperature of that wedge.",
+  resourceArcAgeFull:
+    "Myr since arc magmatism up to which porphyry and epithermal deposits count in full.",
+  resourceArcAgeZero:
+    "Myr since arc magmatism after which porphyry and epithermal deposits no longer count.",
+  porphyryMinDepth:
+    "Erosion since the arc (km) below which a porphyry is still buried.",
+  porphyryMaxDepth:
+    "Erosion since the arc (km) above which a porphyry has been eroded away.",
+  epithermalMaxDepth:
+    "Erosion since the arc (km) above which the shallow epithermal system is gone.",
+  vmsMaxAge:
+    "Age (Myr) of ocean floor beyond which sea-floor sulphides are lost.",
+  vmsMaxTemp:
+    "Peak temperature above which sea-floor sulphides are too cooked to count.",
+  chromiteMaxTemp:
+    "Peak temperature above which podiform chromite is too cooked to count.",
+  goldMinTemp: "Peak temperature below which no orogenic gold forms.",
+  goldMaxTemp: "Peak temperature above which orogenic gold is lost.",
+  graniteMinTemp:
+    "Peak temperature above which metasediment melts to tin and tungsten granite.",
+  kimberliteMinAge:
+    "Age (Myr) of a craton's crust below which it is too young for diamonds.",
   keelInsulation: "Share of continental heat flow blocked by a full keel.",
   viscositySensitivity:
     "How strongly excess heat lowers mantle drag and motion response time.",
@@ -309,6 +379,10 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   hotArcSuppression: "How much a hot mantle holds back arc accretion.",
   hotDrip:
     "How much thickened ocean floor drips into a hot mantle instead of becoming continent.",
+  modernSubductionExcess:
+    "Mantle excess heat (1 is about 300 K) at which slabs are strong enough for modern-style subduction, and the hot-mantle brakes on arcs and drip lift. Models put it at about 160-250 K above today's.",
+  modernSubductionWidth:
+    "How gradually those brakes lift, in excess heat: full half this far above the value above, gone half this far below it.",
   activeSpeedEps: "Relative speed below which a boundary counts as inactive.",
   dtMyr:
     "Million years of plate motion advanced per simulation tick. A tick that would carry a plate more than one cell is split into shorter steps, so larger values cost proportionally more time.",
@@ -395,6 +469,13 @@ const TUNING_GROUP_FIELDS: {
         min: 1,
         max: 8,
         step: 1,
+      },
+      {
+        key: "trenchSedimentSubduction",
+        label: "Trench sediment subducted",
+        min: 0,
+        max: 1,
+        step: 0.05,
       },
       {
         key: "elevationMin",
@@ -743,18 +824,46 @@ const TUNING_GROUP_FIELDS: {
         step: 10,
       },
       {
-        key: "continentalDensity",
-        label: "Continental density",
-        min: 2.0,
+        key: "maficDensity",
+        label: "Mafic density",
+        min: 2.5,
         max: 3.2,
         step: 0.01,
       },
       {
-        key: "oceanicDensity",
-        label: "Oceanic density",
-        min: 2.5,
-        max: 3.2,
+        key: "felsicDensity",
+        label: "Felsic density",
+        min: 2.4,
+        max: 3.0,
         step: 0.01,
+      },
+      {
+        key: "metasedimentDensity",
+        label: "Metasediment density",
+        min: 2.4,
+        max: 3.0,
+        step: 0.01,
+      },
+      {
+        key: "coverDensity",
+        label: "Cover density",
+        min: 1.8,
+        max: 2.8,
+        step: 0.01,
+      },
+      {
+        key: "eclogiteDensity",
+        label: "Eclogite density",
+        min: 3.0,
+        max: 3.8,
+        step: 0.01,
+      },
+      {
+        key: "eclogiteDepth",
+        label: "Eclogite below (km)",
+        min: 30,
+        max: 80,
+        step: 1,
       },
       {
         key: "oceanicThickness",
@@ -783,6 +892,34 @@ const TUNING_GROUP_FIELDS: {
         min: 15,
         max: 40,
         step: 0.5,
+      },
+      {
+        key: "continentalFelsicShare",
+        label: "Continental from felsic share",
+        min: 0.1,
+        max: 0.8,
+        step: 0.01,
+      },
+      {
+        key: "oceanicFelsicShare",
+        label: "Oceanic below felsic share",
+        min: 0.05,
+        max: 0.7,
+        step: 0.01,
+      },
+      {
+        key: "arcHeatFlow",
+        label: "Arc heat flow (mW/m2)",
+        min: 30,
+        max: 150,
+        step: 5,
+      },
+      {
+        key: "arcHeatDuration",
+        label: "Arc heat fades over (Myr)",
+        min: 5,
+        max: 200,
+        step: 5,
       },
       {
         key: "maxCrustThickness",
@@ -930,6 +1067,231 @@ const TUNING_GROUP_FIELDS: {
         min: 0,
         max: 500,
         step: 10,
+      },
+    ],
+  },
+  {
+    title: "Composition",
+    sliders: [
+      {
+        key: "lithificationDepth",
+        label: "Lithification depth (km)",
+        min: 0.5,
+        max: 6,
+        step: 0.25,
+      },
+      {
+        key: "islandArcFelsic",
+        label: "Island arc felsic share",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "continentalArcFelsic",
+        label: "Continental arc felsic share",
+        min: 0,
+        max: 1,
+        step: 0.05,
+      },
+      {
+        key: "differentiationRate",
+        label: "Differentiation /Myr",
+        min: 0,
+        max: 0.01,
+        step: 0.0005,
+      },
+      {
+        key: "maficSolidus",
+        label: "Mafic solidus (°C)",
+        min: 600,
+        max: 1100,
+        step: 10,
+      },
+      {
+        key: "meltingSpan",
+        label: "Melting span (°C)",
+        min: 20,
+        max: 400,
+        step: 10,
+      },
+      {
+        key: "surfaceTemp",
+        label: "Surface temperature (°C)",
+        min: -10,
+        max: 40,
+        step: 1,
+      },
+      {
+        key: "crustConductivity",
+        label: "Crust conductivity (W/m/K)",
+        min: 1,
+        max: 4,
+        step: 0.1,
+      },
+      {
+        key: "crustHeatProduction",
+        label: "Crust heat production (µW/m³)",
+        min: 0,
+        max: 3,
+        step: 0.1,
+      },
+    ],
+  },
+  {
+    title: "Metamorphism",
+    sliders: [
+      {
+        key: "faciesZeoliteTemp",
+        label: "Zeolite from (°C)",
+        min: 50,
+        max: 300,
+        step: 10,
+      },
+      {
+        key: "faciesGreenschistTemp",
+        label: "Greenschist from (°C)",
+        min: 200,
+        max: 450,
+        step: 10,
+      },
+      {
+        key: "faciesAmphiboliteTemp",
+        label: "Amphibolite from (°C)",
+        min: 400,
+        max: 650,
+        step: 10,
+      },
+      {
+        key: "faciesGranuliteTemp",
+        label: "Granulite from (°C)",
+        min: 600,
+        max: 900,
+        step: 10,
+      },
+      {
+        key: "faciesBlueschistPressure",
+        label: "Blueschist from (kbar)",
+        min: 3,
+        max: 12,
+        step: 0.5,
+      },
+      {
+        key: "faciesBlueschistMaxTemp",
+        label: "Blueschist up to (°C)",
+        min: 300,
+        max: 600,
+        step: 10,
+      },
+      {
+        key: "faciesEclogitePressure",
+        label: "Eclogite from (kbar)",
+        min: 8,
+        max: 20,
+        step: 0.5,
+      },
+      {
+        key: "subductionPeakPressure",
+        label: "Wedge pressure (kbar)",
+        min: 0,
+        max: 20,
+        step: 0.5,
+      },
+      {
+        key: "subductionPeakTemp",
+        label: "Wedge temperature (°C)",
+        min: 0,
+        max: 600,
+        step: 10,
+      },
+    ],
+  },
+  {
+    title: "Resources",
+    sliders: [
+      {
+        key: "resourceArcAgeFull",
+        label: "Arc deposits full to (Myr)",
+        min: 5,
+        max: 200,
+        step: 5,
+      },
+      {
+        key: "resourceArcAgeZero",
+        label: "Arc deposits gone by (Myr)",
+        min: 20,
+        max: 400,
+        step: 5,
+      },
+      {
+        key: "porphyryMinDepth",
+        label: "Porphyry exposed from (km)",
+        min: 0,
+        max: 4,
+        step: 0.25,
+      },
+      {
+        key: "porphyryMaxDepth",
+        label: "Porphyry eroded past (km)",
+        min: 2,
+        max: 10,
+        step: 0.25,
+      },
+      {
+        key: "epithermalMaxDepth",
+        label: "Epithermal eroded past (km)",
+        min: 0.25,
+        max: 4,
+        step: 0.25,
+      },
+      {
+        key: "vmsMaxAge",
+        label: "Sea-floor sulphide to (Myr)",
+        min: 5,
+        max: 200,
+        step: 5,
+      },
+      {
+        key: "vmsMaxTemp",
+        label: "Sulphide up to (°C)",
+        min: 200,
+        max: 700,
+        step: 10,
+      },
+      {
+        key: "chromiteMaxTemp",
+        label: "Chromite up to (°C)",
+        min: 300,
+        max: 900,
+        step: 10,
+      },
+      {
+        key: "goldMinTemp",
+        label: "Orogenic gold from (°C)",
+        min: 200,
+        max: 500,
+        step: 10,
+      },
+      {
+        key: "goldMaxTemp",
+        label: "Orogenic gold to (°C)",
+        min: 400,
+        max: 800,
+        step: 10,
+      },
+      {
+        key: "graniteMinTemp",
+        label: "Tin granite from (°C)",
+        min: 500,
+        max: 900,
+        step: 10,
+      },
+      {
+        key: "kimberliteMinAge",
+        label: "Diamond craton older than (Myr)",
+        min: 500,
+        max: 3000,
+        step: 100,
       },
     ],
   },
@@ -1360,6 +1722,20 @@ const TUNING_GROUP_FIELDS: {
         max: 2,
         step: 0.05,
       },
+      {
+        key: "modernSubductionExcess",
+        label: "Modern subduction from (excess heat)",
+        min: 0,
+        max: 1.5,
+        step: 0.01,
+      },
+      {
+        key: "modernSubductionWidth",
+        label: "Modern subduction onset width",
+        min: 0.02,
+        max: 1,
+        step: 0.01,
+      },
     ],
   },
   {
@@ -1524,6 +1900,42 @@ export const createControls = (
   tooltip.attach(
     holdAreaToggle.row,
     "Steer the continental area toward the target. Off, it grows from the balance of arcs, plumes and recycling.",
+  );
+
+  const compositionToggle = makeToggle(
+    "Crust type from composition (experimental)",
+    simOptions.compositionCrustType,
+  );
+  compositionToggle.input.addEventListener("change", () => {
+    setSimOptions({ compositionCrustType: compositionToggle.input.checked });
+    onTuningChange();
+  });
+  tooltip.attach(
+    compositionToggle.row,
+    "Continent is crust whose basement is evolved (felsic), not crust that is merely thick; thick buoyant arcs resist subduction. Experimental: it can stall ocean renewal. Off, type is decided by thickness.",
+  );
+
+  const separationToggle = makeToggle(
+    "Rifts need the pieces to part",
+    simOptions.riftNeedsSeparation,
+  );
+  separationToggle.input.addEventListener("change", () => {
+    setSimOptions({ riftNeedsSeparation: separationToggle.input.checked });
+    onTuningChange();
+  });
+  tooltip.attach(
+    separationToggle.row,
+    "A plate only rifts where the two pieces would move apart under their own forces. Off, slab tension against strength is enough, and many pieces never part.",
+  );
+
+  const netWeldToggle = makeToggle("Weld only on net closing", simOptions.weldOnNetClosing);
+  netWeldToggle.input.addEventListener("change", () => {
+    setSimOptions({ weldOnNetClosing: netWeldToggle.input.checked });
+    onTuningChange();
+  });
+  tooltip.attach(
+    netWeldToggle.row,
+    "Plates weld only where their continents close on balance along the whole contact, and never just after breaking apart. Off, any closing stretch welds them.",
   );
 
   const readout = document.createElement("div");
@@ -1706,6 +2118,9 @@ export const createControls = (
     quietToggle.row,
     collapseToggle.row,
     holdAreaToggle.row,
+    compositionToggle.row,
+    separationToggle.row,
+    netWeldToggle.row,
     readout,
     massEl,
     diagnostics.pinned,
@@ -1742,6 +2157,11 @@ export const createControls = (
       { value: "density", label: "Crust density" },
       { value: "lithosphere", label: "Lithosphere" },
       { value: "sediment", label: "Sediment" },
+      { value: "composition", label: "Composition" },
+      { value: "cover", label: "Sediment cover" },
+      { value: "metamorphism", label: "Metamorphic facies" },
+      { value: "exhumation", label: "Exhumation" },
+      { value: "resources", label: "Resources" },
       { value: "heat-flow", label: "Heat flow" },
       { value: "mantle-temp", label: "Mantle temperature" },
       { value: "slab-graveyard", label: "Slab graveyard" },
@@ -1750,6 +2170,14 @@ export const createControls = (
     ],
     initial.viewMode,
   );
+
+  const resourceSelect = makeSelect(
+    RESOURCE_NAMES.map((name, r) => ({ value: String(r), label: name })),
+    String(initial.resource),
+  );
+  resourceSelect.addEventListener("change", () => {
+    store.set({ resource: Number(resourceSelect.value) });
+  });
 
   const elevationLabel = makeLabel();
   elevationLabel.textContent = "Elevation scale";
@@ -2049,6 +2477,8 @@ export const createControls = (
   const syncElevationChrome = (): void => {
     elevationBlock.style.display =
       store.get("viewMode") === "colour" ? "" : "none";
+    resourceSelect.style.display =
+      store.get("viewMode") === "resources" ? "" : "none";
     renderViewLegend();
   };
   syncElevationChrome();
@@ -2058,6 +2488,7 @@ export const createControls = (
     projectionControl.row,
     viewLabel,
     viewSelect,
+    resourceSelect,
     elevationBlock,
     viewLegend,
     waterBlock,
@@ -2088,6 +2519,9 @@ export const createControls = (
     }
     if (changed.has("viewMode")) {
       viewSelect.value = state.viewMode;
+    }
+    if (changed.has("resource")) {
+      resourceSelect.value = String(state.resource);
     }
     if (changed.has("hillshade")) {
       hillshadeToggle.input.checked = state.hillshade;

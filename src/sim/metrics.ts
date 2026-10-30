@@ -164,8 +164,34 @@ export interface WorldMetrics {
   continentalEroded: number;
   /** Share of continental crust, by mass, that is reworked sediment. */
   sedimentShare: number;
+  /** Share of continental crust, by mass, that is felsic igneous rock. */
+  felsicShare: number;
+  /** Share of continental crust, by mass, that is mafic igneous rock. */
+  maficShare: number;
+  /** Mean thickness (km) of loose sediment cover over continental crust, and over ocean floor. */
+  coverKmContinental: number;
+  coverKmOceanic: number;
+  /** Share of the rock eroded last tick that was loose cover rather than basement. */
+  coverErosionShare: number;
+  /** Share of continental area at each metamorphic facies, numbered as in `FACIES`. */
+  faciesShare: number[];
+  /** Mean km of basement that erosion has cut through over continental area. */
+  meanExhumation: number;
+  /** The same over continental crust weighted by keel (cratons), and over continental crust with arc magmatism in the last 200 Myr. */
+  cratonExhumation: number;
+  youngArcExhumation: number;
+  /** Share of land area, and of continental area, where each resource has better than even odds, in the order of `RESOURCE_NAMES`. */
+  /** Area-weighted mean density (g/cm³) of continental and of oceanic crust, and the standard deviation about each. */
+  meanContinentalDensity: number;
+  continentalDensitySpread: number;
+  meanOceanicDensity: number;
+  oceanicDensitySpread: number;
+  resourceLandShare: number[];
+  resourceContinentalShare: number[];
   /** Crust eroded from land and re-laid at the coast, as a share of continental mass per Myr. */
   sedimentFlux: number;
+  /** Of that, the share of continental mass per Myr that reached a trench and was subducted. */
+  sedimentSubducted: number;
   /** Share of the continental mass shed per Myr by over-thick roots. */
   delaminated: number;
   /**

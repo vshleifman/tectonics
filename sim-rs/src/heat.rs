@@ -13,7 +13,7 @@
 //! or with a supercontinent sitting on its mantle, keeps it.
 //!
 //! The excess over the modern mantle is in the units the primordial era has
-//! always used, 1 being about 250 K hotter. A hotter mantle is less viscous,
+//! always used, 1 being about 300 K hotter (`EXCESS_SCALE_K`). A hotter mantle is less viscous,
 //! so it drags less on the plates and they answer the forces on them faster.
 //! It melts more beneath a ridge, so it lays thicker ocean crust and the
 //! ridge itself stands higher. It also raises the plumes, holds back arcs,
@@ -195,6 +195,16 @@ impl PlanetHeat {
     }
 }
 
+/// How much of the hot-mantle brakes on arcs and on thickened floor are still
+/// on over a mantle `excess` hotter than today's: 1 while slabs are too weak
+/// for modern-style subduction, 0 once it is established, smoothly between (see
+/// `Tuning::modern_subduction_excess`).
+pub fn hot_slab(t: &Tuning, excess: f64) -> f64 {
+    let width = t.modern_subduction_width.max(1e-9);
+    let x = clamp01((excess - t.modern_subduction_excess) / width + 0.5);
+    x * x * (3.0 - 2.0 * x)
+}
+
 /// The tuning as the world sees it `elapsed` Myr in over a mantle `excess`
 /// hotter than today's (see the module docs), and with ridge push coming in
 /// over the first `seafloor_flattening_age`: the sea floor a world starts
@@ -203,9 +213,7 @@ impl PlanetHeat {
 /// replaces it.
 pub fn effective_tuning(t: &Tuning, elapsed: f64, excess: f64) -> Tuning {
     let mut eff = t.clone();
-    if excess > 0.0 {
-        eff.accretion_fraction *= clamp01(1.0 - t.hot_arc_suppression * excess);
-    }
+    eff.accretion_fraction *= clamp01(1.0 - t.hot_arc_suppression * hot_slab(t, excess));
     let thinner = (-t.viscosity_sensitivity * excess).exp();
     eff.mantle_drag *= thinner;
     eff.motion_response_time *= thinner;
@@ -237,6 +245,29 @@ mod tests {
         assert!((now - t.radiogenic_heat_now).abs() < 1e-9, "today {now} TW");
         let ratio = radiogenic_tw(&t, 4.5) / now;
         assert!((4.0..5.5).contains(&ratio), "4.5 Ga at {ratio:.2}x today's");
+    }
+
+    #[test]
+    fn the_hot_mantle_brakes_are_full_well_above_the_transition_and_off_well_below() {
+        let t = Tuning::default();
+        let (c, w) = (t.modern_subduction_excess, t.modern_subduction_width);
+        assert_eq!(hot_slab(&t, c + w), 1.0);
+        assert_eq!(hot_slab(&t, 1.5), 1.0);
+        assert_eq!(hot_slab(&t, c - w), 0.0);
+        assert_eq!(hot_slab(&t, 0.0), 0.0);
+        assert_eq!(hot_slab(&t, -0.5), 0.0);
+        assert!((hot_slab(&t, c) - 0.5).abs() < 1e-12);
+        assert!(hot_slab(&t, c + 0.05) > hot_slab(&t, c));
+    }
+
+    #[test]
+    fn arcs_build_freely_in_a_mantle_hot_enough_for_modern_subduction_but_not_above() {
+        let t = Tuning::default();
+        let arcs = |excess: f64| effective_tuning(&t, 1000.0, excess).accretion_fraction;
+        assert_eq!(arcs(0.3), t.accretion_fraction);
+        assert_eq!(arcs(0.0), t.accretion_fraction);
+        assert!(arcs(0.68) < t.accretion_fraction && arcs(0.68) > 0.0);
+        assert_eq!(arcs(1.0), 0.0);
     }
 
     #[test]

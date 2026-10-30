@@ -37,11 +37,13 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+use crate::boundaries::BoundaryField;
 use crate::cell_data::{CONTINENTAL, CellData, RIFT_FAR, RIFT_NEAR};
 use crate::mantle::MantleFlow;
-use crate::math::{Vec3, clamp01, cross, dot, len3, normalise, rotate};
+use crate::math::{Sym3, Vec3, clamp01, cross, dot, len3, normalise, rotate, solve_sym3};
 use crate::mesh::Mesh;
 use crate::par;
+use crate::plate_forces::{ArcForce, arc_force, arc_frame, cell_force, dome_push};
 use crate::plates::{OpeningRift, PlateData, PlateProps, PlateStress, suture_key};
 use crate::registry::Registry;
 use crate::scratch::Scratch;
@@ -84,6 +86,7 @@ pub fn update_rifting(
     data: &mut CellData,
     plates: &mut PlateData,
     mantle: &MantleFlow,
+    boundaries: &BoundaryField,
     dt_myr: f64,
     registry: &mut Registry,
     s: &mut Scratch,
@@ -163,15 +166,32 @@ pub fn update_rifting(
         let cells = &cells_by_plate[start[p]..start[p + 1]];
         if plates.opening.contains_key(&id) {
             stretch(
-                mesh, data, plates, id, cells, dt_myr, registry, min_piece, s, t, o,
+                mesh, data, plates, mantle, boundaries, id, cells, dt_myr, registry, min_piece, s,
+                t, o,
             );
             continue;
         }
         if area_of[p] < 2.0 * min_area {
             continue;
         }
-        let stress = plates.stress.get(&id);
-        let Some(rift) = pick_rift(mesh, data, cells, area_of[p], min_area, stress, t, o) else {
+        let stress = plates.stress.get(&id).cloned();
+        let balance = o.rift_needs_separation.then_some(Balance {
+            mantle,
+            boundaries,
+            plates: &*plates,
+        });
+        let picked = pick_rift(
+            mesh,
+            data,
+            cells,
+            area_of[p],
+            min_area,
+            stress.as_ref(),
+            balance.as_ref(),
+            t,
+            o,
+        );
+        let Some(rift) = picked else {
             continue;
         };
         // Continental lithosphere stretches for a long time before it parts;
@@ -335,6 +355,7 @@ fn pick_rift(
     plate_area: f64,
     min_area: f64,
     stress: Option<&PlateStress>,
+    balance: Option<&Balance>,
     t: &Tuning,
     o: &SimOptions,
 ) -> Option<Rift> {
@@ -413,9 +434,96 @@ fn pick_rift(
             clear_sides(data, cells);
             continue;
         }
+        if balance.is_some_and(|b| separation(mesh, data, b, cells, t) <= 0.0) {
+            clear_sides(data, cells);
+            continue;
+        }
         return Some(rift);
     }
     None
+}
+
+/// What the separation test reads besides the plate itself.
+struct Balance<'a> {
+    mantle: &'a MantleFlow,
+    boundaries: &'a BoundaryField,
+    plates: &'a PlateData,
+}
+
+/// How fast (rad/Myr, positive apart) the two sides of a laid-out rift would
+/// part, each moving under its own forces as `plate_forces` balances them:
+/// its drag on the mantle and across converging margins, mantle carry, ridge
+/// push, and slab pull and trench suction along its share of the plate's
+/// margins, plus the push of a hot dome straddling the new line. The mean
+/// along the line, by length; 0 if there is no line.
+fn separation(mesh: &Mesh, data: &CellData, b: &Balance, cells: &[i32], t: &Tuning) -> f64 {
+    let side = |i: usize| usize::from(data.rift_side[i] == RIFT_FAR);
+    let id = cells.first().map_or(-1, |&c| data.plate_id[c as usize]);
+    let mut drag: [Sym3; 2] = [[0.0; 6]; 2];
+    let mut torque: [Vec3; 2] = [[0.0; 3]; 2];
+    let add = |v: &mut [f64], x: &[f64]| v.iter_mut().zip(x).for_each(|(s, x)| *s += x);
+    // Arcs along the new line, each once, from its first cell.
+    let mut line: Vec<usize> = Vec::new();
+    for &cell in cells {
+        let i = cell as usize;
+        let k = side(i);
+        let cf = cell_force(mesh, data, b.mantle, t, i);
+        add(&mut drag[k], &cf.drag);
+        for tq in [cf.carry, cf.ridge].into_iter().flatten() {
+            add(&mut torque[k], &tq);
+        }
+        for nk in mesh.nbrs(i) {
+            let m = mesh.nbr[nk] as usize;
+            let Ok(a) = usize::try_from(mesh.nbr_arc[nk]) else {
+                continue;
+            };
+            if data.plate_id[m] == id {
+                if side(m) != k && mesh.arc_cells[a * 2] as usize == i {
+                    line.push(a);
+                }
+                continue;
+            }
+            arc_force(
+                mesh,
+                data,
+                b.boundaries,
+                &b.plates.breakups,
+                &b.plates.sutures,
+                t,
+                a,
+                |e| match e {
+                    ArcForce::Torque { cell, torque: tq, .. } if cell == i => add(&mut torque[k], &tq),
+                    ArcForce::Drag { cell, drag: d, .. } if cell == i => add(&mut drag[k], &d),
+                    _ => {}
+                },
+            );
+        }
+    }
+    // A dome under the line pushes the two sides apart.
+    for &a in &line {
+        let (ca, cb) = (mesh.arc_cells[a * 2] as usize, mesh.arc_cells[a * 2 + 1] as usize);
+        let Some(push) = dome_push(t, data, ca, cb, mesh.arc_length[a] as f64) else {
+            continue;
+        };
+        let (m, n) = arc_frame(mesh, a);
+        for (cell, sign) in [(ca, -1.0), (cb, 1.0)] {
+            let v = [n[0] * sign * push, n[1] * sign * push, n[2] * sign * push];
+            add(&mut torque[side(cell)], &cross(m, v));
+        }
+    }
+    let w = [solve_sym3(&drag[0], torque[0]), solve_sym3(&drag[1], torque[1])];
+    let (mut opening, mut length) = (0.0, 0.0);
+    for &a in &line {
+        let (ca, cb) = (mesh.arc_cells[a * 2] as usize, mesh.arc_cells[a * 2 + 1] as usize);
+        let (wa, wb) = (w[side(ca)], w[side(cb)]);
+        let (m, n) = arc_frame(mesh, a);
+        // Closing speed, as in `boundaries.rs`: positive toward each other.
+        let closing = dot(cross([wa[0] - wb[0], wa[1] - wb[1], wa[2] - wb[2]], m), n);
+        let len = mesh.arc_length[a] as f64;
+        opening -= closing * len;
+        length += len;
+    }
+    if length > 0.0 { opening / length } else { 0.0 }
 }
 
 #[inline]
@@ -780,6 +888,8 @@ fn stretch(
     mesh: &Mesh,
     data: &mut CellData,
     plates: &mut PlateData,
+    mantle: &MantleFlow,
+    boundaries: &BoundaryField,
     id: i32,
     cells: &[i32],
     dt_myr: f64,
@@ -791,6 +901,15 @@ fn stretch(
 ) {
     fill_sides(mesh, data, cells, s);
     let zone = zone_of(mesh, data, cells, id);
+    // Whether the two pieces still move apart under their own forces.
+    let parting = !o.rift_needs_separation || {
+        let balance = Balance {
+            mantle,
+            boundaries,
+            plates: &*plates,
+        };
+        separation(mesh, data, &balance, cells, t) > 0.0
+    };
 
     let omega = plates.by_id.get(&id).map_or([0.0; 3], |p| p.omega);
     let Some(rift) = plates.opening.get_mut(&id) else {
@@ -829,7 +948,7 @@ fn stretch(
     }
     let drive = spread_tension(mesh, cells, normal, pull) + t.insulation_drive * heat / weight;
     let strength = t.rift_strength * strength / weight;
-    if drive < (1.0 - RIFT_HOLD) * strength {
+    if drive < (1.0 - RIFT_HOLD) * strength || !parting {
         // Stalled: the thinned zone stays behind as a weak scar.
         let margin = t.rift_margin_weakness as f32;
         for &i in &zone {
@@ -1217,8 +1336,10 @@ mod tests {
             min_rift_duration: 5.0,
             ..Tuning::default()
         };
+        // Tension set by hand, with no slabs behind it to move the pieces.
         let o = SimOptions {
             supercontinent_insulation: false,
+            rift_needs_separation: false,
             ..SimOptions::default()
         };
         plates.stress.insert(
@@ -1237,6 +1358,7 @@ mod tests {
             &mut data,
             &mut plates,
             &mantle,
+            &BoundaryField::new(mesh.cell_count, mesh.arc_count()),
             t.dt_myr,
             &mut registry,
             &mut s,
@@ -1254,6 +1376,7 @@ mod tests {
             &mut data,
             &mut plates,
             &mantle,
+            &BoundaryField::new(mesh.cell_count, mesh.arc_count()),
             t.dt_myr,
             &mut registry,
             &mut s,
@@ -1305,6 +1428,7 @@ mod tests {
             &mut data,
             &mut plates,
             &mantle,
+            &BoundaryField::new(mesh.cell_count, mesh.arc_count()),
             t.ocean_weakness_decay_time,
             &mut registry,
             &mut s,

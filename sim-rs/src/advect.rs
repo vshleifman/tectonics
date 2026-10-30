@@ -6,12 +6,18 @@
 
 use crate::arcs::{arc_site, rings_for};
 use crate::boundaries::{BoundaryField, CONVERGENT};
-use crate::cell_data::{CONTINENTAL, CellData, OCEANIC, mixed_share};
+use crate::cell_data::{
+    CONTINENTAL, CellData, FRESH_FLOOR, LANE_ARC_EXHUMED, LANE_EXHUMED, LANE_PEAK_PRESSURE,
+    LANE_PEAK_TEMP, LANE_SEDIMENT, LANES, Lanes, Mix, NEVER, OCEANIC, arc_mix, clamp_lane, is_cover,
+    mixed_lane,
+};
+use crate::elevation::composition_density;
 use crate::lithosphere::thinned;
 use crate::mesh::Mesh;
 use crate::par::{self, Disjoint};
 use crate::plates::PlateData;
 use crate::scratch::{MAX_NBRS, PackedPlates, Scratch};
+use crate::slabs::resists_subduction;
 use crate::tuning::{CRATON_KEEL, Tuning};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -37,24 +43,28 @@ pub struct AdvectionField {
     pub welded_continental: Vec<f32>,
     pub welded_age: Vec<f32>,
     pub welded_keel: Vec<f32>,
-    /// `welded` times its plume share, then the same for the welded crust
-    /// spilling on to neighbours: tracer mass in transit.
-    pub welded_share: Vec<f32>,
-    spill_share: Vec<f32>,
-    spill_share_next: Vec<f32>,
-    spill_share_in: Vec<f32>,
-    /// The same for the sediment tracer.
-    pub welded_sediment: Vec<f32>,
-    spill_sediment: Vec<f32>,
-    spill_sediment_next: Vec<f32>,
-    spill_sediment_in: Vec<f32>,
+    /// `welded` times each composition lane's share, then the same for the
+    /// welded crust spilling on to neighbours: lane mass in transit.
+    pub welded_lanes: Lanes,
+    spill: Lanes,
+    spill_next: Lanes,
+    spill_in: Lanes,
+    /// Crust taken in by each cell from lateral spreading, before it is
+    /// netted against what it gave away.
+    spill_inflow: Vec<f32>,
+    /// The arc age of the youngest crust welded onto each cell this step, or
+    /// [`NEVER`].
+    welded_arc: Vec<f32>,
+    /// The youngest arc age of crust handed to each cell by spill or spreading
+    /// this round, or [`NEVER`]; back to all `NEVER` between rounds.
+    arc_in: Vec<f32>,
     pub rift_cell: Vec<u8>,
     pub subducted: Vec<u8>,
     /// Thickness each cell took in this step from lateral spreading, net of
     /// what it gave away.
     pub spread_in: Vec<f32>,
-    /// Thickness to strip from a continental overriding cell this step, from
-    /// ocean subducting under it.
+    /// Thickness to strip from an overriding cell this step, continental or
+    /// arc crust over ocean, from ocean subducting under it.
     pub margin_eroded: Vec<f32>,
     pub live_mass: f64,
     pub subducted_this_step: f64,
@@ -69,8 +79,37 @@ pub struct AdvectionField {
     /// made or lost.
     pub sediment_eroded: f64,
     pub sediment_deposited: f64,
+    /// Of `sediment_eroded`, the part that was loose cover rather than basement.
+    pub sediment_eroded_cover: f64,
+    /// Of `sediment_eroded`, the part that reached a trench and went down with
+    /// the plate instead of being deposited.
+    #[serde(default)]
+    pub sediment_subducted: f64,
+    /// Of `sediment_deposited`, the part laid on the overriding edge of a
+    /// trench (a cell with slab beneath it), and the part laid within one cell
+    /// of such an edge on the same plate, the edge included.
+    #[serde(default)]
+    pub sediment_deposited_trench_edge: f64,
+    #[serde(default)]
+    pub sediment_deposited_near_trench: f64,
     /// Mass shed this step by roots past the thickness cap.
     pub delaminated_this_step: f64,
+    /// Crust mass this step that went into arcs behind trenches, and crust
+    /// mass too buoyant to subduct that welded on instead, by whether it was
+    /// continental.
+    #[serde(default)]
+    pub arc_accreted_this_step: f64,
+    #[serde(default)]
+    pub welded_oceanic_this_step: f64,
+    /// Sediment on ocean floor that went down at a trench this step, with the
+    /// crust beneath it.
+    #[serde(default)]
+    pub sediment_carried_down_this_step: f64,
+    /// Oceanic arc crust the trench scraped off this step (see `margin_erosion`).
+    #[serde(default)]
+    pub arc_eroded_this_step: f64,
+    #[serde(default)]
+    pub welded_continental_this_step: f64,
     /// Accreted mass this step that could not be taken up at the thickening cap
     /// and foundered into the mantle instead of spilling.
     pub foundered_this_step: f64,
@@ -100,6 +139,9 @@ pub struct AdvectionField {
     pub overrun: Vec<u8>,
     /// Continental area recycled into the mantle at active margins this step.
     pub continental_recycled: f64,
+    /// Crust mass that fixed-rate recycling took this tick.
+    #[serde(default)]
+    pub continental_recycled_mass: f64,
     /// Recycling owed but not yet taken, as area: margins are taken a whole
     /// cell at a time.
     pub recycle_debt: f64,
@@ -134,14 +176,13 @@ impl AdvectionField {
             welded_continental: vec![0.0; n],
             welded_age: vec![0.0; n],
             welded_keel: vec![0.0; n],
-            welded_share: vec![0.0; n],
-            spill_share: vec![0.0; n],
-            spill_share_next: vec![0.0; n],
-            spill_share_in: vec![0.0; n],
-            welded_sediment: vec![0.0; n],
-            spill_sediment: vec![0.0; n],
-            spill_sediment_next: vec![0.0; n],
-            spill_sediment_in: vec![0.0; n],
+            welded_lanes: Lanes::new(n),
+            spill: Lanes::new(n),
+            spill_next: Lanes::new(n),
+            spill_in: Lanes::new(n),
+            spill_inflow: vec![0.0; n],
+            welded_arc: vec![NEVER; n],
+            arc_in: vec![NEVER; n],
             rift_cell: vec![0; n],
             subducted: vec![0; n],
             spread_in: vec![0.0; n],
@@ -153,8 +194,17 @@ impl AdvectionField {
             created_total: 0.0,
             eroded_this_step: 0.0,
             delaminated_this_step: 0.0,
+            arc_accreted_this_step: 0.0,
+            welded_oceanic_this_step: 0.0,
+            arc_eroded_this_step: 0.0,
+            sediment_carried_down_this_step: 0.0,
+            welded_continental_this_step: 0.0,
             sediment_eroded: 0.0,
             sediment_deposited: 0.0,
+            sediment_eroded_cover: 0.0,
+            sediment_subducted: 0.0,
+            sediment_deposited_trench_edge: 0.0,
+            sediment_deposited_near_trench: 0.0,
             foundered_this_step: 0.0,
             continentalised_by_accretion: 0.0,
             continentalised_by_spreading: 0.0,
@@ -167,6 +217,7 @@ impl AdvectionField {
             piled: vec![0; n],
             overrun: vec![0; n],
             continental_recycled: 0.0,
+            continental_recycled_mass: 0.0,
             recycle_debt: 0.0,
             continental_growth: 0.0,
             continental_share_before: None,
@@ -181,8 +232,13 @@ impl AdvectionField {
 
     /// Everything tallied afresh each step, so a tick taken in several steps
     /// can report its sum.
-    pub fn step_tallies_mut(&mut self) -> [&mut f64; 18] {
+    pub fn step_tallies_mut(&mut self) -> [&mut f64; 23] {
         [
+            &mut self.sediment_carried_down_this_step,
+            &mut self.arc_eroded_this_step,
+            &mut self.arc_accreted_this_step,
+            &mut self.welded_oceanic_this_step,
+            &mut self.welded_continental_this_step,
             &mut self.subducted_this_step,
             &mut self.created_this_step,
             &mut self.eroded_this_step,
@@ -205,6 +261,26 @@ impl AdvectionField {
     }
 }
 
+/// Whether ocean going down beneath a cell scrapes crust off its underside:
+/// a continental margin, or an arc's crust thickened past ridge crust (the
+/// Tonga and Izu-Bonin-Mariana forearcs are eroding today). The rate per unit
+/// of ocean consumed is `margin_erosion` either way.
+pub(crate) fn scraped_by_trench(t: &Tuning, crust_type: u8, thickness: f64) -> bool {
+    crust_type == CONTINENTAL || thickness > t.ridge_crust_thickness
+}
+
+/// Km a trench scrapes from a cell `h` km thick that it would take `eroded_h`
+/// from: continental crust down to the rift floor, an arc on ocean floor down
+/// to ridge crust and no further.
+pub(crate) fn margin_take(t: &Tuning, crust_type: u8, h: f64, eroded_h: f64) -> f64 {
+    let floor = if crust_type == CONTINENTAL {
+        t.rift_thickness_floor
+    } else {
+        t.ridge_crust_thickness
+    };
+    eroded_h.min((h - floor).max(0.0)).max(0.0)
+}
+
 /// A key that sorts ascending by descending `score`, then ascending `index`:
 /// the float's bits made monotonic and inverted, above the index.
 #[inline]
@@ -216,6 +292,33 @@ pub(crate) fn descending_key(score: f32, index: u32) -> u64 {
         bits | 0x8000_0000
     };
     ((!ordered as u64) << 32) | index as u64
+}
+
+/// How felsic the crust an arc builds is, by the crust it builds on: an arc on
+/// a continent assimilates it and comes out more evolved than one in the ocean.
+fn arc_felsic(t: &Tuning, crust_type: u8) -> f64 {
+    if crust_type == CONTINENTAL {
+        t.continental_arc_felsic
+    } else {
+        t.island_arc_felsic
+    }
+}
+
+/// The makeup of the crust an arc builds on `crust_type`. It is made from
+/// ocean floor that went down the trench and came back, so it carries the
+/// pressure and temperature of the accretionary wedge it passed through.
+fn accreted_mix(t: &Tuning, crust_type: u8) -> Mix {
+    let mut mix = arc_mix(arc_felsic(t, crust_type));
+    mix[LANE_PEAK_TEMP] = t.subduction_peak_temp;
+    mix[LANE_PEAK_PRESSURE] = t.subduction_peak_pressure;
+    mix
+}
+
+/// Note that the crust of cell `d` has just taken in arc crust: the erosion
+/// since is counted from here.
+fn snapshot_arc_exhumation(lanes: &mut Lanes, d: usize) {
+    let exhumed = lanes.lane(LANE_EXHUMED)[d];
+    lanes.lane_mut(LANE_ARC_EXHUMED)[d] = exhumed;
 }
 
 /// Add `x` to an `f32` slot, with the sum taken in double precision.
@@ -251,8 +354,8 @@ pub fn advect(
     out.welded_continental.fill(0.0);
     out.welded_age.fill(0.0);
     out.welded_keel.fill(0.0);
-    out.welded_share.fill(0.0);
-    out.welded_sediment.fill(0.0);
+    out.welded_lanes.values_mut().fill(0.0);
+    out.welded_arc.fill(NEVER);
     out.rift_cell.fill(0);
     out.subducted.fill(0);
     out.spread_in.fill(0.0);
@@ -332,8 +435,8 @@ pub fn advect(
     // crumples against it, as India's crust does against Asia while the old
     // Indian shield rides through intact.
     let overrides = |a: usize, b: usize| -> bool {
-        let a_cont = src.crust_type[a] == CONTINENTAL;
-        let b_cont = src.crust_type[b] == CONTINENTAL;
+        let a_cont = resists_subduction(t, src, a);
+        let b_cont = resists_subduction(t, src, b);
         if a_cont != b_cont {
             return a_cont;
         }
@@ -362,7 +465,7 @@ pub fn advect(
     // Lower rides over: continent over any ocean, and cratonic margins over
     // younger continent, as in `overrides`.
     let buoyancy = |cell: usize| -> f64 {
-        if src.crust_type[cell] == CONTINENTAL {
+        if resists_subduction(t, src, cell) {
             -t.max_oceanic_age * (1.0 + src.keel[cell] as f64)
         } else {
             src.age[cell] as f64
@@ -405,7 +508,7 @@ pub fn advect(
         if mine >= theirs {
             continue;
         }
-        if src.crust_type[d] == CONTINENTAL && src.crust_type[cell] != CONTINENTAL {
+        if resists_subduction(t, src, d) && !resists_subduction(t, src, cell) {
             continue;
         }
         // Nothing overruns a craton but a deeper-rooted one.
@@ -421,8 +524,8 @@ pub fn advect(
         if foothold < MIN_FOOTHOLD {
             continue;
         }
-        if src.crust_type[d] == CONTINENTAL
-            && src.crust_type[cell] == CONTINENTAL
+        if resists_subduction(t, src, d)
+            && resists_subduction(t, src, cell)
             && src.thickness[cell] as f64 + src.thickness[d] as f64 > thickness_cap
         {
             continue;
@@ -463,7 +566,7 @@ pub fn advect(
         let closing = arc >= 0 && boundaries.arc_kind[arc as usize] == CONVERGENT;
         let locked = if !closing {
             overrides(cell, ahead)
-        } else if src.crust_type[cell] == CONTINENTAL {
+        } else if resists_subduction(t, src, cell) {
             true
         } else {
             let rides_over = margins
@@ -802,13 +905,15 @@ pub fn advect(
     };
     gather(&mut dst.elevation, &src.elevation, 0.0);
     gather(&mut dst.age, &src.age, 0.0);
-    gather(&mut dst.density, &src.density, t.oceanic_density as f32);
+    gather(&mut dst.density, &src.density, t.mafic_density as f32);
     gather(&mut dst.weakness, &src.weakness, 0.0);
     gather(&mut dst.slab, &src.slab, 0.0);
     gather(&mut dst.keel, &src.keel, 0.0);
     gather(&mut dst.lithosphere, &src.lithosphere, 0.0);
-    gather(&mut dst.plume_share, &src.plume_share, 0.0);
-    gather(&mut dst.sediment_share, &src.sediment_share, 0.0);
+    for l in 0..LANES {
+        gather(dst.lanes.lane_mut(l), src.lanes.lane(l), FRESH_FLOOR[l]);
+    }
+    gather(&mut dst.arc_age, &src.arc_age, NEVER);
     par::fill(&mut dst.crust_type, |d| match from[d] {
         RIFT => OCEANIC,
         f => src.crust_type[f as usize],
@@ -834,6 +939,11 @@ pub fn advect(
 
     // --- Pass 3: dispose of the crust that had nowhere to go -----------------
     out.torn_continent = 0.0;
+    out.arc_accreted_this_step = 0.0;
+    out.welded_oceanic_this_step = 0.0;
+    out.welded_continental_this_step = 0.0;
+    out.arc_eroded_this_step = 0.0;
+    out.sediment_carried_down_this_step = 0.0;
     for cell in 0..n {
         if s.claimed[cell] != 0 || src.plate_id[cell] < 0 {
             continue;
@@ -841,31 +951,51 @@ pub fn advect(
         let ahead = s.forward[cell];
         let blocked_by_other = ahead >= 0 && src.plate_id[ahead as usize] != src.plate_id[cell];
         let mass = area(cell) * src.thickness[cell] as f64;
-        if src.crust_type[cell] == CONTINENTAL {
+        if resists_subduction(t, src, cell) {
+            // Crust too buoyant to go down: continent, or an arc or plateau
+            // that floats. Only continent carries a keel and a continental age.
+            let continental = src.crust_type[cell] == CONTINENTAL;
             let kept = if s.eaten[cell] != 0 {
-                out.overrun[cell] = 1;
+                if continental {
+                    out.overrun[cell] = 1;
+                }
                 // Scraped off by the plate that took the cell: nearly all of it
                 // welds on, the rest is the trench's erosion of the margin.
                 let eroded = t.subduction_erosion * t.craton_wear(src.keel[cell]) * mass;
                 subducted_this_step += eroded;
                 eroded_this_step += eroded;
                 out.subducted[cell] = 1;
-                if out.rift_cell[cell] == 0 {
+                if continental && out.rift_cell[cell] == 0 {
                     dst.crust_type[cell] = CONTINENTAL;
-                    dst.density[cell] = t.continental_density as f32;
                 }
                 (mass - eroded) / area(cell)
             } else {
-                out.overrun[cell] = 2;
-                out.torn_continent += area(cell);
+                if continental {
+                    out.overrun[cell] = 2;
+                    out.torn_continent += area(cell);
+                }
                 mass / area(cell)
             };
             add_f32(&mut out.welded[cell], kept);
-            add_f32(&mut out.welded_share[cell], kept * src.plume_share[cell] as f64);
-            add_f32(&mut out.welded_sediment[cell], kept * src.sediment_share[cell] as f64);
-            add_f32(&mut out.welded_continental[cell], kept);
-            add_f32(&mut out.welded_age[cell], kept * src.age[cell] as f64);
-            add_f32(&mut out.welded_keel[cell], kept * src.keel[cell] as f64);
+            if continental {
+                out.welded_continental_this_step += kept * area(cell);
+            } else {
+                out.welded_oceanic_this_step += kept * area(cell);
+            }
+            // Cover on welded crust is deformed into the basement of the cell it
+            // welds onto: it carries on as sediment, not as cover.
+            for l in (0..LANES).filter(|&l| !is_cover(l)) {
+                add_f32(
+                    &mut out.welded_lanes.lane_mut(l)[cell],
+                    kept * src.lanes.lane(l)[cell] as f64,
+                );
+            }
+            out.welded_arc[cell] = out.welded_arc[cell].min(src.arc_age[cell]);
+            if continental {
+                add_f32(&mut out.welded_continental[cell], kept);
+                add_f32(&mut out.welded_age[cell], kept * src.age[cell] as f64);
+                add_f32(&mut out.welded_keel[cell], kept * src.keel[cell] as f64);
+            }
         } else if s.eaten[cell] != 0 || blocked_by_other {
             let into = if s.eaten[cell] != 0 {
                 cell
@@ -874,11 +1004,15 @@ pub fn advect(
             };
             let accreted = t.accretion_fraction * mass;
             subducted_this_step += mass - accreted;
+            out.sediment_carried_down_this_step +=
+                (mass - accreted) * src.lanes.lane(LANE_SEDIMENT)[cell] as f64;
             // The arc builds behind the trench, not at it.
             let arc = arc_site(mesh, &dst.plate_id, &out.rift_cell, into, arc_rings);
             add_f32(&mut out.accreted[arc], accreted / area(arc));
+            out.arc_accreted_this_step += accreted;
             out.subducted[into] = 1;
-            if dst.crust_type[into] == CONTINENTAL && out.rift_cell[into] == 0 {
+            let scraped = scraped_by_trench(t, dst.crust_type[into], dst.thickness[into] as f64);
+            if scraped && out.rift_cell[into] == 0 {
                 add_f32(
                     &mut out.margin_eroded[into],
                     t.margin_erosion * mass / area(into),
@@ -886,14 +1020,15 @@ pub fn advect(
             }
         } else {
             add_f32(&mut out.welded[cell], mass / area(cell));
-            add_f32(
-                &mut out.welded_share[cell],
-                mass / area(cell) * src.plume_share[cell] as f64,
-            );
-            add_f32(
-                &mut out.welded_sediment[cell],
-                mass / area(cell) * src.sediment_share[cell] as f64,
-            );
+            out.welded_arc[cell] = out.welded_arc[cell].min(src.arc_age[cell]);
+            // Cover on welded crust is deformed into the basement of the cell it
+            // welds onto: it carries on as sediment, not as cover.
+            for l in (0..LANES).filter(|&l| !is_cover(l)) {
+                add_f32(
+                    &mut out.welded_lanes.lane_mut(l)[cell],
+                    mass / area(cell) * src.lanes.lane(l)[cell] as f64,
+                );
+            }
         }
     }
 
@@ -912,11 +1047,12 @@ pub fn advect(
     // order.
     let gains = {
         let thickness = Disjoint::new(&mut dst.thickness);
-        let plume_share = Disjoint::new(&mut dst.plume_share);
-        let sediment_share = Disjoint::new(&mut dst.sediment_share);
+        let lanes = dst.lanes.split_mut().map(Disjoint::new);
+        let arc_age = Disjoint::new(&mut dst.arc_age);
         let margin_eroded = Disjoint::new(&mut out.margin_eroded);
         let surplus = Disjoint::new(&mut surplus);
         let (keel, rift_cell, accreted) = (&dst.keel, &out.rift_cell, &out.accreted);
+        let crust_type = &dst.crust_type;
         par::chunks(n, |cells| {
             let (mut stripped, mut held) = (Vec::new(), Vec::new());
             // Safety: iteration `d` alone touches index `d` of each.
@@ -929,10 +1065,12 @@ pub fn advect(
                         * t.craton_wear(keel[d]);
                     if eroded_h > 0.0 && rift_cell[d] == 0 {
                         let h = thickness.get(d) as f64;
-                        let available = (h - t.rift_thickness_floor).max(0.0);
-                        let take = eroded_h.min(available);
-                        thickness.set(d, (h - take) as f32);
-                        stripped.push(take * area(d));
+                        let continental = crust_type[d] == CONTINENTAL;
+                        let take = margin_take(t, crust_type[d], h, eroded_h);
+                        if take > 0.0 {
+                            thickness.set(d, (h - take) as f32);
+                            stripped.push((take * area(d), continental));
+                        }
                     }
                     let room = if rift_cell[d] != 0 { 0.0 } else { max_gain as f32 };
                     margin_eroded.set(d, room);
@@ -947,8 +1085,16 @@ pub fn advect(
                         (thickness_cap - h).max(0.0)
                     };
                     let take = acc.min(room as f64).min(cap_room);
-                    plume_share.set(d, mixed_share(plume_share.get(d), h, take, 0.0));
-                    sediment_share.set(d, mixed_share(sediment_share.get(d), h, take, 0.0));
+                    // An arc builds crust part mafic, part felsic, by what it
+                    // builds on.
+                    let arc = accreted_mix(t, crust_type[d]);
+                    for (l, (lane, &share)) in lanes.iter().zip(&arc).enumerate() {
+                        lane.set(d, mixed_lane(l, lane.get(d), h, take, share));
+                    }
+                    if take > 0.0 {
+                        arc_age.set(d, 0.0);
+                        lanes[LANE_ARC_EXHUMED].set(d, lanes[LANE_EXHUMED].get(d));
+                    }
                     thickness.set(d, (h + take) as f32);
                     margin_eroded.set(d, (room as f64 - take) as f32);
                     let left = (acc - take) as f32;
@@ -962,8 +1108,12 @@ pub fn advect(
         })
     };
     for (stripped, held) in gains {
-        for mass in stripped {
-            eroded_this_step += mass;
+        for (mass, continental) in stripped {
+            if continental {
+                eroded_this_step += mass;
+            } else {
+                out.arc_eroded_this_step += mass;
+            }
             subducted_this_step += mass;
         }
         active.extend(held);
@@ -1042,10 +1192,16 @@ pub fn advect(
                 continue;
             }
             let place = inc.min(accreting_room(dst, &out.rift_cell, &out.margin_eroded, d));
-            dst.plume_share[d] =
-                mixed_share(dst.plume_share[d], dst.thickness[d] as f64, place, 0.0);
-            dst.sediment_share[d] =
-                mixed_share(dst.sediment_share[d], dst.thickness[d] as f64, place, 0.0);
+            dst.lanes.mix(
+                d,
+                dst.thickness[d] as f64,
+                place,
+                &accreted_mix(t, dst.crust_type[d]),
+            );
+            if place > 0.0 {
+                dst.arc_age[d] = 0.0;
+                snapshot_arc_exhumation(&mut dst.lanes, d);
+            }
             add_f32(&mut dst.thickness[d], place);
             add_f32(&mut out.margin_eroded[d], -place);
             add_f32(&mut next[d], inc - place);
@@ -1066,17 +1222,16 @@ pub fn advect(
     }
     active.clear();
 
-    out.spill_share.fill(0.0);
-    out.spill_sediment.fill(0.0);
+    out.spill.values_mut().fill(0.0);
     let spilling = {
         let age = Disjoint::new(&mut dst.age);
         let keel = Disjoint::new(&mut dst.keel);
-        let plume_share = Disjoint::new(&mut dst.plume_share);
-        let sediment_share = Disjoint::new(&mut dst.sediment_share);
+        let lanes = dst.lanes.split_mut().map(Disjoint::new);
+        let arc_age = Disjoint::new(&mut dst.arc_age);
         let thickness = Disjoint::new(&mut dst.thickness);
         let surplus = Disjoint::new(&mut surplus);
-        let spill_share = Disjoint::new(&mut out.spill_share);
-        let spill_sediment = Disjoint::new(&mut out.spill_sediment);
+        let spill = out.spill.split_mut().map(Disjoint::new);
+        let (welded_lanes, welded_arc) = (&out.welded_lanes, &out.welded_arc);
         let crust_type = &dst.crust_type;
         par::filter_map(n, |d| {
             let welded = out.welded[d] as f64;
@@ -1085,8 +1240,9 @@ pub fn advect(
             }
             // Safety: iteration `d` alone touches index `d` of each.
             unsafe {
-                let welded_tracer = (out.welded_share[d] as f64 / welded).clamp(0.0, 1.0);
-                let welded_sediment = (out.welded_sediment[d] as f64 / welded).clamp(0.0, 1.0);
+                let welded_mix: Mix = std::array::from_fn(|l| {
+                    clamp_lane(l, welded_lanes.lane(l)[d] as f64 / welded)
+                });
                 let h = thickness.get(d);
                 let held = if out.rift_cell[d] != 0 {
                     0.0
@@ -1116,20 +1272,26 @@ pub fn advect(
                     let deepest = k.max(welded_keel as f32);
                     keel.set(d, if deepest >= CRATON_KEEL { deepest } else { mixed });
                 }
-                plume_share.set(d, mixed_share(plume_share.get(d), h as f64, held, welded_tracer));
-                sediment_share.set(d, mixed_share(sediment_share.get(d), h as f64, held, welded_sediment));
+                for l in 0..LANES {
+                    lanes[l].set(d, mixed_lane(l, lanes[l].get(d), h as f64, held, welded_mix[l]));
+                }
+                // The cell keeps the youngest arc the welded crust brought,
+                // even when it is passed on: the neighbours it spills to take
+                // it from here.
+                arc_age.set(d, arc_age.get(d).min(welded_arc[d]));
                 thickness.set(d, (h as f64 + held) as f32);
                 let left = (welded - held) as f32;
                 surplus.set(d, left);
-                spill_share.set(d, ((welded - held) * welded_tracer) as f32);
-                spill_sediment.set(d, ((welded - held) * welded_sediment) as f32);
+                for l in 0..LANES {
+                    spill[l].set(d, ((welded - held) * welded_mix[l]) as f32);
+                }
                 (left > 0.0).then_some(d)
             }
         })
     };
     active.extend(spilling);
 
-    // As above; the plume tracer travels with the crust in `spill_share`.
+    // As above; the composition lanes travel with the crust in `spill`.
     let welding_room = |dst: &CellData, rift_cell: &[u8], m: usize| -> f64 {
         if rift_cell[m] != 0 {
             0.0
@@ -1137,10 +1299,8 @@ pub fn advect(
             (thickness_cap - dst.thickness[m] as f64).max(0.0) as f32 as f64
         }
     };
-    out.spill_share_in.fill(0.0);
-    out.spill_share_next.fill(0.0);
-    out.spill_sediment_in.fill(0.0);
-    out.spill_sediment_next.fill(0.0);
+    out.spill_in.values_mut().fill(0.0);
+    out.spill_next.values_mut().fill(0.0);
     for round in 0..PLACEMENT_ROUNDS {
         if active.is_empty() {
             break;
@@ -1148,8 +1308,8 @@ pub fn advect(
         touched.clear();
         for &d in &active {
             let have = surplus[d] as f64;
-            let tracer = (out.spill_share[d] as f64 / have).clamp(0.0, 1.0);
-            let sediment = (out.spill_sediment[d] as f64 / have).clamp(0.0, 1.0);
+            let carried: Mix =
+                std::array::from_fn(|l| clamp_lane(l, out.spill.lane(l)[d] as f64 / have));
             let own = dst.plate_id[d];
             let accepts = |m: usize| dst.plate_id[m] == own && out.rift_cell[m] == 0;
             let mut room = 0.0f64;
@@ -1176,8 +1336,9 @@ pub fn advect(
             }
             if weight <= 0.0 {
                 add_f32(&mut next[d], have);
-                add_f32(&mut out.spill_share_next[d], have * tracer);
-                add_f32(&mut out.spill_sediment_next[d], have * sediment);
+                for l in 0..LANES {
+                    add_f32(&mut out.spill_next.lane_mut(l)[d], have * carried[l]);
+                }
                 continue;
             }
             for k in range(d) {
@@ -1191,8 +1352,10 @@ pub fn advect(
                 }
                 let moved = have * (w / weight) * area(d) / area(m);
                 add_f32(&mut incoming[m], moved);
-                add_f32(&mut out.spill_share_in[m], moved * tracer);
-                add_f32(&mut out.spill_sediment_in[m], moved * sediment);
+                for l in 0..LANES {
+                    add_f32(&mut out.spill_in.lane_mut(l)[m], moved * carried[l]);
+                }
+                out.arc_in[m] = out.arc_in[m].min(dst.arc_age[d]);
                 if s.u8a[m] == 0 {
                     s.u8a[m] = 1;
                     touched.push(m);
@@ -1203,37 +1366,38 @@ pub fn advect(
         for &d in &touched {
             s.u8a[d] = 0;
             let inc = incoming[d] as f64;
-            let carried = out.spill_share_in[d] as f64;
-            let carried_sediment = out.spill_sediment_in[d] as f64;
+            let carried: [f64; LANES] = std::array::from_fn(|l| out.spill_in.lane(l)[d] as f64);
             incoming[d] = 0.0;
-            out.spill_share_in[d] = 0.0;
-            out.spill_sediment_in[d] = 0.0;
+            // Crust handed on carries its arc age with it, the cell it lands
+            // on keeping the youngest.
+            dst.arc_age[d] = dst.arc_age[d].min(out.arc_in[d]);
+            out.arc_in[d] = NEVER;
+            for l in 0..LANES {
+                out.spill_in.lane_mut(l)[d] = 0.0;
+            }
             if inc == 0.0 {
                 continue;
             }
-            let tracer = (carried / inc).clamp(0.0, 1.0);
-            let sediment = (carried_sediment / inc).clamp(0.0, 1.0);
+            let arriving: Mix = std::array::from_fn(|l| clamp_lane(l, carried[l] / inc));
             let place = if last {
                 inc
             } else {
                 inc.min(welding_room(dst, &out.rift_cell, d))
             };
-            dst.plume_share[d] =
-                mixed_share(dst.plume_share[d], dst.thickness[d] as f64, place, tracer);
-            dst.sediment_share[d] =
-                mixed_share(dst.sediment_share[d], dst.thickness[d] as f64, place, sediment);
+            dst.lanes.mix(d, dst.thickness[d] as f64, place, &arriving);
             add_f32(&mut dst.thickness[d], place);
             add_f32(&mut next[d], inc - place);
-            add_f32(&mut out.spill_share_next[d], (inc - place) * tracer);
-            add_f32(&mut out.spill_sediment_next[d], (inc - place) * sediment);
+            for l in 0..LANES {
+                add_f32(&mut out.spill_next.lane_mut(l)[d], (inc - place) * arriving[l]);
+            }
         }
         std::mem::swap(&mut surplus, &mut next);
-        std::mem::swap(&mut out.spill_share, &mut out.spill_share_next);
-        std::mem::swap(&mut out.spill_sediment, &mut out.spill_sediment_next);
+        std::mem::swap(&mut out.spill, &mut out.spill_next);
         for &d in &active {
             next[d] = 0.0;
-            out.spill_share_next[d] = 0.0;
-            out.spill_sediment_next[d] = 0.0;
+            for l in 0..LANES {
+                out.spill_next.lane_mut(l)[d] = 0.0;
+            }
         }
         active.extend_from_slice(&touched);
         active.retain(|&d| surplus[d] > 0.0);
@@ -1241,12 +1405,10 @@ pub fn advect(
         active.dedup();
     }
     for &d in &active {
-        let tracer = (out.spill_share[d] / surplus[d]).clamp(0.0, 1.0) as f64;
-        let sediment = (out.spill_sediment[d] / surplus[d]).clamp(0.0, 1.0) as f64;
-        dst.plume_share[d] =
-            mixed_share(dst.plume_share[d], dst.thickness[d] as f64, surplus[d] as f64, tracer);
-        dst.sediment_share[d] =
-            mixed_share(dst.sediment_share[d], dst.thickness[d] as f64, surplus[d] as f64, sediment);
+        let left: Mix = std::array::from_fn(|l| {
+            clamp_lane(l, (out.spill.lane(l)[d] / surplus[d]) as f64)
+        });
+        dst.lanes.mix(d, dst.thickness[d] as f64, surplus[d] as f64, &left);
         add_f32(&mut dst.thickness[d], surplus[d] as f64);
     }
 
@@ -1258,9 +1420,8 @@ pub fn advect(
         before.copy_from_slice(&dst.thickness);
         flow.fill(0.0);
         // Crust each cell takes in, and that times the share it carries.
-        out.spill_share_next.fill(0.0);
-        out.spill_share_in.fill(0.0);
-        out.spill_sediment_in.fill(0.0);
+        out.spill_inflow.fill(0.0);
+        out.spill_in.values_mut().fill(0.0);
         for d in 0..n {
             let excess = before[d] as f64 - t.crust_spread_start;
             if excess <= 0.0 || out.rift_cell[d] != 0 {
@@ -1297,21 +1458,25 @@ pub fn advect(
                 let share = (before[d] as f64 - before[m] as f64) / deficit;
                 let moved = give * share * area(d) / area(m);
                 add_f32(&mut flow[m], moved);
-                add_f32(&mut out.spill_share_next[m], moved);
-                add_f32(&mut out.spill_share_in[m], moved * dst.plume_share[d] as f64);
-                add_f32(&mut out.spill_sediment_in[m], moved * dst.sediment_share[d] as f64);
+                add_f32(&mut out.spill_inflow[m], moved);
+                // Spread crust is deformed too: its cover stays behind.
+                for l in (0..LANES).filter(|&l| !is_cover(l)) {
+                    add_f32(&mut out.spill_in.lane_mut(l)[m], moved * dst.lanes.lane(l)[d] as f64);
+                }
+                out.arc_in[m] = out.arc_in[m].min(dst.arc_age[d]);
             }
         }
         for d in 0..n {
-            let inflow = out.spill_share_next[d] as f64;
+            let inflow = out.spill_inflow[d] as f64;
             if inflow > 0.0 {
                 // What it kept of its own, then what flowed in.
                 let kept = before[d] as f64 - (inflow - flow[d] as f64);
-                let tracer = out.spill_share_in[d] as f64 / inflow;
-                dst.plume_share[d] = mixed_share(dst.plume_share[d], kept, inflow, tracer);
-                let sediment = out.spill_sediment_in[d] as f64 / inflow;
-                dst.sediment_share[d] = mixed_share(dst.sediment_share[d], kept, inflow, sediment);
+                let arriving: Mix =
+                    std::array::from_fn(|l| out.spill_in.lane(l)[d] as f64 / inflow);
+                dst.lanes.mix(d, kept, inflow, &arriving);
+                dst.arc_age[d] = dst.arc_age[d].min(out.arc_in[d]);
             }
+            out.arc_in[d] = NEVER;
             add_f32(&mut dst.thickness[d], flow[d] as f64);
             out.spread_in[d] = flow[d].max(0.0);
         }
@@ -1437,16 +1602,23 @@ pub fn advect(
             continue;
         }
         let wanted = available.min(rim_mass / rim_area * area(d));
-        let (mut pulled, mut traced, mut silt) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut pulled, mut carried, mut youngest) = (0.0f64, [0.0f64; LANES], NEVER);
         for (&m, &own) in donors.iter().zip(&spare) {
             let take = wanted * own / available;
             add_f32(&mut dst.thickness[m], -take / area(m));
             pulled += take;
-            traced += take * dst.plume_share[m] as f64;
-            silt += take * dst.sediment_share[m] as f64;
+            // Crust pulled across to close a gap has been deformed: its cover
+            // does not come with it.
+            for l in (0..LANES).filter(|&l| !is_cover(l)) {
+                carried[l] += take * dst.lanes.lane(l)[m] as f64;
+            }
+            if take > 0.0 {
+                youngest = youngest.min(dst.arc_age[m]);
+            }
         }
-        dst.plume_share[d] = (traced / pulled.max(1e-12)) as f32;
-        dst.sediment_share[d] = (silt / pulled.max(1e-12)) as f32;
+        dst.lanes
+            .set(d, std::array::from_fn(|l| (carried[l] / pulled.max(1e-12)) as f32));
+        dst.arc_age[d] = youngest;
 
         dst.elevation[d] = dst.elevation[model];
         dst.crust_type[d] = kind;
@@ -1485,7 +1657,7 @@ pub fn advect(
             continue;
         }
         let wanted = available.min(t.ridge_crust_thickness * area(d));
-        let (mut pulled, mut traced, mut silt) = (0.0f64, 0.0f64, 0.0f64);
+        let (mut pulled, mut carried, mut youngest) = (0.0f64, [0.0f64; LANES], NEVER);
         for k in range(d) {
             let m = nbr[k] as usize;
             if !(dst.plate_id[m] == plate && dst.crust_type[m] == CONTINENTAL) {
@@ -1498,21 +1670,37 @@ pub fn advect(
             let take = wanted * spare / available;
             add_f32(&mut dst.thickness[m], -take / area(m));
             pulled += take;
-            traced += take * dst.plume_share[m] as f64;
-            silt += take * dst.sediment_share[m] as f64;
+            // Crust pulled across to close a gap has been deformed: its cover
+            // does not come with it.
+            for l in (0..LANES).filter(|&l| !is_cover(l)) {
+                carried[l] += take * dst.lanes.lane(l)[m] as f64;
+            }
+            if take > 0.0 {
+                youngest = youngest.min(dst.arc_age[m]);
+            }
         }
-        dst.plume_share[d] = (traced / pulled.max(1e-12)) as f32;
-        dst.sediment_share[d] = (silt / pulled.max(1e-12)) as f32;
+        dst.lanes
+            .set(d, std::array::from_fn(|l| (carried[l] / pulled.max(1e-12)) as f32));
+        dst.arc_age[d] = youngest;
         out.rift_cell[d] = 0;
         dst.thickness[d] = (pulled / area(d)) as f32;
         dst.age[d] = 0.0;
-        if dst.thickness[d] as f64 >= t.continental_thickness_threshold {
+        // The crust pulled in is what the cell is made of now.
+        dst.density[d] =
+            composition_density(t, &dst.lanes.get(d), dst.thickness[d] as f64) as f32;
+        // What the cell is made of decides what it is, not how thick it came
+        // out: thin crust pulled from a continent's flanks is ocean floor.
+        let continental = if t.composition_crust_type {
+            dst.thickness[d] as f64 >= t.continental_revert_thickness
+                && dst.lanes.evolved(d, t.granite_min_temp) >= t.continental_felsic_share
+        } else {
+            dst.thickness[d] as f64 >= t.continental_thickness_threshold
+        };
+        if continental {
             dst.crust_type[d] = CONTINENTAL;
-            dst.density[d] = t.continental_density as f32;
             dst.lithosphere[d] = t.rift_lithosphere as f32;
         } else {
             dst.crust_type[d] = OCEANIC;
-            dst.density[d] = t.oceanic_density as f32;
             dst.lithosphere[d] = 0.0;
         }
     }
@@ -1579,7 +1767,48 @@ pub fn advect(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::world::Sim;
+
+    #[test]
+    fn arc_crust_carries_the_wedge_and_marks_where_exhumation_stood() {
+        let t = Tuning::default();
+        let mix = accreted_mix(&t, OCEANIC);
+        assert_eq!(mix[LANE_PEAK_PRESSURE], t.subduction_peak_pressure);
+        assert_eq!(mix[LANE_PEAK_TEMP], t.subduction_peak_temp);
+        let mut lanes = Lanes::new(2);
+        lanes.lane_mut(LANE_EXHUMED)[1] = 7.5;
+        lanes.lane_mut(LANE_ARC_EXHUMED)[1] = 2.0;
+        snapshot_arc_exhumation(&mut lanes, 1);
+        assert_eq!(lanes.lane(LANE_ARC_EXHUMED)[1], 7.5);
+        assert_eq!(lanes.lane(LANE_ARC_EXHUMED)[0], 0.0);
+    }
+
+    #[test]
+    fn a_trench_scrapes_an_ocean_arc_as_it_does_a_continent_but_not_below_ridge_crust() {
+        let t = Tuning::default();
+        let ridge = t.ridge_crust_thickness;
+        assert!(scraped_by_trench(&t, CONTINENTAL, 35.0));
+        assert!(scraped_by_trench(&t, OCEANIC, 20.0), "a 20 km ocean arc escapes the trench");
+        assert!(!scraped_by_trench(&t, OCEANIC, ridge), "plain ocean floor is scraped");
+        // The same share of the ocean consumed comes off either.
+        assert_eq!(margin_take(&t, OCEANIC, 20.0, 1.5), margin_take(&t, CONTINENTAL, 35.0, 1.5));
+        assert_eq!(margin_take(&t, OCEANIC, ridge + 0.5, 1.5), 0.5);
+        assert_eq!(margin_take(&t, OCEANIC, ridge - 1.0, 1.5), 0.0);
+    }
+
+    #[test]
+    fn a_running_world_scrapes_its_ocean_arcs_and_keeps_the_ledger() {
+        let mut sim = Sim::new(4);
+        sim.crack_great_circles(4, "arc erosion");
+        let mut scraped = 0.0;
+        for _ in 0..100 {
+            sim.tick();
+            scraped += sim.advection().arc_eroded_this_step;
+        }
+        assert!(scraped > 0.0, "no ocean arc was ever scraped");
+        assert!(sim.mass_drift().abs() < 1e-6, "mass drifted {}", sim.mass_drift());
+    }
 
     #[test]
     fn transport_is_a_permutation() {

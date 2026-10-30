@@ -4,7 +4,8 @@ import type { Projection } from "../render/projection";
 /**
  * How cells render: elevation colour ("colour"), greyscale with per-cell
  * id/elevation labels ("data"), crust type ("crust"), crust density ramp
- * ("density"), mantle lid thickness ("lithosphere"), sediment share ("sediment"), surface heat loss
+ * ("density"), mantle lid thickness ("lithosphere"), sediment share ("sediment"), mafic/felsic/sediment
+ * makeup ("composition"), loose sediment cover ("cover"), metamorphic facies ("metamorphism"), km of crust eroded away ("exhumation"), resource potential ("resources"), surface heat loss
  * ("heat-flow"), upper-mantle temperature ("mantle-temp"), slab piled in the
  * lower mantle ("slab-graveyard"), the mantle's lift or drag on the surface
  * ("dyn-topo"), or boundary type ("boundary"). Plates are no longer a base view mode — they are an
@@ -17,6 +18,11 @@ export type ViewMode =
   | "density"
   | "lithosphere"
   | "sediment"
+  | "composition"
+  | "cover"
+  | "metamorphism"
+  | "exhumation"
+  | "resources"
   | "heat-flow"
   | "mantle-temp"
   | "slab-graveyard"
@@ -37,6 +43,8 @@ export interface Settings {
   autoRotate: boolean;
   projection: Projection;
   viewMode: ViewMode;
+  /** Which resource the "resources" view shows, as an index into `RESOURCE_NAMES`. */
+  resource: number;
   /**
    * Elevation colouring. `"absolute"` keeps the atlas ramp, ocean depth
    * included. `"land"` uses sea level as the lowest colour and stretches the

@@ -4,6 +4,12 @@
 
 use crate::advect::AdvectionField;
 use crate::boundaries::{BoundaryField, CONVERGENT, DIVERGENT, TRANSFORM};
+use crate::cell_data::{
+    LANE_EXHUMED, LANE_FELSIC, LANE_MAFIC, LANE_PEAK_PRESSURE, LANE_PEAK_TEMP, LANE_SEDIMENT,
+    cover_km,
+};
+use crate::metamorphism::{FACIES, facies};
+use crate::resources::RESOURCES;
 use crate::cell_data::{CONTINENTAL, CellData};
 use crate::elevation::column_buoyancy;
 use crate::math::{Vec3, cross, dot, len3, normalise};
@@ -15,6 +21,9 @@ use std::collections::HashMap;
 
 pub const AGE_BIN_MYR: f64 = 20.0;
 pub const AGE_BINS: usize = 10;
+/// Arc crust younger than this (Myr) counts as a young arc when comparing
+/// how deeply it and the cratons have been cut into.
+const YOUNG_ARC_MYR: f64 = 200.0;
 const MIN_CORRELATION_AREA: f64 = 0.01;
 const MAJOR_PLATE_AREA: f64 = 0.02;
 /// Share of the globe below which a body of ocean ringed by continent counts as
@@ -97,9 +106,40 @@ pub struct WorldMetrics {
     pub craton_share: f64,
     /// Share of continental crust, by mass, that is reworked sediment.
     pub sediment_share: f64,
+    /// Share of continental crust, by mass, that is felsic igneous rock, and
+    /// share that is mafic.
+    pub felsic_share: f64,
+    pub mafic_share: f64,
+    /// Mean thickness (km) of the sediment cover over continental crust, and
+    /// over ocean floor.
+    pub cover_km_continental: f64,
+    pub cover_km_oceanic: f64,
+    /// Share of the rock eroded last tick that was loose cover, not basement.
+    pub cover_erosion_share: f64,
+    /// Share of continental area at each metamorphic facies, indexed as in
+    /// [`crate::metamorphism::Facies`] (none first).
+    pub facies_share: [f64; FACIES],
+    /// Mean km of basement that erosion has cut through, over continental area.
+    pub mean_exhumation: f64,
+    /// The same over continental crust that has a keel (cratons), and over
+    /// continental crust that took in arc crust within the last 200 Myr.
+    pub craton_exhumation: f64,
+    pub young_arc_exhumation: f64,
+    /// Share of land area, and of continental area, where each resource has
+    /// better than even odds, in the order of [`crate::resources::Resource`].
+    /// Area-weighted mean density (g/cm³) of continental and of oceanic crust,
+    /// and the standard deviation about each.
+    pub mean_continental_density: f64,
+    pub continental_density_spread: f64,
+    pub mean_oceanic_density: f64,
+    pub oceanic_density_spread: f64,
+    pub resource_land_share: [f64; RESOURCES],
+    pub resource_continental_share: [f64; RESOURCES],
     /// Crust eroded from land and laid down again on the way to the coast, as
     /// a share of the continental mass per Myr.
     pub sediment_flux: f64,
+    /// Of that, the part that reached a trench and went down with the plate.
+    pub sediment_subducted: f64,
     pub ocean_pocket_area: f64,
     pub mean_ocean_age: f64,
     pub max_ocean_age: f64,
@@ -119,6 +159,19 @@ pub struct PlateSummary {
     pub centroid: Vec3,
     pub speed: f64,
     pub heading: Option<f64>,
+}
+
+/// Mean of a quantity from its area-weighted sum and sum of squares.
+fn density_mean(sums: [f64; 2], area: f64) -> f64 {
+    if area > 0.0 { sums[0] / area } else { 0.0 }
+}
+
+/// Standard deviation of the same.
+fn density_spread(sums: [f64; 2], area: f64) -> f64 {
+    if area <= 0.0 {
+        return 0.0;
+    }
+    (sums[1] / area - (sums[0] / area).powi(2)).max(0.0).sqrt()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -141,8 +194,17 @@ pub fn compute_metrics(
     let mut thin_continental_area = 0.0;
     let mut craton_area = 0.0;
     let mut sediment_mass = 0.0;
+    let mut felsic_mass = 0.0;
+    let mut cover_continental = 0.0;
+    let mut cover_oceanic = 0.0;
+    let mut mafic_mass = 0.0;
+    let mut facies_area = [0.0f64; FACIES];
+    let (mut exhumed_area, mut craton_exhumed, mut arc_exhumed, mut arc_area) =
+        (0.0, 0.0, 0.0, 0.0);
     let mut ocean_area = 0.0;
     let mut ocean_age_area = 0.0;
+    // Sums of area x density and area x density², continental then oceanic.
+    let mut density_sums = [[0.0f64; 2]; 2];
     let mut max_ocean_age = 0.0f64;
     let mut ocean_mass = 0.0;
     let mut age_area = [0.0f64; AGE_BINS];
@@ -172,7 +234,26 @@ pub fn compute_metrics(
             }
             continental_mass += area * data.thickness[i] as f64;
             craton_area += area * data.keel[i] as f64;
-            sediment_mass += area * data.thickness[i] as f64 * data.sediment_share[i] as f64;
+            let mass = area * data.thickness[i] as f64;
+            sediment_mass += mass * data.lanes.lane(LANE_SEDIMENT)[i] as f64;
+            felsic_mass += mass * data.lanes.lane(LANE_FELSIC)[i] as f64;
+            mafic_mass += mass * data.lanes.lane(LANE_MAFIC)[i] as f64;
+            cover_continental += area * cover_km(&data.lanes, &data.thickness, i);
+            let rho = data.density[i] as f64;
+            density_sums[0][0] += area * rho;
+            density_sums[0][1] += area * rho * rho;
+            let exhumed = data.lanes.lane(LANE_EXHUMED)[i] as f64;
+            exhumed_area += area * exhumed;
+            craton_exhumed += area * data.keel[i] as f64 * exhumed;
+            if (data.arc_age[i] as f64) < YOUNG_ARC_MYR {
+                arc_exhumed += area * exhumed;
+                arc_area += area;
+            }
+            facies_area[facies(
+                t,
+                data.lanes.lane(LANE_PEAK_TEMP)[i] as f64,
+                data.lanes.lane(LANE_PEAK_PRESSURE)[i] as f64,
+            ) as usize] += area;
             if (data.thickness[i] as f64) < t.continental_thickness_threshold {
                 thin_continental_area += area;
             }
@@ -184,6 +265,10 @@ pub fn compute_metrics(
             let bin = ((age / AGE_BIN_MYR).floor() as usize).min(AGE_BINS - 1);
             age_area[bin] += area;
             ocean_mass += area * data.thickness[i] as f64;
+            cover_oceanic += area * cover_km(&data.lanes, &data.thickness, i);
+            let rho = data.density[i] as f64;
+            density_sums[1][0] += area * rho;
+            density_sums[1][1] += area * rho * rho;
         }
         let id = data.plate_id[i];
         if id < 0 {
@@ -391,7 +476,51 @@ pub fn compute_metrics(
         } else {
             0.0
         },
+        felsic_share: if continental_mass > 0.0 {
+            felsic_mass / continental_mass
+        } else {
+            0.0
+        },
+        cover_km_continental: if continental_area > 0.0 {
+            cover_continental / continental_area
+        } else {
+            0.0
+        },
+        cover_km_oceanic: if ocean_area > 0.0 {
+            cover_oceanic / ocean_area
+        } else {
+            0.0
+        },
+        cover_erosion_share: if advection.sediment_eroded > 0.0 {
+            advection.sediment_eroded_cover / advection.sediment_eroded
+        } else {
+            0.0
+        },
+        facies_share: facies_area.map(|a| if continental_area > 0.0 { a / continental_area } else { 0.0 }),
+        mean_exhumation: if continental_area > 0.0 {
+            exhumed_area / continental_area
+        } else {
+            0.0
+        },
+        craton_exhumation: if craton_area > 0.0 {
+            craton_exhumed / craton_area
+        } else {
+            0.0
+        },
+        young_arc_exhumation: if arc_area > 0.0 { arc_exhumed / arc_area } else { 0.0 },
+        mean_continental_density: density_mean(density_sums[0], continental_area),
+        continental_density_spread: density_spread(density_sums[0], continental_area),
+        mean_oceanic_density: density_mean(density_sums[1], ocean_area),
+        oceanic_density_spread: density_spread(density_sums[1], ocean_area),
+        resource_land_share: [0.0; RESOURCES],
+        resource_continental_share: [0.0; RESOURCES],
+        mafic_share: if continental_mass > 0.0 {
+            mafic_mass / continental_mass
+        } else {
+            0.0
+        },
         sediment_flux: continental_share_per_myr(advection.sediment_eroded),
+        sediment_subducted: continental_share_per_myr(advection.sediment_subducted),
         craton_share: if continental_area > 0.0 {
             craton_area / continental_area
         } else {

@@ -6,7 +6,7 @@ import {
 } from "../bench/benchScenario";
 import { copyMeshArrays } from "../mesh/ArrayCellMesh";
 import { Plates } from "../plates/Plates";
-import type { SimWorld } from "../sim/SimWorld";
+import { RESOURCE_NAMES, type SimWorld } from "../sim/SimWorld";
 import { type Engine, loadEngine } from "./engines";
 import {
   bufferList,
@@ -89,6 +89,16 @@ const allocateBuffers = (w: SimWorld): SnapshotBuffers => {
     keel: new Float32Array(cells),
     lithosphere: new Float32Array(cells),
     sediment: new Float32Array(cells),
+    mafic: new Float32Array(cells),
+    felsic: new Float32Array(cells),
+    coverFelsic: new Float32Array(cells),
+    coverMafic: new Float32Array(cells),
+    arcAge: new Float32Array(cells),
+    exhumed: new Float32Array(cells),
+    peakTemp: new Float32Array(cells),
+    peakPressure: new Float32Array(cells),
+    facies: new Uint8Array(cells),
+    resources: new Float32Array(cells * RESOURCE_NAMES.length),
     heatFlow: new Float32Array(cells),
     mantleTemp: new Float32Array(cells),
     lowerSlab: new Float32Array(cells),
@@ -118,6 +128,16 @@ const publish = (): void => {
   buffers.keel.set(fields.keel);
   buffers.lithosphere.set(fields.lithosphere);
   buffers.sediment.set(fields.sediment);
+  buffers.mafic.set(fields.mafic);
+  buffers.felsic.set(fields.felsic);
+  buffers.coverFelsic.set(fields.coverFelsic);
+  buffers.coverMafic.set(fields.coverMafic);
+  buffers.arcAge.set(fields.arcAge);
+  buffers.exhumed.set(fields.exhumed);
+  buffers.peakTemp.set(fields.peakTemp);
+  buffers.peakPressure.set(fields.peakPressure);
+  buffers.facies.set(fields.facies);
+  buffers.resources.set(fields.resources);
   buffers.heatFlow.set(fields.heatFlow);
   buffers.mantleTemp.set(fields.mantleTemp);
   buffers.lowerSlab.set(fields.lowerSlab);

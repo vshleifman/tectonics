@@ -1,9 +1,23 @@
 import { ArrayCellMesh } from "../mesh/ArrayCellMesh";
 import type { PlateSummary } from "../plates/PlateData";
 import type { WorldMetrics } from "../sim/metrics";
-import type { MassReadout, SimWorld, WorldFields } from "../sim/SimWorld";
+import {
+  type MassReadout,
+  RESOURCE_NAMES,
+  type SimWorld,
+  type WorldFields,
+} from "../sim/SimWorld";
 import type { SimOptions, Tuning } from "../sim/tuning";
 import type { World } from "./pkg/tectonics_sim.js";
+
+/** Composition lane numbers, as in `sim-rs/src/cell_data.rs`. */
+const LANE_MAFIC = 2;
+const LANE_FELSIC = 3;
+const LANE_COVER_FELSIC = 4;
+const LANE_COVER_MAFIC = 5;
+const LANE_EXHUMED = 6;
+const LANE_PEAK_TEMP = 8;
+const LANE_PEAK_PRESSURE = 9;
 
 /**
  * The `World` class of either build, single-threaded (`pkg`) or threaded
@@ -36,6 +50,12 @@ export class WasmWorld implements SimWorld {
         ? new WorldOf(source)
         : WorldOf.fromState(source);
     this.world = w;
+    const names = w.resource_names();
+    if (names.join("|") !== RESOURCE_NAMES.join("|")) {
+      throw new Error(
+        `the simulation's resources (${names.join(", ")}) differ from RESOURCE_NAMES in SimWorld.ts`,
+      );
+    }
     this.mesh = new ArrayCellMesh({
       cellCount: w.cell_count(),
       centres: w.mesh_centres(),
@@ -92,6 +112,28 @@ export class WasmWorld implements SimWorld {
       keel: new Float32Array(buffer, w.keel_ptr(), cells),
       lithosphere: new Float32Array(buffer, w.lithosphere_ptr(), cells),
       sediment: new Float32Array(buffer, w.sediment_ptr(), cells),
+      mafic: new Float32Array(buffer, w.lane_ptr(LANE_MAFIC), cells),
+      felsic: new Float32Array(buffer, w.lane_ptr(LANE_FELSIC), cells),
+      coverFelsic: new Float32Array(
+        buffer,
+        w.lane_ptr(LANE_COVER_FELSIC),
+        cells,
+      ),
+      coverMafic: new Float32Array(buffer, w.lane_ptr(LANE_COVER_MAFIC), cells),
+      arcAge: new Float32Array(buffer, w.arc_age_ptr(), cells),
+      exhumed: new Float32Array(buffer, w.lane_ptr(LANE_EXHUMED), cells),
+      peakTemp: new Float32Array(buffer, w.lane_ptr(LANE_PEAK_TEMP), cells),
+      peakPressure: new Float32Array(
+        buffer,
+        w.lane_ptr(LANE_PEAK_PRESSURE),
+        cells,
+      ),
+      facies: new Uint8Array(buffer, w.facies_ptr(), cells),
+      resources: new Float32Array(
+        buffer,
+        w.resource_ptr(0),
+        cells * RESOURCE_NAMES.length,
+      ),
       heatFlow: new Float32Array(buffer, w.heat_flow_ptr(), cells),
       mantleTemp: new Float32Array(buffer, w.mantle_temp_ptr(), cells),
       lowerSlab: new Float32Array(buffer, w.lower_slab_ptr(), cells),

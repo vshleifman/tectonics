@@ -17,6 +17,11 @@ export type ColourMode =
   | "density"
   | "lithosphere"
   | "sediment"
+  | "composition"
+  | "cover"
+  | "metamorphism"
+  | "exhumation"
+  | "resources"
   | "heat-flow"
   | "mantle-temp"
   | "slab-graveyard"
@@ -39,6 +44,15 @@ export interface ColourFields {
   keel: ArrayLike<number>;
   lithosphere: ArrayLike<number>;
   sediment: ArrayLike<number>;
+  mafic: ArrayLike<number>;
+  felsic: ArrayLike<number>;
+  coverFelsic: ArrayLike<number>;
+  coverMafic: ArrayLike<number>;
+  exhumed: ArrayLike<number>;
+  facies: ArrayLike<number>;
+  /** One cell-long run of potentials per resource. */
+  resources: ArrayLike<number>;
+  thickness: ArrayLike<number>;
   heatFlow: ArrayLike<number>;
   mantleTemp: ArrayLike<number>;
   lowerSlab: ArrayLike<number>;
@@ -80,6 +94,62 @@ const SEDIMENT_STOPS: Stops = [
   [0.1, hex(0x6b5b3e)],
   [0.4, hex(0xc9a24d)],
   [1, hex(0xf6e7b4)],
+];
+
+/** What the crust is made of: dark mafic rock, pink felsic rock, sandy sediment. */
+const MAFIC: Rgb = hex(0x3f4d45);
+const FELSIC: Rgb = hex(0xe3a3ae);
+const SILT: Rgb = hex(0xe8d28f);
+
+/** Sediment cover (km): bare rock through a thin veneer to a thick pile. */
+const COVER_STOPS: Stops = [
+  [0, hex(0x2b2f3a)],
+  [0.1, hex(0x6b5b3e)],
+  [0.5, hex(0xc9a24d)],
+  [1.5, hex(0xe8d28f)],
+  [3, hex(0xfff3d0)],
+];
+
+/**
+ * Metamorphic facies, in the order the simulation numbers them: rock that was
+ * never buried deep enough to change is dark, then cool greens through warm
+ * oranges as it was cooked hotter, and blues for the cold, deep rock a
+ * subduction zone makes.
+ */
+const FACIES_COLOURS: readonly Rgb[] = [
+  hex(0x2b2f3a),
+  hex(0x9ccf9a),
+  hex(0x4f9d62),
+  hex(0xe0a24a),
+  hex(0xc4483a),
+  hex(0x5a8fd6),
+  hex(0x7b4fb8),
+];
+
+const FACIES_NAMES = [
+  "None",
+  "Zeolite",
+  "Greenschist",
+  "Amphibolite",
+  "Granulite",
+  "Blueschist",
+  "Eclogite",
+];
+
+/** Km of basement erosion has cut through: untouched through to the deep roots of an old range. */
+const EXHUMATION_STOPS: Stops = [
+  [0, hex(0x2b2f3a)],
+  [2, hex(0x6b5b3e)],
+  [8, hex(0xc9a24d)],
+  [20, hex(0xe8a0a8)],
+  [40, hex(0xfff3f0)],
+];
+
+/** Potential of a resource (0 to 1): bare ground through to a rich find, in one hue. */
+const RESOURCE_STOPS: Stops = [
+  [0, hex(0x2b2f3a)],
+  [0.5, hex(0x8a5a1c)],
+  [1, hex(0xffd23f)],
 ];
 
 /** Surface heat flow (mW/m²): cold old plates through hot ridge crust. */
@@ -227,6 +297,7 @@ export const writeCellColours = (
   boundaryKind?: ArrayLike<number>,
   elevationStyle: ElevationStyle = "absolute",
   shade?: ArrayLike<number>,
+  resource = 0,
 ): void => {
   switch (mode) {
     case "data":
@@ -273,6 +344,48 @@ export const writeCellColours = (
         putRamp(out, i * 4, SEDIMENT_STOPS, data.sediment[i]);
       }
       return;
+    case "composition":
+      // A ternary blend of the three parts of the crust, which sum to 1.
+      for (let i = 0; i < cellCount; i++) {
+        const m = data.mafic[i];
+        const f = data.felsic[i];
+        const s = data.sediment[i];
+        const total = m + f + s || 1;
+        const o = i * 4;
+        for (let c = 0; c < 3; c++) {
+          out[o + c] = Math.round(
+            ((m * MAFIC[c] + f * FELSIC[c] + s * SILT[c]) / total) * 255,
+          );
+        }
+        out[o + 3] = 255;
+      }
+      return;
+    case "cover":
+      // Loose cover is a share of the crust, so its thickness is that times the crust's.
+      for (let i = 0; i < cellCount; i++) {
+        const km =
+          (data.coverFelsic[i] + data.coverMafic[i]) * data.thickness[i];
+        putRamp(out, i * 4, COVER_STOPS, km);
+      }
+      return;
+    case "metamorphism":
+      for (let i = 0; i < cellCount; i++) {
+        put(out, i * 4, FACIES_COLOURS[data.facies[i]] ?? FACIES_COLOURS[0]);
+      }
+      return;
+    case "exhumation":
+      for (let i = 0; i < cellCount; i++) {
+        putRamp(out, i * 4, EXHUMATION_STOPS, data.exhumed[i]);
+      }
+      return;
+    case "resources": {
+      // Potentials are laid out one cell-long run per resource.
+      const from = resource * cellCount;
+      for (let i = 0; i < cellCount; i++) {
+        putRamp(out, i * 4, RESOURCE_STOPS, data.resources[from + i] ?? 0);
+      }
+      return;
+    }
     case "heat-flow":
       for (let i = 0; i < cellCount; i++) {
         putRamp(out, i * 4, HEAT_FLOW_STOPS, data.heatFlow[i]);
@@ -523,7 +636,7 @@ export const legendForView = (
           { at: 1, label: density.max.toFixed(2) },
         ],
         swatches: [],
-        note: "Crust density alone: light continental, dark oceanic. Whether a column sinks is up to its lid too (see the lithosphere view).",
+        note: "Crust density from what it is made of: light cover and felsic rock, heavier mafic rock, heaviest eclogite roots under thick crust. Whether a column sinks is up to its lid too (see the lithosphere view).",
       };
     case "lithosphere":
       return {
@@ -546,6 +659,63 @@ export const legendForView = (
         ],
         swatches: [],
         note: "Share of the crust, by mass, that eroded off land and was laid down again on a shelf, slope or basin.",
+      };
+    case "composition":
+      return {
+        gradient: null,
+        ticks: [],
+        swatches: [
+          { colour: toCssRgb(MAFIC), label: "Mafic" },
+          { colour: toCssRgb(FELSIC), label: "Felsic" },
+          { colour: toCssRgb(SILT), label: "Sediment" },
+        ],
+        note: "What the crust is made of, by mass: ocean floor and plume crust are mafic, arcs add felsic rock, and hot thick continent differentiates mafic into felsic.",
+      };
+    case "cover":
+      return {
+        gradient: stopsToGradient(COVER_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "0" },
+          { at: 0.17, label: "0.5" },
+          { at: 0.5, label: "1.5" },
+          { at: 1, label: "3 km" },
+        ],
+        swatches: [],
+        note: "Loose sediment lying on top of the crust, where erosion lays it down. Cover buried past the lithification depth turns to rock and drops out of this view.",
+      };
+    case "metamorphism":
+      return {
+        gradient: null,
+        ticks: [],
+        swatches: FACIES_COLOURS.map((colour, index) => ({
+          colour: toCssRgb(colour),
+          label: FACIES_NAMES[index],
+        })),
+        note: "The facies of the rock now at the surface, from the hottest and most squeezed it has been: how deep erosion has cut, under the geotherm of the time, plus the wedge that arcs are built from.",
+      };
+    case "exhumation":
+      return {
+        gradient: stopsToGradient(EXHUMATION_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "0" },
+          { at: 0.05, label: "2" },
+          { at: 0.2, label: "8" },
+          { at: 0.5, label: "20" },
+          { at: 1, label: "40 km" },
+        ],
+        swatches: [],
+        note: "Km of basement that erosion has removed from the crust since it formed.",
+      };
+    case "resources":
+      return {
+        gradient: stopsToGradient(RESOURCE_STOPS.map((stop) => stop[1])),
+        ticks: [
+          { at: 0, label: "0" },
+          { at: 0.5, label: "0.5" },
+          { at: 1, label: "1" },
+        ],
+        swatches: [],
+        note: "How likely the chosen resource is to be found at the surface, from the rock's makeup, arc history, erosion depth, peak temperature, keel and age. A guide to where to look, not a tonnage.",
       };
     case "heat-flow":
       return {

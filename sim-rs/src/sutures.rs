@@ -94,7 +94,8 @@ pub fn update_sutures(
             } else {
                 hardest.get(&key).copied().unwrap_or(0.0)
             };
-            if closing > 0.0 {
+            let fresh_breakup = o.weld_on_net_closing && plates.breakups.contains_key(&key);
+            if closing > 0.0 && !fresh_breakup {
                 plates.sutures.insert(key, dt_myr);
             }
         }

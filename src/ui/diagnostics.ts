@@ -6,6 +6,7 @@ import {
   EARTH,
   type WorldMetrics,
 } from "../sim/metrics";
+import { RESOURCE_NAMES } from "../sim/SimWorld";
 
 /**
  * The one data hue used where a chart has a single series — the panel accent.
@@ -1108,12 +1109,91 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
       series: [
         { label: "Eroded", get: (m) => m.continentalEroded },
         { label: "River flux (moved, not lost)", get: (m) => m.sedimentFlux },
+        { label: "Sediment subducted", get: (m) => m.sedimentSubducted },
         { label: "Delaminated", get: (m) => m.delaminated },
         { label: "Foundered", get: (m) => m.foundered },
         { label: "Decontinentalised", get: (m) => m.decontinentalised },
         { label: "Dripped (ocean)", get: (m) => m.dripped },
       ],
       format: formatRate,
+    },
+    pins,
+  );
+  const composition = makeLineChart(
+    {
+      title: "Continental crust composition",
+      series: [
+        { label: "Felsic", get: (m) => m.felsicShare },
+        { label: "Mafic", get: (m) => m.maficShare },
+        { label: "Sediment", get: (m) => m.sedimentShare },
+      ],
+      format: formatPercent,
+    },
+    pins,
+  );
+  const cover = makeLineChart(
+    {
+      title: "Sediment cover",
+      unit: "km",
+      series: [
+        { label: "On land", get: (m) => m.coverKmContinental },
+        { label: "At sea (mean)", get: (m) => m.coverKmOceanic },
+      ],
+      format: formatKm,
+    },
+    pins,
+  );
+  const facies = makeLineChart(
+    {
+      title: "Metamorphic facies of continental area",
+      series: [
+        { label: "None", get: (m) => m.faciesShare[0] },
+        { label: "Zeolite", get: (m) => m.faciesShare[1] },
+        { label: "Greenschist", get: (m) => m.faciesShare[2] },
+        { label: "Amphibolite", get: (m) => m.faciesShare[3] },
+        { label: "Granulite", get: (m) => m.faciesShare[4] },
+        { label: "Blueschist", get: (m) => m.faciesShare[5] },
+        { label: "Eclogite", get: (m) => m.faciesShare[6] },
+      ],
+      format: formatPercent,
+    },
+    pins,
+  );
+  const exhumation = makeLineChart(
+    {
+      title: "Exhumation of continental crust",
+      unit: "km",
+      series: [
+        { label: "All", get: (m) => m.meanExhumation },
+        { label: "Cratons", get: (m) => m.cratonExhumation },
+        { label: "Young arcs", get: (m) => m.youngArcExhumation },
+      ],
+      format: formatKm,
+    },
+    pins,
+  );
+  const density = makeLineChart(
+    {
+      title: "Crust density",
+      unit: "g/cm³",
+      series: [
+        { label: "Continental", get: (m) => m.meanContinentalDensity },
+        { label: "Oceanic", get: (m) => m.meanOceanicDensity },
+        { label: "Continental spread", get: (m) => m.continentalDensitySpread },
+        { label: "Oceanic spread", get: (m) => m.oceanicDensitySpread },
+      ],
+      format: (value) => value.toFixed(3),
+    },
+    pins,
+  );
+  const resources = makeLineChart(
+    {
+      title: "Land with a good chance of each resource",
+      series: RESOURCE_NAMES.map((label, r) => ({
+        label,
+        get: (m: WorldMetrics) => m.resourceLandShare[r],
+      })),
+      format: formatPercent,
     },
     pins,
   );
@@ -1353,10 +1433,25 @@ export const createDiagnostics = (parent: HTMLElement): DiagnosticsPanel => {
     makeTab(
       "budget",
       "Continental budget",
-      stack(growth.element, loss.element),
+      stack(
+        growth.element,
+        loss.element,
+        composition.element,
+        cover.element,
+        facies.element,
+        exhumation.element,
+        resources.element,
+        density.element,
+      ),
       (samples) => {
         growth.update(samples);
         loss.update(samples);
+        composition.update(samples);
+        cover.update(samples);
+        facies.update(samples);
+        exhumation.update(samples);
+        resources.update(samples);
+        density.update(samples);
       },
     ),
     makeTab(

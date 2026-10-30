@@ -13,7 +13,7 @@ use crate::math::{
 };
 use crate::mesh::Mesh;
 use crate::par;
-use crate::plates::{PlateData, PlateStress, split_key, suture_key};
+use crate::plates::{FORCE_PARTS, PlateData, PlateStress, split_key, suture_key};
 use crate::scratch::Scratch;
 use crate::slabs::{slab_pull, subduction};
 use crate::tuning::{SimOptions, Tuning};
@@ -33,6 +33,8 @@ struct Forces {
     area: Vec<f64>,
     /// Area-weighted sum of cell positions, for the plate's centre.
     centre: Vec<f64>,
+    /// `torque` split by driving force, `FORCE_PARTS` vectors per plate.
+    parts: Vec<f64>,
 }
 
 impl Forces {
@@ -45,6 +47,7 @@ impl Forces {
             pull_spread: vec![0.0; plates * 6],
             area: vec![0.0; plates],
             centre: vec![0.0; plates * 3],
+            parts: vec![0.0; plates * 3 * FORCE_PARTS],
         }
     }
 
@@ -57,6 +60,7 @@ impl Forces {
             (&mut self.pull_spread, &other.pull_spread),
             (&mut self.area, &other.area),
             (&mut self.centre, &other.centre),
+            (&mut self.parts, &other.parts),
         ] {
             sum.iter_mut().zip(part).for_each(|(s, x)| *s += x);
         }
@@ -100,160 +104,53 @@ pub fn update_plate_motion(
     // downwelling, continental keels are carried along with it; ocean floor
     // rides on a soft asthenosphere that lets the deeper flow slide past, and
     // goes where its slabs pull it.
-    let carried = t.mantle_flow_coupling;
-    let ridge = t.ridge_weight;
     let under = par::chunks(mesh.cell_count, |cells| {
         let mut f = Forces::new(ids.len());
         for i in cells {
-            let plate = data.plate_id[i];
-            let Some(p) = slot_of(plate) else {
+            let Some(p) = slot_of(data.plate_id[i]) else {
                 continue;
             };
-            let keel = if data.crust_type[i] == CONTINENTAL {
-                t.continental_drag * (1.0 + t.craton_keel_gain * data.keel[i] as f64)
-            } else {
-                1.0
-            };
-            let k = t.mantle_drag * mesh.area(i) * keel;
-            let (x, y, z) = (c[i * 3] as f64, c[i * 3 + 1] as f64, c[i * 3 + 2] as f64);
+            let cf = cell_force(mesh, data, mantle, t, i);
             let m = p * 6;
-            f.drag[m] += k * (1.0 - x * x);
-            f.drag[m + 1] += k * (1.0 - y * y);
-            f.drag[m + 2] += k * (1.0 - z * z);
-            f.drag[m + 3] -= k * x * y;
-            f.drag[m + 4] -= k * x * z;
-            f.drag[m + 5] -= k * y * z;
+            for (k, v) in cf.drag.into_iter().enumerate() {
+                f.drag[m + k] += v;
+            }
+            let (x, y, z) = (c[i * 3] as f64, c[i * 3 + 1] as f64, c[i * 3 + 2] as f64);
             f.area[p] += mesh.area(i);
             f.centre[p * 3] += mesh.area(i) * x;
             f.centre[p * 3 + 1] += mesh.area(i) * y;
             f.centre[p * 3 + 2] += mesh.area(i) * z;
-            if carried > 0.0 && data.crust_type[i] == CONTINENTAL {
-                let u = mantle.wind_at(i);
-                let g = k * carried;
-                f.torque[p * 3] += g * (y * u[2] - z * u[1]);
-                f.torque[p * 3 + 1] += g * (z * u[0] - x * u[2]);
-                f.torque[p * 3 + 2] += g * (x * u[1] - y * u[0]);
-            }
-            // Ridge push: ocean lithosphere thickens and sinks as it cools
-            // away from a ridge, and slides down the slope of its own base. A
-            // body force over the whole plate, down the gradient of its
-            // cooling depth, so its pull adds up to the ridge's relief over
-            // the plate's oldest floor rather than coming from the ridge line
-            // alone.
-            if ridge > 0.0 && data.crust_type[i] != CONTINENTAL {
-                let depth = thermal_elevation(t, data.age[i] as f64);
-                let mut push = [0.0f64; 3];
-                for nk in mesh.nbrs(i) {
-                    let m = mesh.nbr[nk] as usize;
-                    let arc = mesh.nbr_arc[nk];
-                    if arc < 0 || data.plate_id[m] != plate || data.crust_type[m] == CONTINENTAL {
-                        continue;
-                    }
-                    let drop = (depth - thermal_elevation(t, data.age[m] as f64))
-                        * mesh.arc_length[arc as usize] as f64;
-                    for (axis, pa) in push.iter_mut().enumerate() {
-                        *pa += drop * mesh.chord_dir[nk * 3 + axis] as f64;
-                    }
+            for (part, tq) in [(0, cf.carry), (1, cf.ridge)] {
+                let Some(tq) = tq else {
+                    continue;
+                };
+                for (axis, v) in tq.into_iter().enumerate() {
+                    f.torque[p * 3 + axis] += v;
+                    f.parts[(p * FORCE_PARTS + part) * 3 + axis] += v;
                 }
-                f.torque[p * 3] += ridge * (y * push[2] - z * push[1]);
-                f.torque[p * 3 + 1] += ridge * (z * push[0] - x * push[2]);
-                f.torque[p * 3 + 2] += ridge * (x * push[1] - y * push[0]);
             }
         }
         f
     });
 
-    let mid_of = |a: usize| -> [f64; 3] {
-        [
-            mesh.arc_mid[a * 3] as f64,
-            mesh.arc_mid[a * 3 + 1] as f64,
-            mesh.arc_mid[a * 3 + 2] as f64,
-        ]
-    };
-    let normal_of = |a: usize| -> [f64; 3] {
-        [
-            mesh.arc_normal[a * 3] as f64,
-            mesh.arc_normal[a * 3 + 1] as f64,
-            mesh.arc_normal[a * 3 + 2] as f64,
-        ]
-    };
-    // Torque of a tangential force `sign * normal * mag` at the arc midpoint.
-    let add_torque = |torque: &mut [f64], plate: i32, a: usize, sign: f64, mag: f64| {
-        let Some(p) = slot_of(plate) else {
-            return;
-        };
-        let m = mid_of(a);
-        let n = normal_of(a);
-        let f = [n[0] * sign * mag, n[1] * sign * mag, n[2] * sign * mag];
-        let p = p * 3;
-        torque[p] += m[1] * f[2] - m[2] * f[1];
-        torque[p + 1] += m[2] * f[0] - m[0] * f[2];
-        torque[p + 2] += m[0] * f[1] - m[1] * f[0];
-    };
-
     let (breakups, sutures) = (&plates.breakups, &plates.sutures);
     let across = par::chunks(mesh.arc_count(), |arcs| {
         let mut f = Forces::new(ids.len());
         for a in arcs {
-            let cell_a = mesh.arc_cells[a * 2];
-            let cell_b = mesh.arc_cells[a * 2 + 1];
-            if cell_a < 0 || cell_b < 0 {
-                continue;
-            }
-            let (cell_a, cell_b) = (cell_a as usize, cell_b as usize);
-            let plate_a = data.plate_id[cell_a];
-            let plate_b = data.plate_id[cell_b];
-            if plate_a < 0 || plate_b < 0 || plate_a == plate_b {
-                continue;
-            }
-            let kind = boundaries.arc_kind[a];
-            let arc_len = mesh.arc_length[a] as f64;
-            let cont_a = data.crust_type[cell_a] == CONTINENTAL;
-            let cont_b = data.crust_type[cell_b] == CONTINENTAL;
-
-            // Dome push: lithosphere raised over trapped mantle heat slides
-            // off it, so the margin where a plate broke apart over a hot dome
-            // pushes both sides away. This is what separates the halves of a
-            // plate that rifted over heat alone, with no slab to pull them.
-            // It lasts only `dome_push_duration` after the breakup, as breakup
-            // melting vents the dome; a lasting push between every pair of hot
-            // neighbours would hold all continents apart for good. A weld
-            // holds against it. The dome has to straddle the margin, so the
-            // cooler side sets the push.
-            let heat = data.mantle_heat[cell_a].min(data.mantle_heat[cell_b]) as f64;
-            let pair = suture_key(plate_a, plate_b);
-            if heat > 0.0 && breakups.contains_key(&pair) && !sutures.contains_key(&pair) {
-                let push = t.dome_push * heat * arc_len;
-                add_torque(&mut f.torque, plate_a, a, -1.0, push);
-                add_torque(&mut f.torque, plate_b, a, 1.0, push);
-            }
-
-            // Slab pull, not gated on the boundary converging right now: a
-            // slab's weight is there whether or not the plates happen to be
-            // moving. But it takes a slab, so only where crust has actually
-            // gone down.
-            if let Some(sub) = subduction(mesh, data, cell_a, cell_b, t) {
-                let (down_cell, down_plate, over_plate, sign) = if sub.down == cell_b {
-                    (cell_b, plate_b, plate_a, -1.0)
-                } else {
-                    (cell_a, plate_a, plate_b, 1.0)
-                };
-                let pull = slab_pull(t, column_buoyancy(t, data, down_cell)) * sub.strength;
-                if let Some(p) = slot_of(down_plate).filter(|_| pull > 0.0) {
-                    let force = t.slab_weight * pull * arc_len;
-                    add_torque(&mut f.torque, down_plate, a, sign, force);
-                    // Trench suction: the slab rolls back, and the mantle
-                    // wedge above it draws the overriding plate after the
-                    // trench.
-                    add_torque(
-                        &mut f.torque,
-                        over_plate,
-                        a,
-                        -sign,
-                        t.trench_suction * force,
-                    );
-                    let n = normal_of(a);
-                    let d = [n[0] * sign, n[1] * sign, n[2] * sign];
+            arc_force(mesh, data, boundaries, breakups, sutures, t, a, |e| match e {
+                ArcForce::Torque { plate, part, torque, .. } => {
+                    let Some(p) = slot_of(plate) else {
+                        return;
+                    };
+                    for (axis, x) in torque.into_iter().enumerate() {
+                        f.torque[p * 3 + axis] += x;
+                        f.parts[(p * FORCE_PARTS + part) * 3 + axis] += x;
+                    }
+                }
+                ArcForce::Pull { plate, dir: d, force } => {
+                    let Some(p) = slot_of(plate) else {
+                        return;
+                    };
                     f.pull_sum[p * 3] += d[0] * force;
                     f.pull_sum[p * 3 + 1] += d[1] * force;
                     f.pull_sum[p * 3 + 2] += d[2] * force;
@@ -266,40 +163,15 @@ pub fn update_plate_motion(
                     f.pull_spread[s + 4] += force * d[0] * d[2];
                     f.pull_spread[s + 5] += force * d[1] * d[2];
                 }
-            }
-
-            if kind != CONVERGENT {
-                continue;
-            }
-
-            // Collision resistance, as drag across the boundary only.
-            let lock = if cont_a && cont_b {
-                1.0
-            } else if cont_a || cont_b {
-                1.0 / t.collision_lock_gain.sqrt()
-            } else {
-                1.0 / t.collision_lock_gain
-            };
-            let m = mid_of(a);
-            let n = normal_of(a);
-            let g = [
-                m[1] * n[2] - m[2] * n[1],
-                m[2] * n[0] - m[0] * n[2],
-                m[0] * n[1] - m[1] * n[0],
-            ];
-            let k = t.collision_drag * lock * arc_len;
-            for plate in [plate_a, plate_b] {
-                let Some(p) = slot_of(plate) else {
-                    continue;
-                };
-                let d = p * 6;
-                f.drag[d] += k * g[0] * g[0];
-                f.drag[d + 1] += k * g[1] * g[1];
-                f.drag[d + 2] += k * g[2] * g[2];
-                f.drag[d + 3] += k * g[0] * g[1];
-                f.drag[d + 4] += k * g[0] * g[2];
-                f.drag[d + 5] += k * g[1] * g[2];
-            }
+                ArcForce::Drag { plate, drag, .. } => {
+                    let Some(p) = slot_of(plate) else {
+                        return;
+                    };
+                    for (k, v) in drag.into_iter().enumerate() {
+                        f.drag[p * 6 + k] += v;
+                    }
+                }
+            });
         }
         f
     });
@@ -315,6 +187,7 @@ pub fn update_plate_motion(
         pull_spread,
         area,
         centre,
+        parts,
     } = forces;
 
     let sym = |arr: &[f64], id: usize| -> Sym3 {
@@ -380,6 +253,7 @@ pub fn update_plate_motion(
 
     // Solve the balance for the motion each plate is heading for.
     let mut target = vec![0.0f64; bound * 3];
+    plates.force_parts.clear();
     for (p, &id) in ids.iter().enumerate() {
         let w = solve_sym3(
             &sym(&drag, p),
@@ -387,6 +261,12 @@ pub fn update_plate_motion(
         );
         let i = id as usize * 3;
         target[i..i + 3].copy_from_slice(&w);
+        let mut split = [[0.0; 3]; FORCE_PARTS];
+        for (k, w_k) in split.iter_mut().enumerate() {
+            let j = (p * FORCE_PARTS + k) * 3;
+            *w_k = solve_sym3(&sym(&drag, p), [parts[j], parts[j + 1], parts[j + 2]]);
+        }
+        plates.force_parts.insert(id, split);
     }
 
     // Edge coupling: each plate's target is drawn toward its neighbours', in
@@ -440,10 +320,10 @@ pub fn update_plate_motion(
 
     // Suture coupling: welded plates head for a common motion. It acts on the
     // targets, not the motion itself, so it does not compound tick on tick.
-    // A craton straddling the weld is one rigid body: the pair is held to a
-    // common motion as firmly as cratons are durable.
+    // Where cratons touch across the weld the pair is held to a common motion
+    // `craton_weld_coupling` firmly.
     let welded = clamp01(t.suture_coupling * dt_myr);
-    let rigid = welded.max(clamp01(t.craton_durability));
+    let rigid = welded.max(clamp01(t.craton_weld_coupling));
     if rigid > 0.0 {
         for &key in plates.sutures.keys() {
             let (ia, ib) = split_key(key);
@@ -488,6 +368,222 @@ pub fn update_plate_motion(
         }
         props.omega = next;
     }
+}
+
+/// What acts on cell `i` from beneath. `drag` is its drag on the mantle, a
+/// symmetric 3x3 as six values: every cell drags on the mantle beneath it,
+/// continental keels harder. `carry` is the torque of the mantle carrying it:
+/// where the mantle is itself flowing, toward a downwelling, continental keels
+/// are carried along with it, while ocean floor rides on a soft asthenosphere
+/// that lets the deeper flow slide past, and goes where its slabs pull it.
+/// `ridge` is the torque of ridge push on ocean floor.
+pub(crate) struct CellForce {
+    pub drag: [f64; 6],
+    pub carry: Option<Vec3>,
+    pub ridge: Option<Vec3>,
+}
+
+pub(crate) fn cell_force(
+    mesh: &Mesh,
+    data: &CellData,
+    mantle: &MantleFlow,
+    t: &Tuning,
+    i: usize,
+) -> CellForce {
+    let c = &mesh.centres;
+    let plate = data.plate_id[i];
+    let keel = if data.crust_type[i] == CONTINENTAL {
+        t.continental_drag * (1.0 + t.craton_keel_gain * data.keel[i] as f64)
+    } else {
+        1.0
+    };
+    let k = t.mantle_drag * mesh.area(i) * keel;
+    let (x, y, z) = (c[i * 3] as f64, c[i * 3 + 1] as f64, c[i * 3 + 2] as f64);
+    let drag = [
+        k * (1.0 - x * x),
+        k * (1.0 - y * y),
+        k * (1.0 - z * z),
+        -(k * x * y),
+        -(k * x * z),
+        -(k * y * z),
+    ];
+    let carry = (t.mantle_flow_coupling > 0.0 && data.crust_type[i] == CONTINENTAL).then(|| {
+        let u = mantle.wind_at(i);
+        let g = k * t.mantle_flow_coupling;
+        [g * (y * u[2] - z * u[1]), g * (z * u[0] - x * u[2]), g * (x * u[1] - y * u[0])]
+    });
+    // Ridge push: ocean lithosphere thickens and sinks as it cools away from a
+    // ridge, and slides down the slope of its own base. A body force over the
+    // whole plate, down the gradient of its cooling depth, so its pull adds up
+    // to the ridge's relief over the plate's oldest floor rather than coming
+    // from the ridge line alone.
+    let ridge_weight = t.ridge_weight;
+    let ridge = (ridge_weight > 0.0 && data.crust_type[i] != CONTINENTAL).then(|| {
+        let depth = thermal_elevation(t, data.age[i] as f64);
+        let mut push = [0.0f64; 3];
+        for nk in mesh.nbrs(i) {
+            let m = mesh.nbr[nk] as usize;
+            let arc = mesh.nbr_arc[nk];
+            if arc < 0 || data.plate_id[m] != plate || data.crust_type[m] == CONTINENTAL {
+                continue;
+            }
+            let drop = (depth - thermal_elevation(t, data.age[m] as f64))
+                * mesh.arc_length[arc as usize] as f64;
+            for (axis, pa) in push.iter_mut().enumerate() {
+                *pa += drop * mesh.chord_dir[nk * 3 + axis] as f64;
+            }
+        }
+        [
+            ridge_weight * (y * push[2] - z * push[1]),
+            ridge_weight * (z * push[0] - x * push[2]),
+            ridge_weight * (x * push[1] - y * push[0]),
+        ]
+    });
+    CellForce { drag, carry, ridge }
+}
+
+/// One thing a plate boundary does to the plate on one side of it, through
+/// that side's cell `cell`.
+pub(crate) enum ArcForce {
+    /// A torque, counted as driving force `part` (see `FORCE_PARTS`).
+    Torque { plate: i32, cell: usize, part: usize, torque: Vec3 },
+    /// A slab's pull `force` in direction `dir`, for the plate's tension.
+    Pull { plate: i32, dir: Vec3, force: f64 },
+    /// Drag across a converging boundary, a symmetric 3x3 as six values.
+    Drag { plate: i32, cell: usize, drag: [f64; 6] },
+}
+
+/// What the boundary along arc `a` does to the plates either side, if it
+/// separates two plates, passed to `emit` in a fixed order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn arc_force(
+    mesh: &Mesh,
+    data: &CellData,
+    boundaries: &BoundaryField,
+    breakups: &indexmap::IndexMap<i64, f64>,
+    sutures: &indexmap::IndexMap<i64, f64>,
+    t: &Tuning,
+    a: usize,
+    mut emit: impl FnMut(ArcForce),
+) {
+    let cell_a = mesh.arc_cells[a * 2];
+    let cell_b = mesh.arc_cells[a * 2 + 1];
+    if cell_a < 0 || cell_b < 0 {
+        return;
+    }
+    let (cell_a, cell_b) = (cell_a as usize, cell_b as usize);
+    let plate_a = data.plate_id[cell_a];
+    let plate_b = data.plate_id[cell_b];
+    if plate_a < 0 || plate_b < 0 || plate_a == plate_b {
+        return;
+    }
+    let arc_len = mesh.arc_length[a] as f64;
+    let (m, n) = arc_frame(mesh, a);
+    // Torque of a tangential force `sign * normal * mag` at the arc midpoint.
+    let torque = |sign: f64, mag: f64| -> Vec3 {
+        let v = [n[0] * sign * mag, n[1] * sign * mag, n[2] * sign * mag];
+        [
+            m[1] * v[2] - m[2] * v[1],
+            m[2] * v[0] - m[0] * v[2],
+            m[0] * v[1] - m[1] * v[0],
+        ]
+    };
+
+    // Dome push: lithosphere raised over trapped mantle heat slides off it, so
+    // the margin where a plate broke apart over a hot dome pushes both sides
+    // away. This is what separates the halves of a plate that rifted over heat
+    // alone, with no slab to pull them. It lasts only `dome_push_duration`
+    // after the breakup, as breakup melting vents the dome; a lasting push
+    // between every pair of hot neighbours would hold all continents apart for
+    // good. A weld holds against it. The dome has to straddle the margin, so
+    // the cooler side sets the push.
+    let pair = suture_key(plate_a, plate_b);
+    if breakups.contains_key(&pair) && !sutures.contains_key(&pair) {
+        if let Some(push) = dome_push(t, data, cell_a, cell_b, arc_len) {
+            emit(ArcForce::Torque { plate: plate_a, cell: cell_a, part: 4, torque: torque(-1.0, push) });
+            emit(ArcForce::Torque { plate: plate_b, cell: cell_b, part: 4, torque: torque(1.0, push) });
+        }
+    }
+
+    // Slab pull, not gated on the boundary converging right now: a slab's
+    // weight is there whether or not the plates happen to be moving. But it
+    // takes a slab, so only where crust has actually gone down.
+    if let Some(sub) = subduction(mesh, data, cell_a, cell_b, t) {
+        let (down_cell, down_plate, over_cell, over_plate, sign) = if sub.down == cell_b {
+            (cell_b, plate_b, cell_a, plate_a, -1.0)
+        } else {
+            (cell_a, plate_a, cell_b, plate_b, 1.0)
+        };
+        let pull = slab_pull(t, column_buoyancy(t, data, down_cell)) * sub.strength;
+        if pull > 0.0 {
+            let force = t.slab_weight * pull * arc_len;
+            emit(ArcForce::Torque { plate: down_plate, cell: down_cell, part: 2, torque: torque(sign, force) });
+            // Trench suction: the slab rolls back, and the mantle wedge above
+            // it draws the overriding plate after the trench.
+            emit(ArcForce::Torque {
+                plate: over_plate,
+                cell: over_cell,
+                part: 3,
+                torque: torque(-sign, t.trench_suction * force),
+            });
+            emit(ArcForce::Pull { plate: down_plate, dir: [n[0] * sign, n[1] * sign, n[2] * sign], force });
+        }
+    }
+
+    if boundaries.arc_kind[a] != CONVERGENT {
+        return;
+    }
+    // Collision resistance, as drag across the boundary only.
+    let (cont_a, cont_b) = (
+        data.crust_type[cell_a] == CONTINENTAL,
+        data.crust_type[cell_b] == CONTINENTAL,
+    );
+    let lock = if cont_a && cont_b {
+        1.0
+    } else if cont_a || cont_b {
+        1.0 / t.collision_lock_gain.sqrt()
+    } else {
+        1.0 / t.collision_lock_gain
+    };
+    let g = [
+        m[1] * n[2] - m[2] * n[1],
+        m[2] * n[0] - m[0] * n[2],
+        m[0] * n[1] - m[1] * n[0],
+    ];
+    let k = t.collision_drag * lock * arc_len;
+    let drag = [
+        k * g[0] * g[0],
+        k * g[1] * g[1],
+        k * g[2] * g[2],
+        k * g[0] * g[1],
+        k * g[0] * g[2],
+        k * g[1] * g[2],
+    ];
+    emit(ArcForce::Drag { plate: plate_a, cell: cell_a, drag });
+    emit(ArcForce::Drag { plate: plate_b, cell: cell_b, drag });
+}
+
+/// Midpoint and unit normal (from its first cell toward its second) of arc `a`.
+pub(crate) fn arc_frame(mesh: &Mesh, a: usize) -> (Vec3, Vec3) {
+    (
+        [
+            mesh.arc_mid[a * 3] as f64,
+            mesh.arc_mid[a * 3 + 1] as f64,
+            mesh.arc_mid[a * 3 + 2] as f64,
+        ],
+        [
+            mesh.arc_normal[a * 3] as f64,
+            mesh.arc_normal[a * 3 + 1] as f64,
+            mesh.arc_normal[a * 3 + 2] as f64,
+        ],
+    )
+}
+
+/// Push (force) of a hot dome straddling the boundary between cells `a` and
+/// `b` along `arc_len`, if there is heat under both.
+pub(crate) fn dome_push(t: &Tuning, data: &CellData, a: usize, b: usize, arc_len: f64) -> Option<f64> {
+    let heat = data.mantle_heat[a].min(data.mantle_heat[b]) as f64;
+    (heat > 0.0).then(|| t.dome_push * heat * arc_len)
 }
 
 /// Share of the way to its target a plate of `plate_area` (on a globe of
@@ -712,14 +808,14 @@ mod tests {
     fn heavy_ocean(t: &Tuning, data: &mut CellData, i: usize) {
         data.crust_type[i] = OCEANIC;
         data.age[i] = t.max_oceanic_age as f32;
-        data.density[i] = t.oceanic_density as f32;
+        data.density[i] = t.mafic_density as f32;
         data.thickness[i] = t.oceanic_thickness as f32;
         data.lithosphere[i] = t.plate_thickness as f32;
     }
 
     fn continent(t: &Tuning, data: &mut CellData, i: usize, slab: f32) {
         data.crust_type[i] = CONTINENTAL;
-        data.density[i] = t.continental_density as f32;
+        data.density[i] = t.mean_continental_density() as f32;
         data.thickness[i] = 35.0;
         data.slab[i] = slab;
     }
@@ -779,7 +875,7 @@ mod tests {
             } else {
                 data.plate_id[i] = 2;
                 data.crust_type[i] = OCEANIC;
-                data.density[i] = t.oceanic_density as f32;
+                data.density[i] = t.mafic_density as f32;
                 data.thickness[i] = t.oceanic_thickness as f32;
             }
         }

@@ -4,12 +4,17 @@
 use crate::advect::{AdvectionField, advect};
 use crate::arcs::extend_back_arcs;
 use crate::boundaries::{BoundaryField, classify};
-use crate::cell_data::{CellData, total_crust_mass};
+use crate::cell_data::{CONTINENTAL, CellData, total_crust_mass};
+use crate::climate::Climate;
 use crate::cohesion::{keep_continents_whole, keep_cratons_whole};
 use crate::craton::update_cratons;
-use crate::crust_lifecycle::{apply_crust_lifecycle, infill_enclosed_basins, lay_new_floor};
-use crate::elevation::{apply_elevation, dynamic_topography};
+use crate::crust_lifecycle::{
+    apply_crust_lifecycle, differentiate, infill_enclosed_basins, lay_new_floor,
+};
+use crate::elevation::{apply_elevation, dynamic_topography, update_densities};
 use crate::erosion::erode_and_deposit;
+use crate::metamorphism::classify_facies;
+use crate::resources::{RESOURCES, RULES, evaluate};
 use crate::heat::{PlanetHeat, effective_tuning};
 use crate::lithosphere::update_lithosphere;
 use crate::mantle::MantleFlow;
@@ -65,6 +70,7 @@ struct State<'a> {
     primordial: Cow<'a, Primordial>,
     heat: Cow<'a, PlanetHeat>,
     dyn_topo: Cow<'a, [f32]>,
+    climate: Cow<'a, Climate>,
     sea_level: f64,
     tuning: Cow<'a, Tuning>,
     options: Cow<'a, SimOptions>,
@@ -103,6 +109,14 @@ pub struct Sim {
     /// Dynamic topography (km) over each cell: where the surface stands for
     /// the mantle's flow, not its crust, so it is not carried with the plates.
     dyn_topo: Vec<f32>,
+    /// Metamorphic facies of the rock at each cell's surface, read off its peak
+    /// pressure and temperature, as of the last tick. Derived, so not saved.
+    facies: Vec<u8>,
+    /// Potential (0 to 1) of each resource at each cell, resource-major, as of
+    /// the last tick. Derived, so not saved.
+    resources: Vec<f32>,
+    /// The weather over each cell; empty until a climate model fills it in.
+    pub climate: Climate,
     /// Sea level (km above the datum) that the planet's water fills the basins
     /// to, as of the last tick.
     sea_level: f64,
@@ -135,6 +149,9 @@ impl Sim {
             primordial: Primordial::default(),
             heat: PlanetHeat::new(n, &tuning),
             dyn_topo: vec![0.0; n],
+            facies: vec![0; n],
+            resources: vec![0.0; n * RESOURCES],
+            climate: Climate::default(),
             sea_level: 0.0,
             scratch: Scratch::new(n),
             raw_labels: vec![0; n],
@@ -166,6 +183,7 @@ impl Sim {
             primordial: Cow::Borrowed(&self.primordial),
             heat: Cow::Borrowed(&self.heat),
             dyn_topo: Cow::Borrowed(&self.dyn_topo),
+            climate: Cow::Borrowed(&self.climate),
             sea_level: self.sea_level,
             tuning: Cow::Borrowed(&self.tuning),
             options: Cow::Borrowed(&self.options),
@@ -213,12 +231,15 @@ impl Sim {
         sim.primordial = state.primordial.into_owned();
         sim.heat = state.heat.into_owned();
         sim.dyn_topo = state.dyn_topo.into_owned();
+        sim.climate = state.climate.into_owned();
         sim.sea_level = state.sea_level;
         sim.tuning = state.tuning.into_owned();
         sim.options = state.options.into_owned();
         sim.initial_mass = state.initial_mass;
         sim.elapsed = state.elapsed;
         sim.substeps = state.substeps;
+        sim.refresh_facies();
+        sim.refresh_resources();
         Ok(sim)
     }
 
@@ -334,6 +355,7 @@ impl Sim {
     fn effective_tuning(&self) -> Tuning {
         let mut eff = effective_tuning(&self.tuning, self.elapsed, self.heat.excess());
         steer_accretion(&mut eff, &self.options, &self.advection);
+        eff.composition_crust_type = self.options.composition_crust_type;
         eff
     }
 
@@ -378,7 +400,7 @@ impl Sim {
 
     /// Carry the crust through the tick in `steps` equal steps, laying fresh
     /// floor in the gaps each opens. Returns the steps' tallies, summed.
-    fn move_plates(&mut self, steps: usize) -> [f64; 18] {
+    fn move_plates(&mut self, steps: usize) -> [f64; 23] {
         let t = &self.effective_tuning();
         let dt = t.dt_myr / steps as f64;
         let Sim {
@@ -393,7 +415,7 @@ impl Sim {
             ..
         } = self;
         let mut mark = now_ms();
-        let mut moved = [0.0f64; 18];
+        let mut moved = [0.0f64; 23];
         for step in 0..steps {
             for x in advection.step_tallies_mut() {
                 *x = 0.0;
@@ -433,6 +455,7 @@ impl Sim {
             primordial,
             heat,
             dyn_topo,
+            climate,
             sea_level,
             options,
             timings,
@@ -443,7 +466,7 @@ impl Sim {
         update_plate_identity(mesh, front, plates, registry, scratch, t);
         lap(timings, &mut mark, 4);
         update_rifting(
-            mesh, front, plates, mantle, dt, registry, scratch, t, options,
+            mesh, front, plates, mantle, boundaries, dt, registry, scratch, t, options,
         );
         collapse_passive_margins(mesh, front, plates, registry, scratch, t, options);
         lap(timings, &mut mark, 5);
@@ -451,10 +474,17 @@ impl Sim {
         infill_enclosed_basins(mesh, front, dt, advection, scratch, t);
         advection.back_arc_thinned = extend_back_arcs(mesh, front, plates, boundaries, dt, t);
         lap(timings, &mut mark, 6);
-        erode_and_deposit(mesh, front, advection, dt, t);
+        erode_and_deposit(mesh, front, advection, dt, t, climate, &heat.heat_flow);
         lap(timings, &mut mark, 9);
         primordial.update(mesh, front, plates, advection, mantle, heat, dt, t);
-        apply_crust_lifecycle(mesh, front, dt, advection, scratch, t);
+        if t.composition_crust_type {
+            // Differentiate first: the type follows what the crust is made of.
+            differentiate(front, &heat.heat_flow, dt, t);
+            apply_crust_lifecycle(mesh, front, dt, advection, scratch, t);
+        } else {
+            apply_crust_lifecycle(mesh, front, dt, advection, scratch, t);
+            differentiate(front, &heat.heat_flow, dt, t);
+        }
         keep_continents_whole(mesh, front, advection, scratch, t);
         track_continental_growth(mesh, front, dt, advection);
         update_cratons(mesh, front, dt, excess, scratch, t);
@@ -462,11 +492,16 @@ impl Sim {
         update_lithosphere(front, advection, dt, t);
         heat.update(mesh, front, mantle.cell_temps(), dt, *elapsed, t);
         lap(timings, &mut mark, 6);
+        // Density follows what the crust is made of, so what erosion and
+        // elevation read next is this tick's.
+        update_densities(front, t);
         *sea_level = apply_elevation(mesh, front, dyn_topo, boundaries, *sea_level, t);
         lap(timings, &mut mark, 7);
         classify(mesh, front, plates, boundaries, scratch, t);
         lap(timings, &mut mark, 8);
         *elapsed += dt;
+        self.refresh_facies();
+        self.refresh_resources();
     }
 
     /// Excess of the mantle's temperature over today's, 1 being about 250 K
@@ -599,6 +634,66 @@ impl Sim {
             self.sea_level,
             &t,
         );
+        self.refresh_facies();
+        self.refresh_resources();
+    }
+
+    /// Re-derive every cell's resource potentials from its rock history.
+    fn refresh_resources(&mut self) {
+        let t = self.effective_tuning();
+        evaluate(&RULES, &self.front, &self.climate, &t, &mut self.resources);
+    }
+
+    /// Potential (0 to 1) of resource `r` (as numbered in
+    /// [`crate::resources::Resource`]) at each cell, as of the last tick.
+    pub fn resource(&self, r: usize) -> &[f32] {
+        let n = self.mesh.cell_count;
+        &self.resources[r * n..(r + 1) * n]
+    }
+
+    /// Re-read every cell's facies from its peaks.
+    fn refresh_facies(&mut self) {
+        let t = self.effective_tuning();
+        classify_facies(&self.front, &t, &mut self.facies);
+    }
+
+    /// Metamorphic facies of the rock at each cell's surface, as of the last
+    /// tick, numbered as in [`crate::metamorphism::Facies`].
+    pub fn facies(&self) -> &[u8] {
+        &self.facies
+    }
+
+    /// Fill in the share of land and of continental area with a good chance
+    /// (over half) of each resource.
+    fn report_resources(&self, m: &mut WorldMetrics) {
+        let (mut land, mut continental) = (0.0, 0.0);
+        for i in 0..self.mesh.cell_count {
+            let area = self.mesh.area(i);
+            if self.front.elevation[i] > 0.0 {
+                land += area;
+            }
+            if self.front.crust_type[i] == CONTINENTAL {
+                continental += area;
+            }
+        }
+        for r in 0..RESOURCES {
+            let (mut on_land, mut on_continent) = (0.0, 0.0);
+            for (i, &p) in self.resource(r).iter().enumerate() {
+                if p <= 0.5 {
+                    continue;
+                }
+                let area = self.mesh.area(i);
+                if self.front.elevation[i] > 0.0 {
+                    on_land += area;
+                }
+                if self.front.crust_type[i] == CONTINENTAL {
+                    on_continent += area;
+                }
+            }
+            m.resource_land_share[r] = if land > 0.0 { on_land / land } else { 0.0 };
+            m.resource_continental_share[r] =
+                if continental > 0.0 { on_continent / continental } else { 0.0 };
+        }
     }
 
     pub fn metrics(&self) -> WorldMetrics {
@@ -612,6 +707,7 @@ impl Sim {
             self.elapsed,
         );
         m.sea_level = self.sea_level;
+        self.report_resources(&mut m);
         m.mantle_excess = self.mantle_excess();
         m.active_plumes = self.active_plumes();
         let h = &self.heat;
@@ -643,23 +739,48 @@ impl Sim {
     /// A hash of every cell field, every plate's motion and the mass ledger:
     /// two runs that agree on it made the same world, bit for bit.
     pub fn fingerprint(&self) -> u64 {
+        self.hash_world(true, true)
+    }
+
+    /// [`Sim::fingerprint`] without the composition lanes: what the plates,
+    /// crust and mantle did. A change that only adds to the composition record
+    /// leaves it as it was.
+    pub fn dynamics_fingerprint(&self) -> u64 {
+        self.hash_world(false, true)
+    }
+
+    /// A hash of the composition lanes alone.
+    pub fn composition_fingerprint(&self) -> u64 {
+        self.hash_world(true, false)
+    }
+
+    /// The world's hash over its composition lanes (`lanes`) and over all the
+    /// rest (`rest`); with both, [`Sim::fingerprint`].
+    fn hash_world(&self, lanes: bool, rest: bool) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         let mut eat = |x: u64| hash = (hash ^ x).wrapping_mul(0x0000_0100_0000_01b3);
         let d = &self.front;
-        for field in [
-            &d.elevation,
-            &d.age,
-            &d.density,
-            &d.thickness,
-            &d.weakness,
-            &d.mantle_heat,
-            &d.slab,
-            &d.keel,
-            &d.lithosphere,
-            &d.plume_share,
-            &d.sediment_share,
-        ] {
-            field.iter().for_each(|x| eat(x.to_bits() as u64));
+        if rest {
+            for field in [
+                &d.elevation,
+                &d.age,
+                &d.density,
+                &d.thickness,
+                &d.weakness,
+                &d.mantle_heat,
+                &d.slab,
+                &d.keel,
+                &d.lithosphere,
+            ] {
+                field.iter().for_each(|x| eat(x.to_bits() as u64));
+            }
+        }
+        if lanes {
+            d.lanes.values().iter().for_each(|x| eat(x.to_bits() as u64));
+            d.arc_age.iter().for_each(|x| eat(x.to_bits() as u64));
+        }
+        if !rest {
+            return hash;
         }
         d.plate_id.iter().for_each(|&x| eat(x as u32 as u64));
         d.crust_type
@@ -695,6 +816,14 @@ impl Sim {
     /// plates. A stand-in for the TypeScript crack walk, for native tests and
     /// profiling only.
     pub fn crack_great_circles(&mut self, planes: usize, seed: &str) {
+        let cracked = self.great_circle_cracks(planes, seed);
+        self.reassign_plates(&vec![0u8; self.mesh.arc_count()], true);
+        self.reassign_plates(&cracked, false);
+    }
+
+    /// The arcs `planes` random great circles cross, as `reassign_plates`
+    /// takes them.
+    pub fn great_circle_cracks(&self, planes: usize, seed: &str) -> Vec<u8> {
         let mut rng = Rng::new(seed);
         let normals: Vec<[f64; 3]> = (0..planes)
             .map(|_| {
@@ -717,8 +846,7 @@ impl Sim {
                 *flag = 1;
             }
         }
-        self.reassign_plates(&vec![0u8; self.mesh.arc_count()], true);
-        self.reassign_plates(&cracked, false);
+        cracked
     }
 }
 
@@ -734,6 +862,143 @@ mod tests {
             sim.tick();
         }
         sim
+    }
+
+    /// How far the igneous and sediment lanes are from summing to 1 (or the
+    /// cover from being part of the sediment), worst
+    /// over every cell with crust, and the lowest and highest value any lane
+    /// holds.
+    fn composition_flaws(sim: &Sim) -> (f64, f32, f32) {
+        use crate::cell_data::{
+            LANE_COVER_FELSIC, LANE_COVER_MAFIC, LANE_FELSIC, LANE_MAFIC, LANE_SEDIMENT,
+        };
+        let d = &sim.front;
+        let (mut worst, mut lo, mut hi) = (0.0f64, f32::MAX, f32::MIN);
+        for i in 0..sim.mesh.cell_count {
+            for l in (0..crate::cell_data::LANES).filter(|&l| crate::cell_data::is_share(l)) {
+                lo = lo.min(d.lanes.lane(l)[i]);
+                hi = hi.max(d.lanes.lane(l)[i]);
+            }
+            if d.thickness[i] <= 0.0 {
+                continue;
+            }
+            let sum = [LANE_MAFIC, LANE_FELSIC, LANE_SEDIMENT]
+                .iter()
+                .map(|&l| d.lanes.lane(l)[i] as f64)
+                .sum::<f64>();
+            worst = worst.max((1.0 - sum).abs());
+            // The cover is part of the sediment: never more of it than there is.
+            let cover = (d.lanes.lane(LANE_COVER_FELSIC)[i] + d.lanes.lane(LANE_COVER_MAFIC)[i]) as f64;
+            worst = worst.max(cover - d.lanes.lane(LANE_SEDIMENT)[i] as f64);
+        }
+        (worst, lo, hi)
+    }
+
+    #[test]
+    fn the_records_of_what_the_surface_rock_has_been_through_stay_physical() {
+        use crate::cell_data::{
+            LANE_ARC_EXHUMED, LANE_EXHUMED, LANE_PEAK_PRESSURE, LANE_PEAK_TEMP, is_share,
+        };
+        use crate::metamorphism::Facies;
+        let mut sim = Sim::new(4);
+        sim.crack_great_circles(4, "records");
+        for tick in 0..200 {
+            sim.tick();
+            let d = &sim.front;
+            for l in (0..crate::cell_data::LANES).filter(|&l| !is_share(l)) {
+                let bad = d.lanes.lane(l).iter().find(|x| !x.is_finite() || **x < 0.0);
+                assert!(bad.is_none(), "tick {tick}: record {l} holds {bad:?}");
+            }
+            // Rock never buried deep enough to change has no facies.
+            let t = sim.effective_tuning();
+            for i in 0..sim.mesh.cell_count {
+                if (d.lanes.lane(LANE_PEAK_TEMP)[i] as f64) < t.facies_zeolite_temp {
+                    assert_eq!(sim.facies()[i], Facies::None as u8, "tick {tick}, cell {i}");
+                }
+            }
+        }
+        let d = &sim.front;
+        let exhumed = d.lanes.lane(LANE_EXHUMED);
+        assert!(exhumed.iter().any(|&x| x > 0.0), "no land was cut into");
+        assert!(d.lanes.lane(LANE_PEAK_PRESSURE).iter().any(|&x| x > 0.0));
+        assert!(d.lanes.lane(LANE_ARC_EXHUMED).iter().all(|&x| x.is_finite()));
+    }
+
+    #[test]
+    fn mafic_felsic_and_sediment_always_make_up_the_crust() {
+        // From the hot start, so plumes, drip, arcs, erosion and rifting all run.
+        let mut sim = Sim::new(4);
+        sim.crack_great_circles(4, "partition");
+        for tick in 0..150 {
+            sim.tick();
+            let (worst, lo, hi) = composition_flaws(&sim);
+            assert!(worst < 1e-3, "tick {tick}: lanes off by {worst}");
+            assert!(lo >= 0.0 && hi <= 1.0 + 1e-6, "tick {tick}: a lane left [0, 1]: {lo}..{hi}");
+        }
+    }
+
+    #[test]
+    fn the_lanes_account_for_all_the_crust() {
+        use crate::cell_data::{LANE_FELSIC, LANE_MAFIC, LANE_SEDIMENT, total_crust_mass};
+        let mut sim = Sim::new(4);
+        sim.crack_great_circles(4, "ledger");
+        for _ in 0..100 {
+            sim.tick();
+        }
+        let d = &sim.front;
+        let by_lane: f64 = (0..sim.mesh.cell_count)
+            .map(|i| {
+                let shares: f64 = [LANE_MAFIC, LANE_FELSIC, LANE_SEDIMENT]
+                    .iter()
+                    .map(|&l| d.lanes.lane(l)[i] as f64)
+                    .sum();
+                sim.mesh.area(i) * d.thickness[i] as f64 * shares
+            })
+            .sum();
+        let total = total_crust_mass(&sim.mesh.areas, d);
+        assert!((by_lane / total - 1.0).abs() < 1e-3, "lanes hold {by_lane}, crust is {total}");
+    }
+
+    #[test]
+    fn arcs_leave_their_mark_on_the_crust_and_the_clock_runs_from_it() {
+        use crate::cell_data::{LANE_FELSIC, NEVER};
+        let mut sim = Sim::new(5);
+        sim.crack_great_circles(4, "arcs");
+        let dt = sim.tuning.dt_myr as f32;
+        let mut just_reset = false;
+        for _ in 0..200 {
+            sim.tick();
+            just_reset |= sim.front.arc_age.iter().any(|&a| a == dt);
+        }
+        assert!(just_reset, "no cell was ever reset by an arc");
+        let d = &sim.front;
+        let elapsed = sim.elapsed() as f32;
+        let (mut touched, mut felsic_touched, mut felsic_untouched) = (0usize, 0.0f64, 0.0f64);
+        let mut untouched = 0usize;
+        for i in 0..sim.mesh.cell_count {
+            if d.thickness[i] <= 0.0 {
+                continue;
+            }
+            let f = d.lanes.lane(LANE_FELSIC)[i] as f64;
+            if d.arc_age[i] == NEVER {
+                untouched += 1;
+                felsic_untouched += f;
+            } else {
+                assert!(d.arc_age[i] <= elapsed + dt, "arc age {} past the run", d.arc_age[i]);
+                touched += 1;
+                felsic_touched += f;
+            }
+        }
+        assert!(touched > 0 && untouched > 0);
+        let (touched_mean, untouched_mean) =
+            (felsic_touched / touched as f64, felsic_untouched / untouched as f64);
+        println!(
+            "arc-touched crust {:.1}% felsic ({touched} cells), the rest {:.1}% ({untouched} cells); {} continental cells",
+            touched_mean * 100.0,
+            untouched_mean * 100.0,
+            d.crust_type.iter().filter(|&&c| c == CONTINENTAL).count()
+        );
+        assert!(touched_mean > untouched_mean, "arc crust no more felsic than the rest");
     }
 
     fn land_share(sim: &Sim) -> f64 {
@@ -784,18 +1049,20 @@ mod tests {
     }
 
     #[test]
-    fn erosion_deposits_everything_it_removes_every_tick() {
+    fn erosion_deposits_or_subducts_everything_it_removes_every_tick() {
         let mut sim = Sim::new(4);
         sim.crack_great_circles(4, "erosion ledger");
         let mut eroded = 0.0;
         for _ in 0..80 {
             sim.tick();
             let f = &sim.advection;
+            let laid_or_down = f.sediment_deposited + f.sediment_subducted;
             assert!(
-                (f.sediment_eroded - f.sediment_deposited).abs() <= 1e-9 * f.sediment_eroded.max(1.0),
-                "eroded {} but deposited {}",
+                (f.sediment_eroded - laid_or_down).abs() <= 1e-9 * f.sediment_eroded.max(1.0),
+                "eroded {} but deposited {} and subducted {}",
                 f.sediment_eroded,
-                f.sediment_deposited
+                f.sediment_deposited,
+                f.sediment_subducted
             );
             eroded += f.sediment_eroded;
         }
@@ -872,11 +1139,12 @@ mod tests {
     #[cfg(feature = "parallel")]
     #[test]
     fn the_world_is_the_same_on_one_thread_and_on_four() {
+        use crate::cell_data::{LANE_PLUME, LANE_SEDIMENT};
         let (one, four) = (run_on(1, 40), run_on(4, 40));
         assert!(one.last_substeps() > 1, "every tick was a single step");
         let (a, b) = (&one.front, &four.front);
         let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
-        for (name, x, y) in [
+        let fields: [(&str, &[f32], &[f32]); 11] = [
             ("elevation", &a.elevation, &b.elevation),
             ("age", &a.age, &b.age),
             ("density", &a.density, &b.density),
@@ -886,9 +1154,10 @@ mod tests {
             ("slab", &a.slab, &b.slab),
             ("keel", &a.keel, &b.keel),
             ("lithosphere", &a.lithosphere, &b.lithosphere),
-            ("plume share", &a.plume_share, &b.plume_share),
-            ("sediment share", &a.sediment_share, &b.sediment_share),
-        ] {
+            ("plume share", a.lanes.lane(LANE_PLUME), b.lanes.lane(LANE_PLUME)),
+            ("sediment share", a.lanes.lane(LANE_SEDIMENT), b.lanes.lane(LANE_SEDIMENT)),
+        ];
+        for (name, x, y) in fields {
             assert!(bits(x) == bits(y), "{name} differs");
         }
         assert!(a.plate_id == b.plate_id, "plates differ");
@@ -1041,7 +1310,8 @@ mod tests {
             if d.plate_id[i] == continent {
                 d.crust_type[i] = crate::cell_data::CONTINENTAL;
                 d.thickness[i] = 35.0;
-                d.density[i] = t.continental_density as f32;
+                d.density[i] = t.mean_continental_density() as f32;
+                d.lanes.set(i, crate::cell_data::BULK_CONTINENT);
                 d.mantle_heat[i] = heat;
             }
         }
@@ -1084,9 +1354,14 @@ mod tests {
         // Hemmed in by ocean that cannot subduct, the pieces cannot get far,
         // but the dome push is the only thing that moves them at all.
         let (apart, _) = after_first_rift(&mut hot_continent(|_| {}), 10);
-        let (still, _) = after_first_rift(&mut hot_continent(|t| t.dome_push = 0.0), 10);
-        assert!(still < 1e-6, "pieces separated with no dome push: {still}");
         assert!(apart > 5e-5, "pieces barely moving apart: {apart}");
+        // Without it nothing would part the pieces, so the plate never breaks.
+        let mut still = hot_continent(|t| t.dome_push = 0.0);
+        let stretching = (still.tuning.rift_duration / still.tuning.dt_myr).ceil() as usize;
+        for _ in 0..stretching + 5 {
+            still.tick();
+        }
+        assert_eq!(still.rift_count(), 0, "a continent nothing pulls apart broke");
     }
 
     /// Ticks until a rift has begun to stretch on the hot continent.
@@ -1254,7 +1529,7 @@ mod tests {
         d.crust_type[pocket] = OCEANIC;
         d.thickness[pocket] = 9.0;
         d.age[pocket] = 150.0;
-        d.density[pocket] = sim.tuning.oceanic_density as f32;
+        d.density[pocket] = sim.tuning.mafic_density as f32;
         d.lithosphere[pocket] = crate::lithosphere::ocean_lithosphere(&sim.tuning, 150.0) as f32;
         for p in sim.plates.by_id.values_mut() {
             p.omega = [0.0; 3];
@@ -1357,11 +1632,11 @@ mod tests {
             if d.plate_id[i] == continent {
                 d.crust_type[i] = CONTINENTAL;
                 d.thickness[i] = 35.0;
-                d.density[i] = t.continental_density as f32;
+                d.density[i] = t.mean_continental_density() as f32;
                 d.age[i] = 1000.0;
             } else {
                 d.crust_type[i] = OCEANIC;
-                d.density[i] = t.oceanic_density as f32;
+                d.density[i] = t.mafic_density as f32;
             }
         }
         let coast: Vec<usize> = (0..n)
@@ -1576,7 +1851,8 @@ mod tests {
             if d.plate_id[i] == continent {
                 d.crust_type[i] = CONTINENTAL;
                 d.thickness[i] = 38.0;
-                d.density[i] = sim.tuning.continental_density as f32;
+                d.density[i] = sim.tuning.mean_continental_density() as f32;
+                d.lanes.set(i, crate::cell_data::BULK_CONTINENT);
             } else {
                 d.crust_type[i] = OCEANIC;
             }

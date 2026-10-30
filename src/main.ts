@@ -140,6 +140,7 @@ const settings = createSettingsStore(
     autoRotate: INITIAL_AUTO_ROTATE,
     projection: INITIAL_PROJECTION,
     viewMode: INITIAL_VIEW_MODE,
+    resource: 0,
     elevationStyle: INITIAL_ELEVATION_STYLE,
     hillshade: INITIAL_HILLSHADE,
     hillshadeStrength: INITIAL_HILLSHADE_STRENGTH,
@@ -174,6 +175,7 @@ const recolour = (): void => {
       strength: settings.get("hillshadeStrength"),
       exaggeration: settings.get("hillshadeExaggeration"),
     },
+    settings.get("resource"),
   );
 };
 
@@ -396,6 +398,7 @@ settings.on("level", (level) => {
   if (!applyingResume) rebuild(level);
 });
 settings.on("elevationStyle", () => recolour());
+settings.on("resource", () => recolour());
 settings.on("hillshade", () => recolour());
 settings.on("hillshadeStrength", () => recolour());
 settings.on("hillshadeExaggeration", () => recolour());

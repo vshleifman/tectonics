@@ -37,7 +37,7 @@ pub fn continental_lithosphere(t: &Tuning, keel: f64) -> f64 {
 /// enough to sink; infinite if its lid never outweighs the crust.
 pub fn neutral_age(t: &Tuning, thickness: f64) -> f64 {
     let lid = lid_density(t, 0.0) - t.mantle_density;
-    let crust = thickness.max(0.0) * (t.mantle_density - t.oceanic_density);
+    let crust = thickness.max(0.0) * (t.mantle_density - t.mafic_density);
     if lid <= 0.0 || t.lithosphere_growth <= 0.0 {
         return f64::INFINITY;
     }
@@ -109,7 +109,7 @@ mod tests {
 
     /// Buoyancy of ocean floor of `age` over `thickness` km of crust.
     fn ocean(t: &Tuning, age: f64, thickness: f64) -> f64 {
-        buoyancy(t, thickness, t.oceanic_density, ocean_lithosphere(t, age), 0.0)
+        buoyancy(t, thickness, t.mafic_density, ocean_lithosphere(t, age), 0.0)
     }
 
     #[test]
@@ -136,8 +136,8 @@ mod tests {
     #[test]
     fn a_cratonic_keel_weighs_about_what_the_lid_it_replaces_does() {
         let t = Tuning::default();
-        let craton = buoyancy(&t, 40.0, t.continental_density, continental_lithosphere(&t, 1.0), 1.0);
-        let continent = buoyancy(&t, 40.0, t.continental_density, continental_lithosphere(&t, 0.0), 0.0);
+        let craton = buoyancy(&t, 40.0, t.mean_continental_density(), continental_lithosphere(&t, 1.0), 1.0);
+        let continent = buoyancy(&t, 40.0, t.mean_continental_density(), continental_lithosphere(&t, 0.0), 0.0);
         assert!(craton > 0.0, "a full keel sank: {craton:.2}");
         assert!(
             (craton - continent).abs() < 0.15,

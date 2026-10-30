@@ -58,12 +58,27 @@ fn established(mesh: &Mesh, data: &CellData, cell: usize) -> f64 {
         })
 }
 
-/// Polarity a new subduction zone would start with: continent never goes
-/// down, otherwise the heavier column, crust and lid, does.
+/// Is the crust at `i` too buoyant to be pulled down a trench? Continent always
+/// is. Ocean-type crust is too once its basement is thickened past
+/// `continental_revert_thickness`, as an arc or a plateau is (sediment piled on
+/// a shelf is not: it goes down with the plate it lies on), and its whole
+/// column floats on the mantle: Kohistan, Wrangellia and the Ontong Java
+/// plateau jammed their trenches and accreted instead of going down. Ordinary
+/// ocean floor, thin, goes down however young.
+pub fn resists_subduction(t: &Tuning, data: &CellData, i: usize) -> bool {
+    data.crust_type[i] == CONTINENTAL
+        || (t.composition_crust_type
+            && data.basement_km(i) >= t.continental_revert_thickness
+            && column_buoyancy(t, data, i) >= 0.0)
+}
+
+/// Polarity a new subduction zone would start with: crust that resists
+/// subduction never goes down, otherwise the heavier column, crust and lid,
+/// does.
 fn initiating_over(t: &Tuning, data: &CellData, a: usize, b: usize) -> usize {
-    if data.crust_type[a] == CONTINENTAL {
+    if resists_subduction(t, data, a) {
         a
-    } else if data.crust_type[b] == CONTINENTAL
+    } else if resists_subduction(t, data, b)
         || column_buoyancy(t, data, a) <= column_buoyancy(t, data, b)
     {
         b
@@ -83,8 +98,8 @@ fn subduction_with(
     t: &Tuning,
     initiate: impl Fn(usize, usize) -> usize,
 ) -> Option<Subduction> {
-    let cont_a = data.crust_type[a] == CONTINENTAL;
-    let cont_b = data.crust_type[b] == CONTINENTAL;
+    let cont_a = resists_subduction(t, data, a);
+    let cont_b = resists_subduction(t, data, b);
     if cont_a && cont_b {
         return None;
     }
@@ -184,7 +199,7 @@ pub fn update_slabs(
         // heavy enough to founder on its own, and slowly at that: the
         // Atlantic's 180 Myr-old margins have yet to start one.
         let age = data.age[sub.down] as f64;
-        let founder = if data.crust_type[sub.down] == CONTINENTAL || age < t.slab_initiation_age {
+        let founder = if resists_subduction(t, data, sub.down) || age < t.slab_initiation_age {
             0.0
         } else {
             founder_rate * slab_pull(t, column_buoyancy(t, data, sub.down))
@@ -225,7 +240,7 @@ pub fn seed_slabs(mesh: &Mesh, data: &mut CellData, boundaries: &BoundaryField, 
         if pa < 0 || pb < 0 || pa == pb {
             continue;
         }
-        if data.crust_type[ca] == CONTINENTAL && data.crust_type[cb] == CONTINENTAL {
+        if resists_subduction(t, data, ca) && resists_subduction(t, data, cb) {
             continue;
         }
         if established(mesh, data, ca) > trace || established(mesh, data, cb) > trace {
@@ -239,7 +254,7 @@ pub fn seed_slabs(mesh: &Mesh, data: &mut CellData, boundaries: &BoundaryField, 
     }
     for (ca, cb) in margins {
         let (pa, pb) = (data.plate_id[ca], data.plate_id[cb]);
-        let over = if data.crust_type[ca] == CONTINENTAL || data.crust_type[cb] == CONTINENTAL {
+        let over = if resists_subduction(t, data, ca) || resists_subduction(t, data, cb) {
             initiating_over(t, data, ca, cb)
         } else {
             let lower_over = vote.get(&suture_key(pa, pb)).copied().unwrap_or(0.0) >= 0.0;
@@ -260,7 +275,7 @@ mod tests {
     fn two_oceans(t: &Tuning, a: (f32, f32), b: (f32, f32)) -> CellData {
         let mut data = CellData::new(2);
         data.crust_type = vec![OCEANIC; 2];
-        data.density = vec![t.oceanic_density as f32; 2];
+        data.density = vec![t.mafic_density as f32; 2];
         data.age = vec![a.0, b.0];
         data.thickness = vec![a.1, b.1];
         settle_lithosphere(&mut data, t);
@@ -273,6 +288,55 @@ mod tests {
         let h = t.oceanic_thickness as f32;
         assert_eq!(initiating_over(&t, &two_oceans(&t, (30.0, h), (120.0, h)), 0, 1), 0);
         assert_eq!(initiating_over(&t, &two_oceans(&t, (120.0, h), (30.0, h)), 0, 1), 1);
+    }
+
+    /// Two neighbouring cells of ocean, `(age Myr, thickness km)` each, on two
+    /// plates, with ordinary mafic crust.
+    fn neighbours(t: &Tuning, a: (f32, f32), b: (f32, f32)) -> (Mesh, CellData, usize, usize) {
+        let mesh = Mesh::icosphere(2);
+        let n = mesh.cell_count;
+        let (ca, cb) = (0, mesh.nbr[mesh.nbrs(0).next().unwrap()] as usize);
+        let mut data = CellData::new(n);
+        data.crust_type.fill(OCEANIC);
+        data.density.fill(t.mafic_density as f32);
+        data.thickness.fill(t.oceanic_thickness as f32);
+        data.age.fill(60.0);
+        data.plate_id.fill(0);
+        data.plate_id[cb] = 1;
+        data.age[ca] = a.0;
+        data.thickness[ca] = a.1;
+        data.age[cb] = b.0;
+        data.thickness[cb] = b.1;
+        settle_lithosphere(&mut data, t);
+        (mesh, data, ca, cb)
+    }
+
+    #[test]
+    fn a_thick_mafic_arc_resists_subduction_and_ordinary_floor_does_not() {
+        let t = Tuning {
+            composition_crust_type: true,
+            ..Tuning::default()
+        };
+        let (_, data, arc, floor) = neighbours(&t, (5.0, 25.0), (120.0, t.oceanic_thickness as f32));
+        assert_eq!(data.crust_type[arc], OCEANIC);
+        assert!(resists_subduction(&t, &data, arc), "a 25 km arc went down");
+        assert!(!resists_subduction(&t, &data, floor), "old thin floor resisted");
+    }
+
+    #[test]
+    fn thin_ocean_goes_down_under_a_thick_arc_and_two_arcs_jam() {
+        let t = Tuning {
+            composition_crust_type: true,
+            ..Tuning::default()
+        };
+        let h = t.oceanic_thickness as f32;
+        // Arc against old floor: the floor goes down, however old the arc.
+        let (mesh, data, arc, floor) = neighbours(&t, (200.0, 25.0), (20.0, h));
+        let sub = subduction(&mesh, &data, arc, floor, &t).expect("no subduction");
+        assert_eq!((sub.over, sub.down), (arc, floor));
+        // Two arcs: neither can go down.
+        let (mesh, data, a, b) = neighbours(&t, (30.0, 25.0), (60.0, 25.0));
+        assert!(subduction(&mesh, &data, a, b, &t).is_none());
     }
 
     #[test]

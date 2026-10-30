@@ -48,7 +48,7 @@ export interface Tuning {
    * E-folding time (Myr) of the relief of land, isostatic rebound included:
    * land loses crust in proportion to its height over sea level, taking
    * `erosionTime` to shed 1/e of it. A 4 km range keeps about 1.5 km after 150
-   * Myr, as old orogens do. Cratons wear slowest. 0 disables erosion. Sediment that reaches a trench and subducts is counted again by the recycling controller, so with the fixed `continentalRecyclingRate` (no area target held) consider lowering it.
+   * Myr, as old orogens do. Cratons wear slowest. 0 disables erosion. Most sediment that reaches a trench subducts (see `trenchSedimentSubduction`).
    */
   erosionTime: number;
   /**
@@ -66,6 +66,12 @@ export interface Tuning {
    * the last ring stays in it, so nothing is lost.
    */
   sedimentReach: number;
+  /**
+   * Share of the sediment reaching the overriding edge of a trench that goes
+   * down with the plate; the rest builds the accretionary prism. ~70% beneath
+   * large prisms, nearly all at non-accretionary margins (von Huene & Scholl 1991).
+   */
+  trenchSedimentSubduction: number;
   /** Depth (km) the plate going down is bent below its column at a trench with a full slab. Fresh each tick, scaled by how much slab there is. */
   trenchDepth: number;
   /** Hard clamp on elevation (km). */
@@ -310,14 +316,26 @@ export interface Tuning {
    * over. Depth follows {@link seafloorFlatteningAge} instead.
    */
   maxOceanicAge: number;
-  /** Continental (buoyant) crust density. */
-  continentalDensity: number;
   /**
-   * Density of oceanic crust, at every age. Crust does not densify as it
+   * Density (g/cm³) of mafic rock, basalt and gabbro: 2.9, which is what ocean
+   * crust comes to (Carlson and Raskin 1984). Crust does not densify as it
    * cools; what makes old ocean sink is the cold mantle lid beneath it (see
    * {@link lithosphereGrowth}), and how deep it sits the cooling curve's job.
    */
-  oceanicDensity: number;
+  maficDensity: number;
+  /** Density (g/cm³) of felsic rock, granitoid and its volcanics: about 2.7 (Christensen and Mooney 1995). */
+  felsicDensity: number;
+  /** Density (g/cm³) of metasediment, sediment buried into the basement: about 2.7. */
+  metasedimentDensity: number;
+  /** Density (g/cm³) of loose, uncompacted clastic cover: about 2.4. */
+  coverDensity: number;
+  /**
+   * Density (g/cm³) of mafic rock that has turned to eclogite at depth: about
+   * 3.45, denser than the 3.3 mantle (Hacker 1996).
+   */
+  eclogiteDensity: number;
+  /** Depth (km) below which mafic rock is eclogite: about 12 kbar, 45 km. */
+  eclogiteDepth: number;
   /** Starting oceanic crust thickness (km). */
   oceanicThickness: number;
   /** Thickness (km) above which accreted oceanic crust becomes continental. */
@@ -337,6 +355,28 @@ export interface Tuning {
    * Plume plateaus are exempt.
    */
   continentalNucleationThickness: number;
+  /**
+   * Share of a cell's basement (felsic rock plus sediment buried into it, not
+   * loose cover) that must be evolved for ocean crust to count as continental.
+   * Bulk continental crust is andesitic, roughly 35-50% felsic on a basalt to
+   * granite mix (Rudnick and Gao 2003); this is the lower edge.
+   */
+  continentalFelsicShare: number;
+  /**
+   * Evolved share below which continental crust reverts to ocean. Below
+   * {@link Tuning.continentalFelsicShare} so a cell near the line does not
+   * flicker.
+   */
+  oceanicFelsicShare: number;
+  /**
+   * Surface heat flow (mW/m2) of crust over active arc magmatism, which carries
+   * heat up in melt: 80-90 across the Sumatra-Andaman arc, about 80 in Japan's
+   * volcanic zone, against 40-70 in forearcs. Raises the base temperature
+   * thick arc crust differentiates at.
+   */
+  arcHeatFlow: number;
+  /** Myr over which that extra heat fades once arc magmatism stops. */
+  arcHeatDuration: number;
   /**
    * Thickness (km) a crustal root can carry before it starts to founder. This is
    * the headroom a continent-continent collision has to pile into: set it near
@@ -396,12 +436,11 @@ export interface Tuning {
 
   // --- Advection (see sim-rs/src/advect.rs) ---
   /**
-   * Fraction of a subducting cell's mass that accretes onto the survivor. This
-   * sets how fast arcs build continent, and so how fast continents turn over
-   * once recycling has levelled them off. Earth's arcs keep
-   * roughly a tenth of what they consume; at 0.2 continents reach their target
-   * in ~3 Gyr with the target held and their crust lasts ~1.5 Gyr before it is recycled (Earth's
-   * averages ~2 Gyr). Higher grows them faster and turns them over faster.
+   * Share of the ocean crust going down at a trench that the arc behind it
+   * keeps. Earth's arcs add ~2.5–3 km³/yr (Scholl & von Huene 2007; Clift et
+   * al. 2009) while ~24 km³/yr of ocean crust goes down (~3.4 km²/yr of sea
+   * floor made, Rowley 2002, at ~7 km): ~0.11. Higher grows continents faster
+   * and turns them over faster.
    */
   accretionFraction: number;
   /**
@@ -534,9 +573,10 @@ export interface Tuning {
   continentalTargetGain: number;
   /**
    * Share of the continental area recycled per Myr, whenever
-   * {@link SimOptions.holdContinentalArea} is off. Earth returns ~3 km³/yr of
-   * its ~7×10⁹ km³ of continental crust, ~0.0004 per Myr; where growth then
-   * levels off is up to the rest of the model.
+   * {@link SimOptions.holdContinentalArea} is off. 0 by default: sediment
+   * subducted at trenches ({@link trenchSedimentSubduction}) and subduction
+   * erosion of margins and arcs are modelled where they happen, so a fixed
+   * rate on top would count them twice. Kept as an extra sink to experiment with.
    */
   continentalRecyclingRate: number;
 
@@ -772,6 +812,104 @@ export interface Tuning {
   heatFlowSensitivity: number;
   /** Heat flow through uninsulated continental crust (mW/m²). */
   continentalHeatFlow: number;
+  /**
+   * Depth (km) of loose sediment cover at which it is buried, compacted and
+   * cemented into rock, and becomes part of the basement. Diagenesis turns
+   * sediment into rock over the first 2-3 km of burial.
+   */
+  lithificationDepth: number;
+  /**
+   * Share of the crust an arc builds on ocean floor that is felsic (the rest
+   * is mafic). Island arcs are basalt and basaltic andesite with an evolved
+   * minority, so about a third (Gill, "Orogenic Andesites and Plate
+   * Tectonics", 1981; Hawkesworth and Kemp 2006).
+   */
+  islandArcFelsic: number;
+  /**
+   * The same for an arc built on continent, which assimilates the crust it
+   * rises through and comes out more evolved: about 0.6.
+   */
+  continentalArcFelsic: number;
+  /**
+   * Share of its mafic rock per Myr that hot continental crust turns felsic
+   * when the base of the crust is fully past the solidus. 0.002 is an e-fold
+   * time of 500 Myr: continental crust takes about that long to differentiate.
+   */
+  differentiationRate: number;
+  /**
+   * Temperature (°C) at the base of the crust at which its mafic rock starts to
+   * melt: dehydration melting of amphibolite, about 850 °C (Rapp and Watson
+   * 1995).
+   */
+  maficSolidus: number;
+  /** Temperature range (°C) above the solidus over which melting goes from none to full. */
+  meltingSpan: number;
+  /** Mean surface temperature (°C) the crustal geotherm starts from. */
+  surfaceTemp: number;
+  /** Thermal conductivity of the crust (W/m/K); about 2.5. */
+  crustConductivity: number;
+  /** Heat the crust makes by radioactive decay (µW/m³); about 1 for average continental crust. */
+  crustHeatProduction: number;
+  /**
+   * Peak temperature (°C) at which rock first changes: below it, rock is
+   * unmetamorphosed. Zeolite facies runs from here, about 150 °C (Spear 1993;
+   * Winter 2010, ch. 25).
+   */
+  faciesZeoliteTemp: number;
+  /** Peak temperature (°C) above which rock is greenschist facies: about 300 °C. */
+  faciesGreenschistTemp: number;
+  /** Peak temperature (°C) above which rock is amphibolite facies: about 500 °C. */
+  faciesAmphiboliteTemp: number;
+  /** Peak temperature (°C) above which rock is granulite facies: about 700 °C. */
+  faciesGranuliteTemp: number;
+  /** Peak pressure (kbar) above which cold rock is blueschist facies: about 6. */
+  faciesBlueschistPressure: number;
+  /** Peak temperature (°C) below which high-pressure rock is blueschist, not eclogite: about 450. */
+  faciesBlueschistMaxTemp: number;
+  /** Peak pressure (kbar) above which warm rock is eclogite facies: about 12. */
+  faciesEclogitePressure: number;
+  /**
+   * Pressure (kbar) the crust an arc builds from carries: the accretionary
+   * wedge ocean floor passes through on its way down. 8 kbar is about 30 km.
+   */
+  subductionPeakPressure: number;
+  /** Temperature (°C) of that wedge, cold for its depth: about 250. */
+  subductionPeakTemp: number;
+  /**
+   * Myr since arc magmatism up to which porphyry and epithermal deposits count
+   * in full. They form within a few Myr of the magmatism (Sillitoe 2010,
+   * Economic Geology 105), so a few tens of Myr allows for the crust's age
+   * being mixed.
+   */
+  resourceArcAgeFull: number;
+  /** Myr since arc magmatism after which they no longer count. */
+  resourceArcAgeZero: number;
+  /**
+   * Km eroded since the arc below which a porphyry is still buried: they form
+   * 1-5 km down (Sillitoe 2010).
+   */
+  porphyryMinDepth: number;
+  /** Km eroded since the arc above which a porphyry has been eroded away. */
+  porphyryMaxDepth: number;
+  /**
+   * Km eroded since the arc above which the epithermal system, which forms in
+   * the top 1-1.5 km, is gone (Hedenquist and Lowenstern 1994).
+   */
+  epithermalMaxDepth: number;
+  /** Age (Myr) of ocean floor beyond which sea-floor sulphides no longer count: they are found near ridges. */
+  vmsMaxAge: number;
+  /** Peak temperature (°C) above which sea-floor sulphides are metamorphosed past recognition. */
+  vmsMaxTemp: number;
+  /** Peak temperature (°C) above which podiform chromite is too deformed to count. */
+  chromiteMaxTemp: number;
+  /** Peak temperature (°C) below which no orogenic gold forms: greenschist starts near 300 (Groves et al. 1998). */
+  goldMinTemp: number;
+  /** Peak temperature (°C) above which orogenic gold is lost: the hot end of amphibolite, about 600. */
+  goldMaxTemp: number;
+  /** Peak temperature (°C) above which metasediment melts to granite that carries tin and tungsten, about 650. */
+  graniteMinTemp: number;
+  /** Age (Myr) of craton crust below which it is too young for diamonds: economic kimberlites sit on cratons older than about 1500 (Janse 2007). */
+  kimberliteMinAge: number;
   /** Share of continental heat flow a full cratonic keel blocks. */
   keelInsulation: number;
   /** Exponential fall in mantle viscosity per unit of excess heat. */
@@ -844,6 +982,20 @@ export interface Tuning {
    * convergent margins out-builds the plumes even in the hottest mantle.
    */
   hotDrip: number;
+  /**
+   * Mantle excess heat (1 is about 300 K hotter than today's) at which slabs
+   * become strong enough for sustained modern-style subduction, so arcs build
+   * continent freely and thickened floor stops dripping. Subduction models put
+   * the change at 250-200 K above today's, abrupt by 175-160 K (Sizova et al.
+   * 2010, Lithos 116); 0.68 is about 205 K. Fixed from those, not tuned.
+   */
+  modernSubductionExcess: number;
+  /**
+   * How wide that change is, in excess heat: the brakes are full half this far
+   * above {@link Tuning.modernSubductionExcess} and gone half this far below
+   * it. 0.3 is about 90 K.
+   */
+  modernSubductionWidth: number;
 
   // --- Boundaries / timing ---
   /** Relative speed below which a boundary is treated as inactive (NONE). */
@@ -865,6 +1017,7 @@ export const defaultTuning: Tuning = {
   shelfDepth: -0.15,
   slopeCapture: 0.5,
   sedimentReach: 3,
+  trenchSedimentSubduction: 0.7,
   elevationMin: -10,
   elevationMax: 10,
 
@@ -908,12 +1061,20 @@ export const defaultTuning: Tuning = {
   dynTopoMax: 1.5,
 
   maxOceanicAge: 200,
-  continentalDensity: 2.8,
-  oceanicDensity: 2.9,
+  maficDensity: 2.9,
+  felsicDensity: 2.7,
+  metasedimentDensity: 2.7,
+  coverDensity: 2.4,
+  eclogiteDensity: 3.45,
+  eclogiteDepth: 45,
   oceanicThickness: 7,
   continentalThicknessThreshold: 15,
   continentalRevertThickness: 10,
   continentalNucleationThickness: 20,
+  continentalFelsicShare: 0.35,
+  oceanicFelsicShare: 0.2,
+  arcHeatFlow: 80,
+  arcHeatDuration: 50,
   maxCrustThickness: 60,
   delaminationRate: 0.3,
 
@@ -928,7 +1089,7 @@ export const defaultTuning: Tuning = {
   lidDeltaT: 1300,
   keelDepletion: 0.025,
 
-  accretionFraction: 0.2,
+  accretionFraction: 0.11,
   arcSetback: 0.025,
   backArcWidth: 0.05,
   backArcExtension: 0.25,
@@ -946,7 +1107,7 @@ export const defaultTuning: Tuning = {
   continentalAreaTarget: 0.4,
   continentalTargetTime: 200,
   continentalTargetGain: 4,
-  continentalRecyclingRate: 0.0004,
+  continentalRecyclingRate: 0,
   cratonMinAge: 500,
   cratonInland: 0.02,
   cratonGrowthTime: 400,
@@ -981,7 +1142,7 @@ export const defaultTuning: Tuning = {
 
   minPlateArea: 0.0005,
   minFragmentArea: 0.002,
-  passiveMarginCollapseAge: 300,
+  passiveMarginCollapseAge: 200,
 
   primordialHeat: 1,
   startAgeGa: 3,
@@ -990,6 +1151,36 @@ export const defaultTuning: Tuning = {
   heatResponseTime: 50,
   heatFlowSensitivity: 4,
   continentalHeatFlow: 65,
+  lithificationDepth: 2.5,
+  islandArcFelsic: 0.35,
+  continentalArcFelsic: 0.6,
+  differentiationRate: 0.002,
+  maficSolidus: 850,
+  meltingSpan: 150,
+  surfaceTemp: 15,
+  crustConductivity: 2.5,
+  crustHeatProduction: 1,
+  faciesZeoliteTemp: 150,
+  faciesGreenschistTemp: 300,
+  faciesAmphiboliteTemp: 500,
+  faciesGranuliteTemp: 700,
+  faciesBlueschistPressure: 6,
+  faciesBlueschistMaxTemp: 450,
+  faciesEclogitePressure: 12,
+  subductionPeakPressure: 8,
+  subductionPeakTemp: 250,
+  resourceArcAgeFull: 30,
+  resourceArcAgeZero: 80,
+  porphyryMinDepth: 1,
+  porphyryMaxDepth: 5,
+  epithermalMaxDepth: 1.5,
+  vmsMaxAge: 30,
+  vmsMaxTemp: 450,
+  chromiteMaxTemp: 600,
+  goldMinTemp: 300,
+  goldMaxTemp: 600,
+  graniteMinTemp: 650,
+  kimberliteMinAge: 1500,
   keelInsulation: 0.4,
   viscositySensitivity: 0.1,
   ridgeHeatUplift: 0.1,
@@ -1008,6 +1199,8 @@ export const defaultTuning: Tuning = {
   plumeDrift: 1,
   hotArcSuppression: 1,
   hotDrip: 1,
+  modernSubductionExcess: 0.68,
+  modernSubductionWidth: 0.3,
 
   activeSpeedEps: 1e-5,
   dtMyr: 2,
@@ -1052,6 +1245,29 @@ export interface SimOptions {
    * sediment and the fixed {@link Tuning.continentalRecyclingRate}.
    */
   holdContinentalArea: boolean;
+  /**
+   * Crust type follows what the crust is made of, not how thick it is: ocean
+   * floor turns continental once its basement is evolved enough, arcs and
+   * plateaus differentiate with the heat of arc magmatism, and thick buoyant
+   * ocean-type crust resists subduction and accretes. Experimental: it either
+   * stalls ocean renewal or makes almost no continent. Off, type is decided by
+   * thickness.
+   */
+  compositionCrustType: boolean;
+  /**
+   * Weld two plates only where their continents are closing on balance along
+   * all their contact, rather than wherever any stretch of it closes, and
+   * never two plates that have just broken apart.
+   */
+  weldOnNetClosing: boolean;
+  /**
+   * A rift starts, and keeps stretching, only where the two pieces it would
+   * leave move apart under their own forces (drag, mantle carry, ridge push,
+   * slab pull, and a hot dome across the line). Off, slab tension against
+   * strength is enough, and many rifts break plates into pieces that ridge
+   * push and mantle drag hold together.
+   */
+  riftNeedsSeparation: boolean;
 }
 
 export const defaultSimOptions: SimOptions = {
@@ -1060,6 +1276,9 @@ export const defaultSimOptions: SimOptions = {
   quietByMeanSpeed: false,
   collapseStagnantOnly: true,
   holdContinentalArea: false,
+  compositionCrustType: false,
+  weldOnNetClosing: true,
+  riftNeedsSeparation: true,
 };
 
 /** Live, mutable modelling options the simulation reads each tick. */

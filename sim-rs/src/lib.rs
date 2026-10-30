@@ -12,16 +12,19 @@ pub mod advect;
 pub mod arcs;
 pub mod boundaries;
 pub mod cell_data;
+pub mod climate;
 pub mod cohesion;
 pub mod craton;
 pub mod crust_lifecycle;
 pub mod elevation;
 pub mod erosion;
+pub mod geotherm;
 pub mod heat;
 pub mod lithosphere;
 pub mod mantle;
 pub mod math;
 pub mod mesh;
+pub mod metamorphism;
 pub mod metrics;
 pub mod par;
 pub mod passive_margins;
@@ -31,6 +34,7 @@ pub mod plates;
 pub mod primordial;
 pub mod recycling;
 pub mod registry;
+pub mod resources;
 pub mod rifting;
 pub mod rng;
 pub mod scratch;
@@ -41,6 +45,7 @@ pub mod timer;
 pub mod tuning;
 pub mod world;
 
+use crate::cell_data::{LANE_SEDIMENT, LANES};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
@@ -217,7 +222,49 @@ impl World {
 
     /// Share of each cell's crust that is reworked sediment.
     pub fn sediment_ptr(&self) -> *const f32 {
-        self.sim.front().sediment_share.as_ptr()
+        self.sim.front().lanes.lane(LANE_SEDIMENT).as_ptr()
+    }
+
+    /// How many composition lanes each cell carries.
+    pub fn lane_count(&self) -> u32 {
+        LANES as u32
+    }
+
+    /// Composition lane `lane` (a share of each cell's crust, by mass).
+    /// Lanes are numbered as in `cell_data`: plume 0, sediment 1, mafic 2,
+    /// felsic 3, felsic cover 4, mafic cover 5; then the records of what the
+    /// surface rock has been through: exhumed km 6, exhumed km at the last arc
+    /// 7, peak °C 8, peak kbar 9.
+    pub fn lane_ptr(&self, lane: u32) -> *const f32 {
+        assert!((lane as usize) < LANES, "no such composition lane");
+        self.sim.front().lanes.lane(lane as usize).as_ptr()
+    }
+
+    /// Metamorphic facies of the rock at each cell's surface (0 none, 1 zeolite,
+    /// 2 greenschist, 3 amphibolite, 4 granulite, 5 blueschist, 6 eclogite).
+    pub fn facies_ptr(&self) -> *const u8 {
+        self.sim.facies().as_ptr()
+    }
+
+    /// How many resources there are.
+    pub fn resource_count(&self) -> u32 {
+        resources::RESOURCES as u32
+    }
+
+    /// Display names of the resources, in the order `resources_ptr` lays them out.
+    pub fn resource_names(&self) -> Vec<String> {
+        resources::RESOURCE_NAMES.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Potential (0 to 1) of resource `resource` at each cell.
+    pub fn resource_ptr(&self, resource: u32) -> *const f32 {
+        assert!((resource as usize) < resources::RESOURCES, "no such resource");
+        self.sim.resource(resource as usize).as_ptr()
+    }
+
+    /// Myr since each cell's crust last took in arc crust; `f32::MAX` for never.
+    pub fn arc_age_ptr(&self) -> *const f32 {
+        self.sim.front().arc_age.as_ptr()
     }
 
     /// Heat flow out through each cell (mW/m^2), as of the last tick.

@@ -25,18 +25,22 @@
 //! `plume_thickness_cold` in a mantle as cool as today's, an ocean plateau
 //! that stays ocean. A plume's tail stays in the mantle instead, carried by
 //! the flow beneath it (`plume_drift`), while the plate moves over it.
-//! Arc accretion is scaled down by `hot_arc_suppression` times the excess,
-//! and the mafic part of ocean floor thickened anywhere but over a plume drips
-//! back into the mantle, `hot_drip` times the excess of its extra thickness
-//! each step (plume-made crust, by the `plume_share` tracer, and sediment, by
-//! `sediment_share`, are too buoyant to
+//! Arc accretion is scaled down by `hot_arc_suppression` times how far the mantle
+//! is still short of modern-style subduction (`heat::hot_slab`: full above an
+//! excess of ~0.83, gone below ~0.53), and the mafic part of ocean floor
+//! thickened anywhere but over a plume drips back into the mantle, `hot_drip`
+//! times that and the excess of its extra thickness each step (plume-made crust, by the plume lane, and sediment, by the
+//! sediment lane, are too buoyant to
 //! founder), so
 //! early continent comes from plumes rather than from crust piling up at
 //! convergent margins.
 
 use crate::advect::AdvectionField;
-use crate::cell_data::{CONTINENTAL, CellData, mixed_share};
-use crate::heat::{PlanetHeat, modern_core_tw};
+use crate::cell_data::{
+    CONTINENTAL, CellData, LANE_COVER_FELSIC, LANE_COVER_MAFIC, LANE_FELSIC, LANE_MAFIC, LANE_PLUME,
+    LANE_EXHUMED, LANE_SEDIMENT, LANES,
+};
+use crate::heat::{PlanetHeat, hot_slab, modern_core_tw};
 use crate::mantle::MantleFlow;
 use crate::math::{Vec3, clamp01, normalise, read3, rotate};
 use crate::mesh::Mesh;
@@ -167,7 +171,22 @@ fn raise(
     let before = data.thickness[i];
     data.thickness[i] = (h + gain) as f32;
     let added = (data.thickness[i] - before) as f64;
-    data.plume_share[i] = mixed_share(data.plume_share[i], before as f64, added, 1.0);
+    data.lanes.mix_lane(LANE_PLUME, i, before as f64, added, 1.0);
+    // Plume crust is mafic. It dilutes the felsic part; sediment is left as it
+    // was (it never was diluted by plume crust, and what the drip below reads
+    // must not change), so mafic takes up what is left.
+    data.lanes.mix_lane(LANE_FELSIC, i, before as f64, added, 0.0);
+    // The cover it lay under is now a thinner share of the crust.
+    data.lanes.mix_lane(LANE_COVER_FELSIC, i, before as f64, added, 0.0);
+    data.lanes.mix_lane(LANE_COVER_MAFIC, i, before as f64, added, 0.0);
+    // New crust has not been buried or eroded: it dilutes the records.
+    for lane in LANE_EXHUMED..LANES {
+        data.lanes.mix_lane(lane, i, before as f64, added, 0.0);
+    }
+    let rest = 1.0
+        - data.lanes.lane(LANE_FELSIC)[i] as f64
+        - data.lanes.lane(LANE_SEDIMENT)[i] as f64;
+    data.lanes.lane_mut(LANE_MAFIC)[i] = rest.clamp(0.0, 1.0) as f32;
     field.plume_in[i] += added as f32;
     *created += added * mesh.area(i);
     Some(h + gain)
@@ -354,7 +373,7 @@ impl Primordial {
         // Drip: in a mantle this hot, mafic crust thickened anywhere but over
         // a plume turns to eclogite and founders before it can melt into
         // continent.
-        let drip = clamp01(t.hot_drip * excess);
+        let drip = clamp01(t.hot_drip * hot_slab(t, excess));
         let mut dripped = 0.0;
         if drip > 0.0 {
             for i in 0..n {
@@ -369,18 +388,44 @@ impl Primordial {
                 if excess_h <= 0.0 {
                     continue;
                 }
-                // Only the mafic part founders: felsic crust a plume made is
-                // too buoyant to sink, wherever the grid has smeared it.
-                // Nor does sediment, however it got there.
-                let share = data.plume_share[i] as f64;
-                let silt = data.sediment_share[i] as f64;
-                let mafic = (1.0 - share - silt).max(0.0);
+                // Only the mafic part founders: felsic crust, wherever the grid
+                // has smeared it, is too buoyant to sink, and nor is sediment.
+                // Where type follows composition, nor is crust a plume made: its
+                // roots are the depleted residue of the melt, buoyant, and it
+                // has the time it needs to differentiate into continent (see
+                // `differentiate`). Where type follows thickness it turns
+                // continental at once and leaves this loop.
+                let share = data.lanes.lane(LANE_PLUME)[i] as f64;
+                let silt = data.lanes.lane(LANE_SEDIMENT)[i] as f64;
+                let mafic = data.lanes.lane(LANE_MAFIC)[i] as f64
+                    - if t.composition_crust_type { share } else { 0.0 };
+                let mafic = mafic.max(0.0);
                 let removed = (drip * excess_h * mafic).min(before as f64 * mafic);
                 data.thickness[i] = (before as f64 - removed) as f32;
                 let after = data.thickness[i] as f64;
                 if after > 0.0 {
-                    data.plume_share[i] = (share * before as f64 / after).clamp(0.0, 1.0) as f32;
-                    data.sediment_share[i] = (silt * before as f64 / after).clamp(0.0, 1.0) as f32;
+                    // What founders comes out of the mafic lane first, and out
+                    // of the felsic only if that is not enough.
+                    let (maf, fel) = (
+                        data.lanes.lane(LANE_MAFIC)[i] as f64,
+                        data.lanes.lane(LANE_FELSIC)[i] as f64,
+                    );
+                    let gone_mafic = removed.min(before as f64 * maf);
+                    let gone_felsic = removed - gone_mafic;
+                    data.lanes.lane_mut(LANE_MAFIC)[i] =
+                        ((before as f64 * maf - gone_mafic) / after).clamp(0.0, 1.0) as f32;
+                    data.lanes.lane_mut(LANE_FELSIC)[i] =
+                        ((before as f64 * fel - gone_felsic) / after).clamp(0.0, 1.0) as f32;
+                    data.lanes.lane_mut(LANE_PLUME)[i] =
+                        (share * before as f64 / after).clamp(0.0, 1.0) as f32;
+                    data.lanes.lane_mut(LANE_SEDIMENT)[i] =
+                        (silt * before as f64 / after).clamp(0.0, 1.0) as f32;
+                    // The cover stays, so it is a larger share of what is left.
+                    for lane in [LANE_COVER_FELSIC, LANE_COVER_MAFIC] {
+                        let cover = data.lanes.lane(lane)[i] as f64;
+                        data.lanes.lane_mut(lane)[i] =
+                            (cover * before as f64 / after).clamp(0.0, 1.0) as f32;
+                    }
                 }
                 dripped += (before as f64 - after) * mesh.area(i);
             }
@@ -398,7 +443,7 @@ fn dot(a: Vec3, b: Vec3) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{Primordial, dot};
-    use crate::cell_data::CONTINENTAL;
+    use crate::cell_data::{CONTINENTAL, LANE_PLUME};
     use crate::mantle::MantleFlow;
     use crate::math::{normalise, read3};
     use crate::mesh::Mesh;
@@ -453,13 +498,13 @@ mod tests {
             made += sim.advection().plume_created_this_step;
             let d = sim.front();
             let traced: f64 = (0..sim.mesh.cell_count)
-                .map(|i| sim.mesh.area(i) * d.thickness[i] as f64 * d.plume_share[i] as f64)
+                .map(|i| sim.mesh.area(i) * d.thickness[i] as f64 * d.lanes.lane(LANE_PLUME)[i] as f64)
                 .sum();
             assert!(traced <= made * 1.001 + 1e-9, "traced {traced} of {made} made");
         }
         let d = sim.front();
         let traced: f64 = (0..sim.mesh.cell_count)
-            .map(|i| sim.mesh.area(i) * d.thickness[i] as f64 * d.plume_share[i] as f64)
+            .map(|i| sim.mesh.area(i) * d.thickness[i] as f64 * d.lanes.lane(LANE_PLUME)[i] as f64)
             .sum();
         assert!(traced > 0.5 * made, "only {traced} of {made} plume crust left after 200 Myr");
     }
@@ -557,7 +602,7 @@ mod tests {
             made += sim.advection().plume_created_this_step;
             let d = sim.front();
             for i in 0..sim.mesh.cell_count {
-                if d.plume_share[i] > 0.9 && d.crust_type[i] != CONTINENTAL {
+                if d.lanes.lane(LANE_PLUME)[i] > 0.9 && d.crust_type[i] != CONTINENTAL {
                     assert!(
                         (d.thickness[i] as f64) < sim.tuning.continental_thickness_threshold,
                         "a tail reached {:.1} km",

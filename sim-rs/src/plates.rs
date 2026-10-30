@@ -4,7 +4,7 @@
 //! order, and the order plates are visited in (merges, splits, coupling) feeds
 //! back into the outcome, so keeping the same order keeps the two comparable.
 
-use crate::cell_data::{CellData, OCEANIC};
+use crate::cell_data::{CellData, FRESH_FLOOR, NEVER, OCEANIC};
 use crate::elevation::column_height;
 use crate::lithosphere::ocean_lithosphere;
 use crate::math::Vec3;
@@ -83,7 +83,15 @@ pub struct PlateData {
     pub craton_merges: u64,
     /// Plates retired because they held no crust.
     pub consumed: u64,
+    /// For diagnostics: the motion each plate would head for under each
+    /// driving force alone, against its full drag (see [`FORCE_PARTS`]).
+    #[serde(skip)]
+    pub force_parts: IndexMap<i32, [crate::math::Vec3; FORCE_PARTS]>,
 }
+
+/// Driving forces split out in [`PlateData::force_parts`]: mantle flow
+/// carrying continents, ridge push, slab pull, trench suction, dome push.
+pub const FORCE_PARTS: usize = 5;
 
 /// Key for an unordered pair of plate ids.
 #[inline]
@@ -177,20 +185,20 @@ pub fn initialise_crust(t: &Tuning, centres: &[f32], data: &mut CellData, seed: 
         let age = (field[i] - lo) / span * t.max_oceanic_age;
         data.crust_type[i] = OCEANIC;
         data.age[i] = age as f32;
-        data.density[i] = t.oceanic_density as f32;
+        data.density[i] = t.mafic_density as f32;
         data.lithosphere[i] = ocean_lithosphere(t, age) as f32;
         data.thickness[i] = t.oceanic_thickness as f32;
         data.elevation[i] = column_height(
             t,
             t.oceanic_thickness,
-            t.oceanic_density,
+            t.mafic_density,
             data.lithosphere[i] as f64,
             0.0,
             0.0,
             0.0,
         ) as f32;
         data.slab[i] = 0.0;
-        data.plume_share[i] = 0.0;
-        data.sediment_share[i] = 0.0;
+        data.lanes.set(i, FRESH_FLOOR);
+        data.arc_age[i] = NEVER;
     }
 }

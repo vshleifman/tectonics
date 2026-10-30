@@ -39,8 +39,20 @@ export const CM_PER_YR_PER_RAD_MYR = (EARTH_RADIUS_KM * 1e5) / 1e6;
 
 /**
  * Density bounds, derived live from {@link tuning} so the renderer's density
- * ramp stays in sync when the densities are tweaked. The continental (buoyant)
- * floor is the minimum; oceanic crust is the maximum.
+ * ramp stays in sync when the densities are tweaked: from the lightest rock a
+ * column can hold to the heaviest.
  */
-export const densityMin = (): number => tuning.continentalDensity;
-export const densityMax = (): number => tuning.oceanicDensity;
+export const densityMin = (): number =>
+  Math.min(
+    tuning.coverDensity,
+    tuning.felsicDensity,
+    tuning.metasedimentDensity,
+    tuning.maficDensity,
+  );
+export const densityMax = (): number =>
+  Math.max(
+    tuning.maficDensity,
+    tuning.felsicDensity,
+    tuning.metasedimentDensity,
+    tuning.eclogiteDensity,
+  );

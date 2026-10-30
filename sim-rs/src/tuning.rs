@@ -18,6 +18,12 @@ pub struct Tuning {
     pub shelf_depth: f64,
     pub slope_capture: f64,
     pub sediment_reach: f64,
+    /// Share of the sediment reaching the overriding edge of a trench that goes
+    /// down with the plate rather than building the accretionary prism. About
+    /// 70% of the incoming section subducts beneath large accretionary prisms
+    /// and nearly all of it at non-accretionary margins (von Huene & Scholl
+    /// 1991, Rev. Geophys. 29); most trench sediment lies at the former.
+    pub trench_sediment_subduction: f64,
     pub elevation_min: f64,
     pub elevation_max: f64,
 
@@ -67,12 +73,39 @@ pub struct Tuning {
     pub dyn_topo_max: f64,
 
     pub max_oceanic_age: f64,
-    pub continental_density: f64,
-    pub oceanic_density: f64,
+    pub mafic_density: f64,
+    pub felsic_density: f64,
+    pub metasediment_density: f64,
+    pub cover_density: f64,
+    pub eclogite_density: f64,
+    pub eclogite_depth: f64,
     pub oceanic_thickness: f64,
     pub continental_thickness_threshold: f64,
     pub continental_revert_thickness: f64,
     pub continental_nucleation_thickness: f64,
+    /// Share of a cell's basement (felsic rock plus sediment buried into it,
+    /// not loose cover) that must be evolved for ocean crust to count as
+    /// continental. Bulk continental crust is andesitic, ~57-61% SiO2 (Rudnick
+    /// and Gao 2003, Treatise on Geochemistry 3.01), which on a mix of basalt
+    /// (~50%) and granite (~72%) is roughly 35-50% felsic; this is the lower
+    /// edge. Fixed from composition, not tuned against outcomes.
+    pub continental_felsic_share: f64,
+    /// Evolved share below which continental crust reverts to ocean. Below
+    /// `continental_felsic_share` so a cell near the line does not flicker; the
+    /// gap is hysteresis, not a physical claim.
+    pub oceanic_felsic_share: f64,
+    /// Surface heat flow (mW/m2) of crust over active arc magmatism, which
+    /// carries heat up in melt and so runs far above the cooling of the floor
+    /// it was built on: 80-90 mW/m2 across the Sumatra-Andaman arc and back arc,
+    /// ~80 in the Japanese volcanic zone, against 40-70 in the forearcs
+    /// (regional studies; no global compilation checked). Raises the Moho
+    /// temperature `differentiate` reads, which is what lets a thick arc melt
+    /// its base and evolve toward continental crust.
+    pub arc_heat_flow: f64,
+    /// Myr over which that extra heat fades once arc magmatism stops: the
+    /// conductive time of a ~30 km crust (L^2 / kappa, about 30 Myr), taken up
+    /// to 50 for the lower crust a pulse has to warm.
+    pub arc_heat_duration: f64,
     pub max_crust_thickness: f64,
     pub delamination_rate: f64,
 
@@ -87,6 +120,11 @@ pub struct Tuning {
     pub lid_delta_t: f64,
     pub keel_depletion: f64,
 
+    /// Share of the ocean crust going down at a trench that the arc behind it
+    /// keeps. Earth's arcs add ~2.5–3 km³/yr (Scholl & von Huene 2007; Clift
+    /// et al. 2009) while ~24 km³/yr of ocean crust goes down (~3.4 km²/yr of
+    /// sea floor made, Rowley 2002, at ~7 km): ~0.11. The model's arcs lose
+    /// almost nothing to foundering later, so this is net crust kept.
     pub accretion_fraction: f64,
     pub arc_setback: f64,
     pub back_arc_width: f64,
@@ -105,6 +143,10 @@ pub struct Tuning {
     pub continental_area_target: f64,
     pub continental_target_time: f64,
     pub continental_target_gain: f64,
+    /// Share of the continental area recycled per Myr at active margins, when
+    /// no area target is held. 0 by default: sediment subducted at trenches
+    /// and subduction erosion of margins and arcs are modelled where they
+    /// happen, and a fixed rate on top would count them twice.
     pub continental_recycling_rate: f64,
     pub craton_min_age: f64,
     pub craton_inland: f64,
@@ -114,6 +156,10 @@ pub struct Tuning {
     pub craton_keel_gain: f64,
     pub craton_durability: f64,
     pub craton_merge_time: f64,
+    /// Share of the way two welded plates whose cratons touch are drawn to a
+    /// common target motion each tick, on top of `suture_coupling`. Once the
+    /// same number as `craton_durability`.
+    pub craton_weld_coupling: f64,
 
     pub rift_strength: f64,
     pub suture_weakness: f64,
@@ -162,6 +208,36 @@ pub struct Tuning {
     pub heat_response_time: f64,
     pub heat_flow_sensitivity: f64,
     pub continental_heat_flow: f64,
+    pub lithification_depth: f64,
+    pub island_arc_felsic: f64,
+    pub continental_arc_felsic: f64,
+    pub differentiation_rate: f64,
+    pub mafic_solidus: f64,
+    pub melting_span: f64,
+    pub surface_temp: f64,
+    pub crust_conductivity: f64,
+    pub crust_heat_production: f64,
+    pub facies_zeolite_temp: f64,
+    pub facies_greenschist_temp: f64,
+    pub facies_amphibolite_temp: f64,
+    pub facies_granulite_temp: f64,
+    pub facies_blueschist_pressure: f64,
+    pub facies_blueschist_max_temp: f64,
+    pub facies_eclogite_pressure: f64,
+    pub subduction_peak_pressure: f64,
+    pub subduction_peak_temp: f64,
+    pub resource_arc_age_full: f64,
+    pub resource_arc_age_zero: f64,
+    pub porphyry_min_depth: f64,
+    pub porphyry_max_depth: f64,
+    pub epithermal_max_depth: f64,
+    pub vms_max_age: f64,
+    pub vms_max_temp: f64,
+    pub chromite_max_temp: f64,
+    pub gold_min_temp: f64,
+    pub gold_max_temp: f64,
+    pub granite_min_temp: f64,
+    pub kimberlite_min_age: f64,
     pub keel_insulation: f64,
     pub viscosity_sensitivity: f64,
     pub ridge_heat_uplift: f64,
@@ -180,6 +256,19 @@ pub struct Tuning {
     pub plume_drift: f64,
     pub hot_arc_suppression: f64,
     pub hot_drip: f64,
+    /// Mantle excess (see `heat.rs`) at which slabs become strong enough for
+    /// sustained modern-style subduction, so that arcs build continent freely
+    /// and thickened floor no longer founders. Models of subduction in a hot
+    /// mantle put the change from the pre-subduction regime at 250-200 K above
+    /// today's, abrupt by 175-160 K (Sizova et al. 2010, Lithos 116); weak,
+    /// hot slabs break off too often to sustain it (van Hunen and van den Berg
+    /// 2008, Lithos 103). 0.68 is ~205 K, the middle of that range. Fixed from
+    /// those sources, not tuned against outcomes.
+    pub modern_subduction_excess: f64,
+    /// How wide that change is, in the same units: the brakes are full half this
+    /// far above `modern_subduction_excess` and gone half this far below it.
+    /// 0.3 is ~90 K, the 250 K to 160 K span of the same models.
+    pub modern_subduction_width: f64,
 
     pub active_speed_eps: f64,
     pub dt_myr: f64,
@@ -188,6 +277,19 @@ pub struct Tuning {
     /// Derived, not tuned: only `heat::effective_tuning` sets it.
     #[serde(skip)]
     pub ridge_crust_thickness: f64,
+    /// Whether crust type follows composition (`SimOptions::composition_crust_type`).
+    /// Derived, not tuned: only `Sim::effective_tuning` sets it.
+    #[serde(skip)]
+    pub composition_crust_type: bool,
+}
+
+impl Tuning {
+    /// Density (g/cm³) of crust that is half mafic and half felsic, about what
+    /// ordinary continental crust comes to. For calibrations and tests that
+    /// need a continent without building its lanes.
+    pub fn mean_continental_density(&self) -> f64 {
+        0.5 * (self.mafic_density + self.felsic_density)
+    }
 }
 
 impl Default for Tuning {
@@ -204,6 +306,7 @@ impl Default for Tuning {
             shelf_depth: -0.15,
             slope_capture: 0.5,
             sediment_reach: 3.0,
+            trench_sediment_subduction: 0.7,
             elevation_min: -10.0,
             elevation_max: 10.0,
 
@@ -248,12 +351,20 @@ impl Default for Tuning {
             dyn_topo_max: 1.5,
 
             max_oceanic_age: 200.0,
-            continental_density: 2.8,
-            oceanic_density: 2.9,
+            mafic_density: 2.9,
+            felsic_density: 2.7,
+            metasediment_density: 2.7,
+            cover_density: 2.4,
+            eclogite_density: 3.45,
+            eclogite_depth: 45.0,
             oceanic_thickness: 7.0,
             continental_thickness_threshold: 15.0,
             continental_revert_thickness: 10.0,
             continental_nucleation_thickness: 20.0,
+            continental_felsic_share: 0.35,
+            oceanic_felsic_share: 0.20,
+            arc_heat_flow: 80.0,
+            arc_heat_duration: 50.0,
             max_crust_thickness: 60.0,
             delamination_rate: 0.3,
 
@@ -268,7 +379,7 @@ impl Default for Tuning {
             lid_delta_t: 1300.0,
             keel_depletion: 0.025,
 
-            accretion_fraction: 0.2,
+            accretion_fraction: 0.11,
             arc_setback: 0.025,
             back_arc_width: 0.05,
             back_arc_extension: 0.25,
@@ -286,7 +397,7 @@ impl Default for Tuning {
             continental_area_target: 0.4,
             continental_target_time: 200.0,
             continental_target_gain: 4.0,
-            continental_recycling_rate: 0.0004,
+            continental_recycling_rate: 0.0,
             craton_min_age: 500.0,
             craton_inland: 0.02,
             craton_growth_time: 400.0,
@@ -295,6 +406,7 @@ impl Default for Tuning {
             craton_keel_gain: 1.0,
             craton_durability: 0.75,
             craton_merge_time: 60.0,
+            craton_weld_coupling: 0.75,
 
             rift_strength: 0.65,
             suture_weakness: 1.0,
@@ -320,7 +432,7 @@ impl Default for Tuning {
 
             min_plate_area: 0.0005,
             min_fragment_area: 0.002,
-            passive_margin_collapse_age: 300.0,
+            passive_margin_collapse_age: 200.0,
 
             primordial_heat: 1.0,
             start_age_ga: 3.0,
@@ -329,6 +441,36 @@ impl Default for Tuning {
             heat_response_time: 50.0,
             heat_flow_sensitivity: 4.0,
             continental_heat_flow: 65.0,
+            lithification_depth: 2.5,
+            island_arc_felsic: 0.35,
+            continental_arc_felsic: 0.6,
+            differentiation_rate: 0.002,
+            mafic_solidus: 850.0,
+            melting_span: 150.0,
+            surface_temp: 15.0,
+            crust_conductivity: 2.5,
+            crust_heat_production: 1.0,
+            facies_zeolite_temp: 150.0,
+            facies_greenschist_temp: 300.0,
+            facies_amphibolite_temp: 500.0,
+            facies_granulite_temp: 700.0,
+            facies_blueschist_pressure: 6.0,
+            facies_blueschist_max_temp: 450.0,
+            facies_eclogite_pressure: 12.0,
+            subduction_peak_pressure: 8.0,
+            subduction_peak_temp: 250.0,
+            resource_arc_age_full: 30.0,
+            resource_arc_age_zero: 80.0,
+            porphyry_min_depth: 1.0,
+            porphyry_max_depth: 5.0,
+            epithermal_max_depth: 1.5,
+            vms_max_age: 30.0,
+            vms_max_temp: 450.0,
+            chromite_max_temp: 600.0,
+            gold_min_temp: 300.0,
+            gold_max_temp: 600.0,
+            granite_min_temp: 650.0,
+            kimberlite_min_age: 1500.0,
             keel_insulation: 0.4,
             viscosity_sensitivity: 0.1,
             ridge_heat_uplift: 0.1,
@@ -347,11 +489,14 @@ impl Default for Tuning {
             plume_drift: 1.0,
             hot_arc_suppression: 1.0,
             hot_drip: 1.0,
+            modern_subduction_excess: 0.68,
+            modern_subduction_width: 0.3,
 
             active_speed_eps: 1e-5,
             dt_myr: 2.0,
 
             ridge_crust_thickness: 7.0,
+            composition_crust_type: false,
         }
     }
 }
@@ -380,9 +525,12 @@ impl Tuning {
 pub struct SimOptions {
     pub supercontinent_insulation: bool,
     /// Weld two plates only where their continents are closing on balance
-    /// along all their contact, rather than wherever any stretch of it closes.
-    /// A continent rifting apart by rotation closes at one end of the rift as
-    /// it opens along the rest, which otherwise welds it shut at once.
+    /// along all their contact, rather than wherever any stretch of it closes,
+    /// and never two plates that broke apart less than `dome_push_duration`
+    /// ago. A continent rifting apart by rotation closes at one end of the
+    /// rift as it opens along the rest, and the mesh's zigzag makes some
+    /// stretch of any fresh rift read as closing; either otherwise welds it
+    /// shut at once.
     pub weld_on_net_closing: bool,
     /// Count slab pull as tension only where it pulls a plate from both sides.
     /// Off, the tension is the pull that cancels in the vector sum, which a
@@ -402,17 +550,35 @@ pub struct SimOptions {
     /// area is whatever arcs, plumes, sediment and the fixed
     /// `continental_recycling_rate` leave.
     pub hold_continental_area: bool,
+    /// Crust type follows what the crust is made of, not how thick it is:
+    /// ocean floor turns continental once its basement is evolved enough
+    /// (`continental_felsic_share`), arcs and plateaus are differentiated by the
+    /// heat of arc magmatism, and thick buoyant ocean-type crust resists
+    /// subduction and accretes. Experimental: in the first benches it either
+    /// stalls ocean renewal (ocean floor ~700 Myr old, mantle never cooling) or
+    /// makes almost no continent, depending on whether buoyant crust is allowed
+    /// to jam trenches. See `todo/18a-crustTypeFromComposition.md`. Off, type is
+    /// decided by thickness, as before.
+    pub composition_crust_type: bool,
+    /// A rift starts, and keeps stretching, only where the two pieces it would
+    /// leave move apart under their own forces: each piece's drag, mantle
+    /// carry, ridge push and slab pull, plus the push of any hot dome across
+    /// the line. Off, slab tension against strength is enough, and many rifts
+    /// break plates into pieces that ridge push and mantle drag hold together.
+    pub rift_needs_separation: bool,
 }
 
 impl Default for SimOptions {
     fn default() -> Self {
         SimOptions {
             supercontinent_insulation: true,
-            weld_on_net_closing: false,
+            weld_on_net_closing: true,
             two_sided_tension: false,
             quiet_by_mean_speed: false,
             collapse_stagnant_only: true,
             hold_continental_area: false,
+            composition_crust_type: false,
+            rift_needs_separation: true,
         }
     }
 }

@@ -4,6 +4,7 @@ import {
   CSS2DRenderer,
 } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 import type { CellMesh } from "../mesh/CellMesh";
+import { FACIES, NEVER_ARC, RESOURCE_NAMES } from "../sim/SimWorld";
 import { type Projection, projectPoint } from "./projection";
 
 /**
@@ -28,6 +29,16 @@ export interface LabelFields {
   keel: ArrayLike<number>;
   lithosphere: ArrayLike<number>;
   sediment: ArrayLike<number>;
+  mafic: ArrayLike<number>;
+  felsic: ArrayLike<number>;
+  coverFelsic: ArrayLike<number>;
+  coverMafic: ArrayLike<number>;
+  arcAge: ArrayLike<number>;
+  exhumed: ArrayLike<number>;
+  peakTemp: ArrayLike<number>;
+  peakPressure: ArrayLike<number>;
+  facies: ArrayLike<number>;
+  resources: ArrayLike<number>;
   heatFlow: ArrayLike<number>;
   mantleTemp: ArrayLike<number>;
   lowerSlab: ArrayLike<number>;
@@ -35,6 +46,21 @@ export interface LabelFields {
 }
 
 /** Multi-line debug dump of every per-cell property for a given cell. */
+/** The three likeliest resources at cell `i`, if any are over 0.2. */
+const resourceLines = (data: LabelFields, i: number): string => {
+  const cells = data.thickness.length;
+  const top = RESOURCE_NAMES.map((name, r) => ({
+    name,
+    potential: data.resources[r * cells + i],
+  }))
+    .filter((x) => x.potential > 0.2)
+    .sort((a, b) => b.potential - a.potential)
+    .slice(0, 3);
+  return top
+    .map((x) => `${x.name} ${(x.potential * 100).toFixed(0)}%\n`)
+    .join("");
+};
+
 const labelText = (data: LabelFields, i: number): string =>
   `id ${i}\n` +
   `plate ${data.plateId[i]}\n` +
@@ -46,6 +72,14 @@ const labelText = (data: LabelFields, i: number): string =>
   `keel ${data.keel[i].toFixed(2)}\n` +
   `lith ${data.lithosphere[i].toFixed(0)} km\n` +
   `silt ${(data.sediment[i] * 100).toFixed(0)}%\n` +
+  `maf/fel ${(data.mafic[i] * 100).toFixed(0)}/${(data.felsic[i] * 100).toFixed(0)}%\n` +
+  `cover ${((data.coverFelsic[i] + data.coverMafic[i]) * data.thickness[i]).toFixed(2)} km (fel ${(data.coverFelsic[i] * 100).toFixed(0)}%, maf ${(data.coverMafic[i] * 100).toFixed(0)}%)\n` +
+  (data.arcAge[i] < NEVER_ARC
+    ? `arc ${data.arcAge[i].toFixed(0)} Myr ago\n`
+    : "") +
+  `${FACIES[data.facies[i]] ?? "?"} ${data.peakTemp[i].toFixed(0)} °C ${data.peakPressure[i].toFixed(1)} kbar\n` +
+  `exhumed ${data.exhumed[i].toFixed(1)} km\n` +
+  resourceLines(data, i) +
   `heat ${data.heatFlow[i].toFixed(1)} mW/m²\n` +
   `mantle ${data.mantleTemp[i] >= 0 ? "+" : ""}${data.mantleTemp[i].toFixed(0)} K\n` +
   `pile ${data.lowerSlab[i].toFixed(1)}\n` +

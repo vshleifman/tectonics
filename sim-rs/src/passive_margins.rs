@@ -42,8 +42,12 @@ const STAGNANT_TRENCH: f64 = 0.5;
 /// Mean ocean age, as a multiple of the collapse age, above which a plate
 /// counts as stagnant whatever its trenches. A plate covering most of the
 /// globe has a rim made of the small plates around it, and can have trench
-/// all along that rim while its floor goes unrenewed.
-const STAGNANT_AGE: f64 = 2.0;
+/// all along that rim while its floor goes unrenewed. At 1, a plate whose
+/// floor is on average as old as the age at which a passive coast founders
+/// is no longer renewing it. At 2 a stagnant lid held on for 600 Myr, when
+/// Earth has almost no floor older than ~200 Myr, and which regime a world
+/// ended in came down to chance.
+const STAGNANT_AGE: f64 = 1.0;
 
 /// Length of working trench (radians) along each plate's boundary, on either
 /// side. A continental plate overrides its trenches rather than going down,
@@ -265,7 +269,7 @@ mod tests {
     fn collapses(far: f64, trench: bool, o: &SimOptions) -> u64 {
         let mesh = Mesh::icosphere(4);
         let t = Tuning {
-            passive_margin_collapse_age: 300.0,
+            passive_margin_collapse_age: 200.0,
             ..Tuning::default()
         };
         let (mut data, mut plates, mut registry) = world(&mesh, &t, far, trench);

@@ -3,7 +3,9 @@
 //! it, deepened over a trench, and loaded by the water above it.
 
 use crate::boundaries::{BoundaryField, CONVERGENT};
-use crate::cell_data::CellData;
+use crate::cell_data::{
+    CellData, LANE_COVER_FELSIC, LANE_COVER_MAFIC, LANE_FELSIC, LANE_MAFIC, LANE_SEDIMENT, LANES,
+};
 use crate::mesh::Mesh;
 use crate::par;
 use crate::slabs::subduction;
@@ -40,6 +42,45 @@ pub fn dynamic_topography(t: &Tuning, temp: f64, sink: f64) -> f64 {
 /// dense as the mantle it sits in.
 pub fn lid_density(t: &Tuning, keel: f64) -> f64 {
     t.mantle_density * (1.0 + t.thermal_expansion * t.lid_delta_t / 2.0) - keel * t.keel_depletion
+}
+
+/// Mean density (g/cm³) of a column of `thickness` km of crust made of `lanes`.
+/// Basement is mafic, felsic and metasediment (the sediment that is no longer
+/// loose); cover lies on top, uncompacted. The mafic rock is taken to sit at
+/// the base of the column, where differentiation leaves it, and the part of it
+/// deeper than `eclogite_depth` has turned to eclogite, which is denser than
+/// the mantle it sinks into.
+pub fn composition_density(t: &Tuning, lanes: &[f32; LANES], thickness: f64) -> f64 {
+    let share = |l: usize| lanes[l] as f64;
+    let cover = share(LANE_COVER_FELSIC) + share(LANE_COVER_MAFIC);
+    let metasediment = (share(LANE_SEDIMENT) - cover).max(0.0);
+    let mafic = share(LANE_MAFIC);
+    let felsic = share(LANE_FELSIC);
+    let h = thickness.max(0.0);
+    // Share of the whole column that is mafic rock deeper than eclogite_depth.
+    let eclogite = if h > 0.0 {
+        ((h - t.eclogite_depth.max(h * (1.0 - mafic))).max(0.0) / h).min(mafic)
+    } else {
+        0.0
+    };
+    let total = mafic + felsic + metasediment + cover;
+    if total <= 0.0 {
+        return t.mafic_density;
+    }
+    (t.mafic_density * (mafic - eclogite)
+        + t.eclogite_density * eclogite
+        + t.felsic_density * felsic
+        + t.metasediment_density * metasediment
+        + t.cover_density * cover)
+        / total
+}
+
+/// Set every cell's density from what it is made of.
+pub fn update_densities(data: &mut CellData, t: &Tuning) {
+    let (lanes, thickness) = (&data.lanes, &data.thickness);
+    par::fill(&mut data.density, |i| {
+        composition_density(t, &lanes.get(i), thickness[i] as f64) as f32
+    });
 }
 
 /// Buoyancy (km of mantle displaced) of a column of `thickness` km of crust
@@ -83,7 +124,7 @@ pub fn air_height(
     keel: f64,
     dyn_topo: f64,
 ) -> f64 {
-    let ridge = buoyancy(t, t.oceanic_thickness, t.oceanic_density, 0.0, 0.0);
+    let ridge = buoyancy(t, t.oceanic_thickness, t.mafic_density, 0.0, 0.0);
     t.ridge_elevation / water_load_factor(t) + buoyancy(t, thickness, density, lithosphere, keel)
         - ridge
         + dyn_topo
@@ -236,20 +277,80 @@ mod tests {
     use crate::lithosphere::{continental_lithosphere, ocean_lithosphere};
 
     fn ridge(t: &Tuning) -> f64 {
-        column_height(t, t.oceanic_thickness, t.oceanic_density, 0.0, 0.0, 0.0, 0.0)
+        column_height(t, t.oceanic_thickness, t.mafic_density, 0.0, 0.0, 0.0, 0.0)
     }
 
     fn floor(t: &Tuning, age: f64) -> f64 {
         let lid = ocean_lithosphere(t, age);
-        column_height(t, t.oceanic_thickness, t.oceanic_density, lid, 0.0, 0.0, 0.0) - ridge(t)
+        column_height(t, t.oceanic_thickness, t.mafic_density, lid, 0.0, 0.0, 0.0) - ridge(t)
     }
 
     /// Height of a continental column over a ridge crest beside it, under the
     /// same sea. Keeled columns stand under a full-depth lid.
     fn continent(t: &Tuning, thickness: f64, keel: f64) -> f64 {
         let lid = continental_lithosphere(t, keel);
-        let density = t.continental_density;
+        let density = t.mean_continental_density();
         column_height(t, thickness, density, lid, keel, 0.0, 0.0) - ridge(t)
+    }
+
+    fn lanes_of(mafic: f32, felsic: f32, cover_felsic: f32) -> [f32; LANES] {
+        let mut lanes = [0.0; LANES];
+        lanes[LANE_MAFIC] = mafic;
+        lanes[LANE_FELSIC] = felsic;
+        lanes[LANE_COVER_FELSIC] = cover_felsic;
+        lanes[LANE_SEDIMENT] = cover_felsic;
+        lanes
+    }
+
+    #[test]
+    fn felsic_crust_stands_higher_than_mafic_of_the_same_thickness() {
+        let t = Tuning::default();
+        let height = |lanes: [f32; LANES]| {
+            let rho = composition_density(&t, &lanes, 35.0);
+            column_height(&t, 35.0, rho, continental_lithosphere(&t, 0.0), 0.0, 0.0, 0.0)
+        };
+        assert!(height(lanes_of(0.0, 1.0, 0.0)) > height(lanes_of(1.0, 0.0, 0.0)) + 0.5);
+    }
+
+    #[test]
+    fn cover_lightens_a_column() {
+        let t = Tuning::default();
+        // 2 km of silt on 18 km of felsic crust, against the same 20 km bare.
+        let bare = composition_density(&t, &lanes_of(0.0, 1.0, 0.0), 20.0);
+        let covered = composition_density(&t, &lanes_of(0.0, 0.9, 0.1), 20.0);
+        assert!(covered < bare, "{covered} against {bare}");
+        // Cover that has become basement is metasediment and weighs what felsic rock does.
+        let mut buried = lanes_of(0.0, 0.9, 0.0);
+        buried[LANE_SEDIMENT] = 0.1;
+        let rho = composition_density(&t, &buried, 20.0);
+        assert!((rho - t.felsic_density).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_mafic_root_turns_to_eclogite_and_thick_crust_is_less_buoyant_per_km() {
+        let t = Tuning::default();
+        let half = lanes_of(0.5, 0.5, 0.0);
+        let thin = composition_density(&t, &half, 40.0);
+        let thick = composition_density(&t, &half, 60.0);
+        assert!(thick > thin, "60 km column {thick}, 40 km column {thin}");
+        // Per km of crust, the thick column displaces less mantle.
+        assert!(
+            buoyancy(&t, 60.0, thick, 0.0, 0.0) / 60.0 < buoyancy(&t, 40.0, thin, 0.0, 0.0) / 40.0
+        );
+        // The eclogite is the mafic rock deeper than eclogite_depth: 15 of 60 km.
+        let expected = (0.25 * t.eclogite_density
+            + 0.25 * t.mafic_density
+            + 0.5 * t.felsic_density)
+            / 1.0;
+        assert!((thick - expected).abs() < 1e-9, "{thick} against {expected}");
+    }
+
+    #[test]
+    fn fresh_ridge_floor_stands_at_the_ridge_elevation() {
+        let t = Tuning::default();
+        let rho = composition_density(&t, &crate::cell_data::FRESH_FLOOR, t.oceanic_thickness);
+        let h = column_height(&t, t.oceanic_thickness, rho, 0.0, 0.0, 0.0, 0.0);
+        assert!((h - t.ridge_elevation).abs() < 1e-9, "{h}");
     }
 
     #[test]
@@ -318,11 +419,11 @@ mod tests {
         let k = water_load_factor(&t);
         assert!((k - 1.45).abs() < 0.01);
         let wet = |dyn_topo: f64| {
-            column_height(&t, t.oceanic_thickness, t.oceanic_density, 0.0, 0.0, dyn_topo, 0.0)
+            column_height(&t, t.oceanic_thickness, t.mafic_density, 0.0, 0.0, dyn_topo, 0.0)
         };
         assert!(((wet(-1.0) - wet(0.0)) - -k).abs() < 1e-9);
         // Raising the sea drowns a coast, and leaves a column above it alone.
-        let height = |sea: f64| column_height(&t, 40.0, t.continental_density, 150.0, 0.0, 0.0, sea);
+        let height = |sea: f64| column_height(&t, 40.0, t.mean_continental_density(), 150.0, 0.0, 0.0, sea);
         assert!((height(-0.5) - height(0.0) - 0.5).abs() < 1e-9, "a sea 0.5 km higher");
     }
 

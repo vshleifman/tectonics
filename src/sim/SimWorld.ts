@@ -21,6 +21,41 @@ export const PASS_NAMES = [
 ] as const;
 
 /**
+ * Metamorphic facies, in the order `facies` numbers them (sim-rs
+ * `metamorphism::Facies`). The classifier lives in Rust; the view reads its
+ * result.
+ */
+export const FACIES = [
+  "None",
+  "Zeolite",
+  "Greenschist",
+  "Amphibolite",
+  "Granulite",
+  "Blueschist",
+  "Eclogite",
+] as const;
+
+/**
+ * The resources whose potential the simulation derives, in the order its
+ * `resources` buffer lays them out (sim-rs `resources::RESOURCE_NAMES`).
+ * `WasmWorld` checks this against the simulation's own list, so the two cannot
+ * drift apart unnoticed.
+ */
+export const RESOURCE_NAMES = [
+  "Porphyry Cu-Mo-Au",
+  "Epithermal Au-Ag",
+  "VMS Cu-Zn",
+  "Magmatic Ni-Cu-PGE",
+  "Podiform chromite",
+  "Orogenic gold",
+  "Granite Sn-W-Li",
+  "Kimberlite diamonds",
+] as const;
+
+/** `arcAge` of crust that has never had arc magmatism: the largest f32, as in Rust's `NEVER`. */
+export const NEVER_ARC = 3.4028234663852886e38;
+
+/**
  * The per-cell and per-arc state a snapshot carries to the main thread. Views
  * may be invalidated by the next call into the engine, so copy before keeping.
  */
@@ -37,6 +72,29 @@ export interface WorldFields {
   lithosphere: Float32Array;
   /** Share of each cell's crust that is reworked sediment, in [0, 1]. */
   sediment: Float32Array;
+  /** Share of each cell's crust that is mafic igneous rock (basalt, gabbro), in [0, 1]. */
+  mafic: Float32Array;
+  /** Share of each cell's crust that is felsic igneous rock (granitoid), in [0, 1]. */
+  felsic: Float32Array;
+  /** Share of each cell's crust that is loose sediment cover of felsic clastic rock, in [0, 1]. */
+  coverFelsic: Float32Array;
+  /** Share of each cell's crust that is loose sediment cover of mafic clastic rock, in [0, 1]. */
+  coverMafic: Float32Array;
+  /** Myr since each cell's crust last took in arc crust, or {@link NEVER_ARC}. */
+  arcAge: Float32Array;
+  /** Km of basement erosion has cut through at each cell: how deep the rock now at the surface once lay. */
+  exhumed: Float32Array;
+  /** The hottest (°C) the rock now at each cell's surface has been. */
+  peakTemp: Float32Array;
+  /** The greatest pressure (kbar) the rock now at each cell's surface has been under. */
+  peakPressure: Float32Array;
+  /** Metamorphic facies of that rock, as numbered in {@link FACIES}. */
+  facies: Uint8Array;
+  /**
+   * Potential (0 to 1) of each resource at each cell, one cell-long run per
+   * resource in the order of {@link RESOURCE_NAMES}.
+   */
+  resources: Float32Array;
   /** Heat leaving each cell (mW/m²). */
   heatFlow: Float32Array;
   /** Upper-mantle temperature beneath each cell (K), above or below the planet's mantle temperature. */

@@ -588,6 +588,11 @@ export class CellRenderer {
    * - `"density"`: a light-to-dark ramp over the crust density range.
    * - `"lithosphere"`: thickness of the cold mantle lid under the crust.
    * - `"sediment"`: share of the crust that is reworked sediment.
+   * - `"composition"`: mafic, felsic and sediment parts of the crust, blended.
+   * - `"cover"`: thickness of the loose sediment lying on top of the crust.
+   * - `"metamorphism"`: metamorphic facies of the rock at the surface, from its peak pressure and temperature.
+   * - `"exhumation"`: km of basement that erosion has cut through.
+   * - `"resources"`: potential of the `resource`th resource (see `RESOURCE_NAMES`).
    * - `"heat-flow"`: surface heat loss from cold old plates to hot ridges.
    * - `"mantle-temp"`: upper-mantle anomaly, cold under trenches, hot under continents.
    * - `"slab-graveyard"`: slab piled in the lower mantle beneath old trenches.
@@ -601,6 +606,7 @@ export class CellRenderer {
     boundaryKind?: ArrayLike<number>,
     elevationStyle: ElevationStyle = "absolute",
     relief?: ReliefOptions,
+    resource = 0,
   ): void {
     let shade: Float32Array | undefined;
     if (relief?.hillshade && mode === "elevation") {
@@ -615,6 +621,7 @@ export class CellRenderer {
       boundaryKind,
       elevationStyle,
       shade,
+      resource,
     );
     this.colourTexture.needsUpdate = true;
   }
