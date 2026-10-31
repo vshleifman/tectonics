@@ -131,6 +131,11 @@ impl PlanetHeat {
         (self.mantle_temp - MODERN_MANTLE_K) / EXCESS_SCALE_K
     }
 
+    /// The mantle's temperature (°C).
+    pub fn mantle_c(&self) -> f64 {
+        self.mantle_temp - SURFACE_K
+    }
+
     /// Heat (TW) the core is passing up into the mantle as the two stand.
     pub fn core_tw(&self, t: &Tuning) -> f64 {
         (t.core_coupling * (self.core_temp - self.mantle_temp)).max(0.0)

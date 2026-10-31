@@ -38,13 +38,15 @@ const OUTSIDE: u8 = u8::MAX;
 ///
 /// The plume lane, which records where crust came from, is left as it was.
 /// Basement taken adds to the cell's exhumation, and the rock it now shows has
-/// been as deep as that, `heat_flow_mw` being the cell's heat flow.
+/// been as deep as that, `heat_flow_mw` being the cell's heat flow and
+/// `mantle_c` the mantle's temperature (°C).
 fn strip(
     data: &mut CellData,
     i: usize,
     take: f64,
     area: f64,
     heat_flow_mw: f64,
+    mantle_c: f64,
     t: &Tuning,
 ) -> ([f64; COVER_LANES], f64) {
     let h = data.thickness[i] as f64;
@@ -92,7 +94,7 @@ fn strip(
     if from_basement > 0.0 {
         let exhumed = data.lanes.lane(LANE_EXHUMED)[i] as f64 + from_basement;
         data.lanes.lane_mut(LANE_EXHUMED)[i] = exhumed as f32;
-        raise_peaks(data, i, heat_flow_mw, exhumed, t);
+        raise_peaks(data, i, heat_flow_mw, exhumed, mantle_c, t);
     }
     (shed.map(|x| x * area), from_cover * area)
 }
@@ -101,7 +103,7 @@ fn strip(
 /// the excess leaves the cover lanes and stays in the sediment lane, as part
 /// of the basement. What turns to rock was buried as deep as the cover was
 /// thick, so the cell's peaks rise to the conditions there.
-fn lithify(data: &mut CellData, depth: f64, heat_flow: &[f32], t: &Tuning) {
+fn lithify(data: &mut CellData, depth: f64, heat_flow: &[f32], mantle_c: f64, t: &Tuning) {
     for i in 0..data.thickness.len() {
         let h = data.thickness[i] as f64;
         let (f, m) = (
@@ -113,7 +115,7 @@ fn lithify(data: &mut CellData, depth: f64, heat_flow: &[f32], t: &Tuning) {
             let keep = depth.max(0.0) / cover;
             data.lanes.lane_mut(LANE_COVER_FELSIC)[i] = (f * keep) as f32;
             data.lanes.lane_mut(LANE_COVER_MAFIC)[i] = (m * keep) as f32;
-            raise_peaks(data, i, heat_flow[i] as f64, cover, t);
+            raise_peaks(data, i, heat_flow[i] as f64, cover, mantle_c, t);
         }
     }
 }
@@ -123,7 +125,8 @@ fn lithify(data: &mut CellData, depth: f64, heat_flow: &[f32], t: &Tuning) {
 /// `field.sediment_eroded`, `field.sediment_deposited` and
 /// `field.sediment_subducted` (area x km), the first the sum of the others,
 /// and `field.sediment_eroded_cover`, the part of the former that was
-/// loose cover. `heat_flow` (mW/m²) sets how hot the rock was at depth.
+/// loose cover. `heat_flow` (mW/m²) sets how hot the rock was at depth, up to
+/// the mantle's temperature `mantle_c` (°C).
 pub fn erode_and_deposit(
     mesh: &Mesh,
     data: &mut CellData,
@@ -132,6 +135,7 @@ pub fn erode_and_deposit(
     t: &Tuning,
     climate: &Climate,
     heat_flow: &[f32],
+    mantle_c: f64,
 ) {
     field.sediment_eroded = 0.0;
     field.sediment_deposited = 0.0;
@@ -228,7 +232,7 @@ pub fn erode_and_deposit(
             .min(excess)
             .min(available);
             if take > 0.0 {
-                let (shed, from_cover) = strip(data, i, take, area, heat_flow[i] as f64, t);
+                let (shed, from_cover) = strip(data, i, take, area, heat_flow[i] as f64, mantle_c, t);
                 for lane in 0..COVER_LANES {
                     load_lanes[i][lane] += shed[lane];
                 }
@@ -328,7 +332,7 @@ pub fn erode_and_deposit(
             }
         }
     }
-    lithify(data, t.lithification_depth, heat_flow, t);
+    lithify(data, t.lithification_depth, heat_flow, mantle_c, t);
     field.sediment_eroded = eroded;
     field.sediment_deposited = deposited;
     field.sediment_eroded_cover = eroded_cover;
@@ -346,6 +350,9 @@ mod tests {
     use crate::geotherm::temperature_at;
     use crate::metamorphism::{Facies, facies};
     use crate::lithosphere::settle_lithosphere;
+
+    /// The mantle beneath the test worlds (°C), about today's.
+    const MANTLE_C: f64 = 1330.0;
 
     /// A level 4 sphere on one plate: ocean everywhere but a continent over
     /// the northern hemisphere.
@@ -418,6 +425,7 @@ mod tests {
                 &self.t,
                 &Climate::default(),
                 &self.heat_flow,
+                MANTLE_C,
             );
             self.rise();
         }
@@ -716,11 +724,11 @@ mod tests {
         let cell = orogen(&mut w);
         let area = w.mesh.area(cell);
         // At 70 mW/m² the geotherm puts the rock 2 km down far below zeolite.
-        strip(&mut w.data, cell, 2.0, area, 70.0, &w.t);
+        strip(&mut w.data, cell, 2.0, area, 70.0, MANTLE_C, &w.t);
         assert_eq!(w.data.lanes.lane(LANE_EXHUMED)[cell], 2.0);
         assert_eq!(facies_at(&w, cell), Facies::None);
         // 25 km down it is amphibolite: 15 + 70 * 25 / 2.5 - 1 * 25² / 5 = 590 °C.
-        strip(&mut w.data, cell, 23.0, area, 70.0, &w.t);
+        strip(&mut w.data, cell, 23.0, area, 70.0, MANTLE_C, &w.t);
         assert_eq!(w.data.lanes.lane(LANE_EXHUMED)[cell], 25.0);
         let temp = w.data.lanes.lane(LANE_PEAK_TEMP)[cell];
         assert!((temp - 590.0).abs() < 1.0, "peak {temp} °C");
@@ -732,11 +740,11 @@ mod tests {
         let mut w = world();
         let cell = orogen(&mut w);
         let area = w.mesh.area(cell);
-        strip(&mut w.data, cell, 10.0, area, 90.0, &w.t);
+        strip(&mut w.data, cell, 10.0, area, 90.0, MANTLE_C, &w.t);
         let hot = w.data.lanes.lane(LANE_PEAK_TEMP)[cell];
         // The same cut again at a lower heat flow reaches deeper but cooler
         // rock than the record: the peak stays.
-        strip(&mut w.data, cell, 1.0, area, 30.0, &w.t);
+        strip(&mut w.data, cell, 1.0, area, 30.0, MANTLE_C, &w.t);
         assert!(w.data.lanes.lane(LANE_PEAK_TEMP)[cell] >= hot);
         assert_eq!(w.data.lanes.lane(LANE_EXHUMED)[cell], 11.0);
         // Stripping loose cover is not exhumation.
@@ -749,7 +757,7 @@ mod tests {
             lanes[LANE_COVER_FELSIC] = 0.1;
             lanes
         });
-        strip(&mut w.data, cell, 4.0, w.mesh.area(cell), 70.0, &w.t);
+        strip(&mut w.data, cell, 4.0, w.mesh.area(cell), 70.0, MANTLE_C, &w.t);
         assert_eq!(w.data.lanes.lane(LANE_EXHUMED)[cell], 0.0);
         assert_eq!(w.data.lanes.lane(LANE_PEAK_TEMP)[cell], 0.0);
     }

@@ -474,7 +474,7 @@ impl Sim {
         infill_enclosed_basins(mesh, front, dt, advection, scratch, t);
         advection.back_arc_thinned = extend_back_arcs(mesh, front, plates, boundaries, dt, t);
         lap(timings, &mut mark, 6);
-        erode_and_deposit(mesh, front, advection, dt, t, climate, &heat.heat_flow);
+        erode_and_deposit(mesh, front, advection, dt, t, climate, &heat.heat_flow, heat.mantle_c());
         lap(timings, &mut mark, 9);
         primordial.update(mesh, front, plates, advection, mantle, heat, dt, t);
         if t.composition_crust_type {

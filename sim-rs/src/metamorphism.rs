@@ -9,7 +9,7 @@
 //! one orogen and drifts for rock exhumed long after it was buried.
 
 use crate::cell_data::{CellData, LANE_PEAK_PRESSURE, LANE_PEAK_TEMP};
-use crate::geotherm::temperature_at;
+use crate::geotherm::temperature_below;
 use crate::tuning::Tuning;
 
 /// Pressure (kbar) per km of rock of density 1 g/cm³: `rho g z`, with
@@ -22,9 +22,16 @@ pub fn pressure_at(density: f64, depth_km: f64) -> f64 {
 }
 
 /// Raise the peaks of cell `i` to what it feels `depth_km` down, if that is
-/// more.
-pub fn raise_peaks(data: &mut CellData, i: usize, heat_flow_mw: f64, depth_km: f64, t: &Tuning) {
-    let temp = temperature_at(t, heat_flow_mw, depth_km);
+/// more, over a mantle at `mantle_c` °C.
+pub fn raise_peaks(
+    data: &mut CellData,
+    i: usize,
+    heat_flow_mw: f64,
+    depth_km: f64,
+    mantle_c: f64,
+    t: &Tuning,
+) {
+    let temp = temperature_below(t, heat_flow_mw, depth_km, mantle_c);
     let pressure = pressure_at(data.density[i] as f64, depth_km);
     let slot = &mut data.lanes.lane_mut(LANE_PEAK_TEMP)[i];
     *slot = slot.max(temp as f32);
