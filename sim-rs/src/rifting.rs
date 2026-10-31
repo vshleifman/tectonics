@@ -499,12 +499,17 @@ fn separation(mesh: &Mesh, data: &CellData, b: &Balance, cells: &[i32], t: &Tuni
             );
         }
     }
-    // A dome under the line pushes the two sides apart.
+    // A dome under the line pushes the two sides apart, with the heat that is
+    // left once breaking open has vented its share: that is the push the two
+    // pieces will have, and a rift held open only by heat it is about to lose
+    // would part and close again.
+    let keep_heat = (1.0 - t.rift_heat_release).clamp(0.0, 1.0);
     for &a in &line {
         let (ca, cb) = (mesh.arc_cells[a * 2] as usize, mesh.arc_cells[a * 2 + 1] as usize);
         let Some(push) = dome_push(t, data, ca, cb, mesh.arc_length[a] as f64) else {
             continue;
         };
+        let push = push * keep_heat;
         let (m, n) = arc_frame(mesh, a);
         for (cell, sign) in [(ca, -1.0), (cb, 1.0)] {
             let v = [n[0] * sign * push, n[1] * sign * push, n[2] * sign * push];

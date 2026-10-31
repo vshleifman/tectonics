@@ -1364,6 +1364,18 @@ mod tests {
         assert_eq!(still.rift_count(), 0, "a continent nothing pulls apart broke");
     }
 
+    #[test]
+    fn a_rift_that_would_vent_all_its_heat_does_not_open() {
+        // Breaking open would take away the dome that parts the pieces, so the
+        // test of whether they part sees none, and the plate holds.
+        let mut sim = hot_continent(|t| t.rift_heat_release = 1.0);
+        let stretching = (sim.tuning.rift_duration / sim.tuning.dt_myr).ceil() as usize;
+        for _ in 0..stretching + 5 {
+            sim.tick();
+        }
+        assert_eq!(sim.rift_count(), 0, "broke over heat it vented in breaking");
+    }
+
     /// Ticks until a rift has begun to stretch on the hot continent.
     fn until_stretching(sim: &mut Sim) {
         for _ in 0..5 {
