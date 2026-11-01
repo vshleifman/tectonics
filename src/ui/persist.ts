@@ -8,6 +8,7 @@ import {
 } from "../sim/tuning";
 import { MAX_LEVEL, MIN_LEVEL } from "./controls";
 import type {
+  HandTool,
   PlateOverlay,
   Settings,
   SettingsStore,
@@ -29,7 +30,11 @@ const TUNING_KEY = "tectonics.tuning";
 const WRITE_DELAY_MS = 300;
 
 /** Settings that always start afresh: a reload never resumes running. */
-const NOT_KEPT: readonly (keyof Settings)[] = ["running", "seedMode"];
+const NOT_KEPT: readonly (keyof Settings)[] = [
+  "running",
+  "seedMode",
+  "handTool",
+];
 
 /** The values each choice-valued setting may hold. */
 const CHOICES: Partial<Record<keyof Settings, readonly string[]>> = {
@@ -53,6 +58,7 @@ const CHOICES: Partial<Record<keyof Settings, readonly string[]>> = {
     "boundary",
   ] satisfies ViewMode[],
   plateOverlay: ["off", "lines", "colours"] satisfies PlateOverlay[],
+  handTool: ["off", "attract", "repel"] satisfies HandTool[],
 };
 
 const readJson = (key: string): Record<string, unknown> | null => {

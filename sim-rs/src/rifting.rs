@@ -40,7 +40,7 @@ use std::collections::BinaryHeap;
 use crate::boundaries::BoundaryField;
 use crate::cell_data::{CONTINENTAL, CellData, RIFT_FAR, RIFT_NEAR};
 use crate::mantle::MantleFlow;
-use crate::math::{Sym3, Vec3, clamp01, cross, dot, len3, normalise, rotate, solve_sym3};
+use crate::math::{Sym3, Vec3, clamp01, cross, dot, len3, normalise, read3, rotate, solve_sym3};
 use crate::mesh::Mesh;
 use crate::par;
 use crate::plate_forces::{ArcForce, arc_force, arc_frame, cell_force, dome_push};
@@ -74,10 +74,19 @@ struct Cut {
 }
 
 /// A rift a plate is ready to open: the line perpendicular to `axis` at
-/// `offset`.
+/// `offset`, free to stray from it by no more than `reach` (along `axis`).
 struct Rift {
     axis: Vec3,
     offset: f64,
+    reach: f64,
+}
+
+impl Rift {
+    /// Half-width of the band the rift may wander in, across a plate spanning
+    /// `lo` to `hi` along its axis.
+    fn band(&self, lo: f64, hi: f64) -> f64 {
+        wander_band(lo, hi).min(self.reach).max(1e-9)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -89,6 +98,7 @@ pub fn update_rifting(
     boundaries: &BoundaryField,
     dt_myr: f64,
     registry: &mut Registry,
+    held: Option<i32>,
     s: &mut Scratch,
     t: &Tuning,
     o: &SimOptions,
@@ -170,8 +180,20 @@ pub fn update_rifting(
         let cells = &cells_by_plate[start[p]..start[p + 1]];
         if plates.opening.contains_key(&id) {
             stretch(
-                mesh, data, plates, mantle, boundaries, id, cells, dt_myr, registry, min_piece, s,
-                t, o,
+                mesh,
+                data,
+                plates,
+                mantle,
+                boundaries,
+                id,
+                cells,
+                dt_myr,
+                registry,
+                min_piece,
+                held == Some(id),
+                s,
+                t,
+                o,
             );
             continue;
         }
@@ -223,6 +245,112 @@ pub fn update_rifting(
         }
     }
     s.i32b = cells_by_plate;
+}
+
+/// Lay a rift across plate `id` through `centre`, as a hand pushing the plate
+/// apart there would: along whichever of the lines through it runs through the
+/// weakest lithosphere within `reach` radians, of those that skirt the plate's
+/// cratons and leave both pieces big enough to be plates. It then stretches
+/// for as long as any rift through the same crust would. `false`, changing
+/// nothing, if the plate already has a rift opening or no line will do.
+#[allow(clippy::too_many_arguments)]
+pub fn open_rift_through(
+    mesh: &Mesh,
+    data: &mut CellData,
+    plates: &mut PlateData,
+    id: i32,
+    centre: Vec3,
+    reach: f64,
+    t: &Tuning,
+    o: &SimOptions,
+) -> bool {
+    if plates.opening.contains_key(&id) || !plates.by_id.contains_key(&id) {
+        return false;
+    }
+    let cells: Vec<i32> = (0..mesh.cell_count as i32)
+        .filter(|&i| data.plate_id[i as usize] == id)
+        .collect();
+    let total_area: f64 = (0..mesh.cell_count).map(|i| mesh.area(i)).sum();
+    let plate_area: f64 = cells.iter().map(|&c| mesh.area(c as usize)).sum();
+    let min_piece = t.min_plate_area * total_area;
+    let Some(u) =
+        tangent_at(centre, [1.0, 0.0, 0.0]).or_else(|| tangent_at(centre, [0.0, 1.0, 0.0]))
+    else {
+        return false;
+    };
+    let v = normalise(cross(centre, u));
+    // Cells near the line within the hand's reach, about a cell either side.
+    let width = (4.0 * std::f64::consts::PI / mesh.cell_count as f64).sqrt();
+    let within = reach.cos();
+    let mut lines: Vec<(f64, Rift)> = (0..RIFT_ANGLES)
+        .map(|k| {
+            let angle = k as f64 * std::f64::consts::PI / RIFT_ANGLES as f64;
+            let (sin, cos) = angle.sin_cos();
+            let axis = [
+                cos * u[0] + sin * v[0],
+                cos * u[1] + sin * v[1],
+                cos * u[2] + sin * v[2],
+            ];
+            let offset = dot(centre, axis);
+            let (mut weight, mut strength) = (0.0, 0.0);
+            for &c in &cells {
+                let i = c as usize;
+                let near = (along(mesh, i, axis) - offset).abs() < width;
+                if near && dot(read3(&mesh.centres, i), centre) > within {
+                    weight += mesh.area(i);
+                    strength += cell_strength(t, data, i, o) * mesh.area(i);
+                }
+            }
+            let mean = if weight > 0.0 {
+                strength / weight
+            } else {
+                f64::INFINITY
+            };
+            // Held within half the hand's reach, so it opens where the hand
+            // is rather than along some weaker line off to the side.
+            let reach = 0.5 * reach.sin();
+            (mean, Rift { axis, offset, reach })
+        })
+        .collect();
+    lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let cratons = Cratons::of(mesh, data, &cells);
+    for (_, rift) in lines {
+        if cratons.crossed_by(mesh, &cells, &rift) {
+            continue;
+        }
+        if !lay_out(mesh, data, &cells, &rift, &cratons, t, o) {
+            clear_sides(data, &cells);
+            continue;
+        }
+        let far_area: f64 = cells
+            .iter()
+            .filter(|&&c| data.rift_side[c as usize] == RIFT_FAR)
+            .map(|&c| mesh.area(c as usize))
+            .sum();
+        if far_area < min_piece || plate_area - far_area < min_piece {
+            clear_sides(data, &cells);
+            continue;
+        }
+        let zone = zone_of(mesh, data, &cells, id);
+        let zone_area: f64 = zone.iter().map(|&i| mesh.area(i)).sum();
+        let continental: f64 = zone
+            .iter()
+            .filter(|&&i| data.crust_type[i] == CONTINENTAL)
+            .map(|&i| mesh.area(i))
+            .sum();
+        plates.opening.insert(
+            id,
+            OpeningRift {
+                elapsed: 0.0,
+                duration: (t.rift_duration * continental / zone_area.max(1e-12))
+                    .max(t.min_rift_duration),
+                axis: rift.axis,
+            },
+        );
+        return true;
+    }
+    false
 }
 
 /// The cells of plate `id` that border the other side of its rift, and are
@@ -399,6 +527,7 @@ fn pick_rift(
                 Rift {
                     axis,
                     offset: cut.offset,
+                    reach: f64::INFINITY,
                 },
             ));
         }
@@ -724,7 +853,7 @@ impl Cratons {
             return false;
         }
         let (lo, hi) = extent(mesh, cells, rift.axis);
-        let band = wander_band(lo, hi);
+        let band = rift.band(lo, hi);
         (0..self.count()).any(|c| {
             let (mut near, mut far) = (false, false);
             for &m in self.cells(c) {
@@ -758,7 +887,7 @@ fn lay_out(
     o: &SimOptions,
 ) -> bool {
     let (lo, hi) = extent(mesh, cells, rift.axis);
-    let band = wander_band(lo, hi);
+    let band = rift.band(lo, hi);
     let offset_of = |i: usize| along(mesh, i, rift.axis) - rift.offset;
     let side_of = |d: f64| if d > 0.0 { RIFT_FAR } else { RIFT_NEAR };
     for &cell in cells {
@@ -891,7 +1020,8 @@ fn fill_sides(mesh: &Mesh, data: &mut CellData, cells: &[i32], s: &mut Scratch) 
 
 /// Advance a rift that is stretching: keep it open while it is still driven,
 /// thin its zone between rising shoulders, and break the plate in two once it
-/// has stretched for as long as it must.
+/// has stretched for as long as it must. A rift `held` open by a hand is
+/// driven for as long as the hand holds it.
 #[allow(clippy::too_many_arguments)]
 fn stretch(
     mesh: &Mesh,
@@ -904,6 +1034,7 @@ fn stretch(
     dt_myr: f64,
     registry: &mut Registry,
     min_area: f64,
+    held: bool,
     s: &mut Scratch,
     t: &Tuning,
     o: &SimOptions,
@@ -911,7 +1042,7 @@ fn stretch(
     fill_sides(mesh, data, cells, s);
     let zone = zone_of(mesh, data, cells, id);
     // Whether the two pieces still move apart under their own forces.
-    let parting = !o.rift_needs_separation || {
+    let parting = held || !o.rift_needs_separation || {
         let balance = Balance {
             mantle,
             boundaries,
@@ -957,7 +1088,7 @@ fn stretch(
     }
     let drive = spread_tension(mesh, cells, normal, pull) + t.insulation_drive * heat / weight;
     let strength = t.rift_strength * strength / weight;
-    if drive < (1.0 - RIFT_HOLD) * strength || !parting {
+    if (drive < (1.0 - RIFT_HOLD) * strength && !held) || !parting {
         // Stalled: the thinned zone stays behind as a weak scar.
         let margin = t.rift_margin_weakness as f32;
         for &i in &zone {
@@ -1173,6 +1304,7 @@ mod tests {
         let rift = Rift {
             axis: [1.0, 0.0, 0.0],
             offset: 0.0,
+            reach: f64::INFINITY,
         };
         let cratons = Cratons::of(&mesh, &data, &cap);
         lay_out(
@@ -1211,11 +1343,49 @@ mod tests {
     }
 
     #[test]
+    fn a_rift_held_close_keeps_to_its_line_past_a_weak_seam() {
+        let (mesh, mut data, cap) = capped(5);
+        let c = |i: usize, k: usize| mesh.centres[i * 3 + k] as f64;
+        // A straight seam 0.12 off the line, within the band a rift may
+        // otherwise wander in.
+        for &cell in &cap {
+            if (c(cell as usize, 0) - 0.12).abs() < 0.03 {
+                data.weakness[cell as usize] = 1.0;
+            }
+        }
+        let rift = Rift {
+            axis: [1.0, 0.0, 0.0],
+            offset: 0.0,
+            reach: 0.04,
+        };
+        let cratons = Cratons::of(&mesh, &data, &cap);
+        lay_out(
+            &mesh,
+            &mut data,
+            &cap,
+            &rift,
+            &cratons,
+            &Tuning::default(),
+            &SimOptions::default(),
+        );
+        for &cell in &cap {
+            let i = cell as usize;
+            let x = c(i, 0);
+            if x > 0.05 {
+                assert_eq!(data.rift_side[i], RIFT_FAR, "cell at x = {x:.3}");
+            } else if x < -0.05 {
+                assert_eq!(data.rift_side[i], RIFT_NEAR, "cell at x = {x:.3}");
+            }
+        }
+    }
+
+    #[test]
     fn a_rift_left_straight_where_nothing_is_weaker() {
         let (mesh, mut data, cap) = capped(5);
         let rift = Rift {
             axis: [1.0, 0.0, 0.0],
             offset: 0.1,
+            reach: f64::INFINITY,
         };
         let cratons = Cratons::of(&mesh, &data, &cap);
         lay_out(
@@ -1370,6 +1540,7 @@ mod tests {
             &BoundaryField::new(mesh.cell_count, mesh.arc_count()),
             t.dt_myr,
             &mut registry,
+            None,
             &mut s,
             &t,
             &o,
@@ -1388,6 +1559,7 @@ mod tests {
             &BoundaryField::new(mesh.cell_count, mesh.arc_count()),
             t.dt_myr,
             &mut registry,
+            None,
             &mut s,
             &t,
             &o,
@@ -1440,6 +1612,7 @@ mod tests {
             &BoundaryField::new(mesh.cell_count, mesh.arc_count()),
             t.ocean_weakness_decay_time,
             &mut registry,
+            None,
             &mut s,
             &t,
             &o,

@@ -115,6 +115,15 @@ export class SimClient {
     this.send({ type: "setSimOptions", options: { ...options } });
   }
 
+  /** Hold a hand on the globe, or move the one held (see `SimWorld.setHand`). */
+  setHand(centre: Vec3, radius: number, speed: number, grip: boolean): void {
+    this.send({ type: "setHand", centre, radius, speed, grip });
+  }
+
+  clearHand(): void {
+    this.send({ type: "clearHand" });
+  }
+
   run(ticksPerSecond: number): void {
     this.send({ type: "run", ticksPerSecond });
   }

@@ -25,7 +25,12 @@ import {
   tuning,
 } from "../sim/tuning";
 import { createDiagnostics } from "./diagnostics";
-import type { PlateOverlay, SettingsStore, ViewMode } from "./settingsStore";
+import type {
+  HandTool,
+  PlateOverlay,
+  SettingsStore,
+  ViewMode,
+} from "./settingsStore";
 
 const ACCENT = "#4f8ff0";
 
@@ -67,6 +72,10 @@ const MIN_BRANCHES = 1;
 const MAX_BRANCHES = 5;
 const MIN_TICK_RATE = 1;
 const MAX_TICK_RATE = 30;
+const MIN_HAND_SPEED = 1;
+const MAX_HAND_SPEED = 50;
+const MIN_HAND_RADIUS = 5;
+const MAX_HAND_RADIUS = 60;
 
 /** One tunable simulation constant exposed as a slider. */
 interface TuningSliderSpec {
@@ -1913,6 +1922,80 @@ export const createControls = (
   const seedBlock = document.createElement("div");
   seedBlock.append(branchesLabel, branchesSlider, seedToggle.row, clearButton);
 
+  // The hand: press and hold on the globe to draw plates in or push them away
+  // while the world runs. Its sliders show only while a tool is picked.
+  const handLabel = makeLabel();
+  handLabel.textContent = "Hand (press and hold the globe)";
+  const handControl = makeSegmented<HandTool>(
+    [
+      { value: "off", label: "Off" },
+      { value: "attract", label: "Attract" },
+      { value: "repel", label: "Repel" },
+    ],
+    initial.handTool,
+    (handTool) => {
+      store.set({ handTool });
+    },
+  );
+  tooltip.attach(
+    handControl.row,
+    "Attract draws the plates around the pointer toward it; Repel pushes them away. Each acts on top of the plates' own forces while the button is held, and the plates go back to those forces when it is let go. Holding the hand on a paused world runs it until the hand is let go. Held in one place for 7 s, the hand grips: Attract folds together the plates meeting inside its inner circle, and Repel rifts the plate under it there (not through a craton), holding the rift open until it breaks. Dragging moves the hand; orbiting is paused meanwhile.",
+  );
+  const handSpeedLabel = makeLabel();
+  const handSpeedSlider = makeSlider(
+    MIN_HAND_SPEED,
+    MAX_HAND_SPEED,
+    1,
+    initial.handSpeed,
+  );
+  const renderHandSpeedLabel = (): void => {
+    handSpeedLabel.textContent = `Hand speed: ${store.get("handSpeed")} cm/yr`;
+  };
+  const handRadiusLabel = makeLabel();
+  const handRadiusSlider = makeSlider(
+    MIN_HAND_RADIUS,
+    MAX_HAND_RADIUS,
+    1,
+    initial.handRadius,
+  );
+  const renderHandRadiusLabel = (): void => {
+    handRadiusLabel.textContent = `Hand reach: ${store.get("handRadius")}°`;
+  };
+  renderHandSpeedLabel();
+  renderHandRadiusLabel();
+  const handSliders = document.createElement("div");
+  handSliders.append(
+    handSpeedLabel,
+    handSpeedSlider,
+    handRadiusLabel,
+    handRadiusSlider,
+  );
+  handSliders.style.display = initial.handTool === "off" ? "none" : "";
+  tooltip.attach(
+    handSliders,
+    "How fast the hand moves the crust under it (plates today move 1 to 10 cm/yr), and how far from the pointer it reaches, fading to nothing at the edge.",
+  );
+  handSpeedSlider.addEventListener("input", () => {
+    store.set({
+      handSpeed: clamp(
+        Math.round(Number(handSpeedSlider.value)),
+        MIN_HAND_SPEED,
+        MAX_HAND_SPEED,
+      ),
+    });
+  });
+  handRadiusSlider.addEventListener("input", () => {
+    store.set({
+      handRadius: clamp(
+        Math.round(Number(handRadiusSlider.value)),
+        MIN_HAND_RADIUS,
+        MAX_HAND_RADIUS,
+      ),
+    });
+  });
+  const handBlock = document.createElement("div");
+  handBlock.append(handLabel, handControl.row, handSliders);
+
   const changeOptions = (patch: Partial<SimOptions>): void => {
     setSimOptions(patch);
     syncConditionalSliders();
@@ -2217,6 +2300,7 @@ export const createControls = (
     rateLabel,
     rateSlider,
     stepButton,
+    handBlock,
     insulationToggle.row,
     tensionToggle.row,
     quietToggle.row,
@@ -2669,6 +2753,18 @@ export const createControls = (
     }
     if (changed.has("seedMode")) {
       seedToggle.input.checked = state.seedMode;
+    }
+    if (changed.has("handTool")) {
+      handControl.setSelected(state.handTool);
+      handSliders.style.display = state.handTool === "off" ? "none" : "";
+    }
+    if (changed.has("handSpeed")) {
+      handSpeedSlider.value = String(state.handSpeed);
+      renderHandSpeedLabel();
+    }
+    if (changed.has("handRadius")) {
+      handRadiusSlider.value = String(state.handRadius);
+      renderHandRadiusLabel();
     }
     if (changed.has("cellReadout")) {
       readoutToggle.input.checked = state.cellReadout;

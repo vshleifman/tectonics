@@ -15,10 +15,11 @@ use crate::elevation::{apply_elevation, dynamic_topography, update_densities};
 use crate::erosion::erode_and_deposit;
 use crate::metamorphism::classify_facies;
 use crate::resources::{RESOURCES, RULES, evaluate};
+use crate::hand::{CORE_SHARE, Hand, cell_under, fold_plates, hand_omegas};
 use crate::heat::{PlanetHeat, effective_tuning};
 use crate::lithosphere::update_lithosphere;
 use crate::mantle::MantleFlow;
-use crate::math::read3;
+use crate::math::{Vec3, add, read3, sub};
 use crate::mesh::Mesh;
 use crate::metrics::{PlateSummary, WorldMetrics, compute_metrics, summaries};
 use crate::par;
@@ -29,7 +30,7 @@ use crate::plates::{PlateData, initialise_crust, reconcile};
 use crate::primordial::Primordial;
 use crate::recycling::{recycle_continental_margins, steer_accretion, track_continental_growth};
 use crate::registry::{Registry, assign_plates};
-use crate::rifting::update_rifting;
+use crate::rifting::{open_rift_through, update_rifting};
 use crate::rng::Rng;
 use crate::scratch::Scratch;
 use crate::slabs::{seed_slabs, update_slabs};
@@ -38,7 +39,7 @@ use crate::timer::now_ms;
 use crate::tuning::{SimOptions, Tuning};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Opens every saved world, ahead of the hash of the source that wrote it.
 const STATE_MAGIC: [u8; 4] = *b"TECT";
@@ -128,6 +129,25 @@ pub struct Sim {
     elapsed: f64,
     timings: [f64; PASS_COUNT],
     substeps: usize,
+    /// The hand held on the globe, if any (see [`crate::hand`]).
+    pub hand: Option<Hand>,
+    /// What the hand added to each plate's motion this tick, taken off again
+    /// before the plates' own forces are next balanced. Not saved.
+    hand_shift: BTreeMap<i32, Vec3>,
+    /// The plate whose rift a gripping hand is holding open. Not saved.
+    hand_rift: Option<i32>,
+    /// Whether the hand's grip has laid its rift yet: one per grip, so the
+    /// pieces are not torn again and again. Not saved.
+    hand_rifted: bool,
+}
+
+/// Take what the hand added off each plate still alive to have it.
+fn take_off(plates: &mut PlateData, shift: &BTreeMap<i32, Vec3>) {
+    for (id, w) in shift {
+        if let Some(p) = plates.by_id.get_mut(id) {
+            p.omega = sub(p.omega, *w);
+        }
+    }
 }
 
 impl Sim {
@@ -161,6 +181,10 @@ impl Sim {
             elapsed: 0.0,
             timings: [0.0; PASS_COUNT],
             substeps: 1,
+            hand: None,
+            hand_shift: BTreeMap::new(),
+            hand_rift: None,
+            hand_rifted: false,
             mesh,
         }
     }
@@ -173,9 +197,16 @@ impl Sim {
 
     /// The world as bytes, for [`Sim::from_state`].
     pub fn save_state(&self) -> Vec<u8> {
+        let plates = if self.hand_shift.is_empty() {
+            Cow::Borrowed(&self.plates)
+        } else {
+            let mut own = self.plates.clone();
+            take_off(&mut own, &self.hand_shift);
+            Cow::Owned(own)
+        };
         let state = State {
             front: Cow::Borrowed(&self.front),
-            plates: Cow::Borrowed(&self.plates),
+            plates,
             registry: Cow::Borrowed(&self.registry),
             boundaries: Cow::Borrowed(&self.boundaries),
             advection: Cow::Borrowed(&self.advection),
@@ -360,7 +391,9 @@ impl Sim {
     }
 
     /// The forces on the plates over the coming tick, and the boundaries and
-    /// welds they make.
+    /// welds they make. A hand on the globe moves the plates it touches on top
+    /// of their own forces, through the whole tick, but leaves the motion the
+    /// plates settle toward to those forces alone.
     fn drive_plates(&mut self) {
         let t = &self.effective_tuning();
         let dt = t.dt_myr;
@@ -375,9 +408,15 @@ impl Sim {
             scratch,
             options,
             timings,
+            hand,
+            hand_shift,
+            hand_rift,
+            hand_rifted,
             ..
         } = self;
         let mut mark = now_ms();
+        take_off(plates, hand_shift);
+        hand_shift.clear();
         update_slabs(mesh, front, boundaries, scratch, t, dt);
         mantle.update(mesh, front, boundaries, dt, t, options);
         {
@@ -391,10 +430,42 @@ impl Sim {
         update_plate_motion(
             mesh, front, plates, boundaries, mantle, scratch, t, dt, options,
         );
+        if let Some(hand) = hand {
+            *hand_shift = hand_omegas(mesh, &front.plate_id, hand);
+            for (id, w) in hand_shift.iter() {
+                if let Some(p) = plates.by_id.get_mut(id) {
+                    p.omega = add(p.omega, *w);
+                }
+            }
+        }
         lap(timings, &mut mark, 0);
         classify(mesh, front, plates, boundaries, scratch, t);
         lap(timings, &mut mark, 1);
         update_sutures(mesh, front, plates, boundaries, dt, scratch, t, options);
+        match hand {
+            Some(h) if h.grip && h.speed > 0.0 => {
+                fold_plates(mesh, front, plates, h, t);
+            }
+            Some(h) if h.grip && !*hand_rifted => {
+                // A rift already opening there is held open as it is.
+                let id = front.plate_id[cell_under(mesh, h)];
+                let reach = h.radius * CORE_SHARE;
+                if plates.opening.contains_key(&id)
+                    || open_rift_through(mesh, front, plates, id, h.centre, reach, t, options)
+                {
+                    *hand_rift = Some(id);
+                    *hand_rifted = true;
+                }
+            }
+            Some(h) if h.grip => {}
+            _ => {
+                *hand_rift = None;
+                *hand_rifted = false;
+            }
+        }
+        if hand_rift.is_some_and(|id| !plates.opening.contains_key(&id)) {
+            *hand_rift = None;
+        }
         lap(timings, &mut mark, 2);
     }
 
@@ -460,13 +531,14 @@ impl Sim {
             options,
             timings,
             elapsed,
+            hand_rift,
             ..
         } = self;
         let mut mark = now_ms();
         update_plate_identity(mesh, front, plates, registry, scratch, t);
         lap(timings, &mut mark, 4);
         update_rifting(
-            mesh, front, plates, mantle, boundaries, dt, registry, scratch, t, options,
+            mesh, front, plates, mantle, boundaries, dt, registry, *hand_rift, scratch, t, options,
         );
         collapse_passive_margins(mesh, front, plates, registry, scratch, t, options);
         lap(timings, &mut mark, 5);
@@ -1291,6 +1363,139 @@ mod tests {
         let m = sim.metrics();
         assert!(m.elapsed_myr > 0.0);
         assert!(m.boundary_share[0] > 0.0, "no convergence at all");
+    }
+
+    #[test]
+    fn a_hand_moves_the_plates_without_touching_their_own_motion() {
+        let mut held = settled_world();
+        let mut free = Sim::from_state(&held.save_state()).unwrap();
+        held.hand = Some(Hand {
+            centre: crate::math::normalise([0.3, 0.2, 1.0]),
+            radius: 0.5,
+            speed: 0.02,
+            grip: false,
+        });
+        held.tick();
+        free.tick();
+        assert!(!held.hand_shift.is_empty(), "the hand touched no plate");
+        let mut moved = false;
+        for (id, p) in &held.plates.by_id {
+            let (Some(q), Some(w)) = (free.plates.by_id.get(id), held.hand_shift.get(id)) else {
+                continue;
+            };
+            let own = sub(p.omega, *w);
+            for k in 0..3 {
+                assert!(
+                    (own[k] - q.omega[k]).abs() < 1e-12,
+                    "plate {id}: {own:?} vs {:?}",
+                    q.omega
+                );
+            }
+            moved |= w.iter().any(|x| x.abs() > 1e-4);
+        }
+        assert!(moved, "the hand moved nothing");
+
+        // What is saved is the plates' own motion, hand or no hand.
+        let saved = Sim::from_state(&held.save_state()).unwrap();
+        for (id, p) in &saved.plates.by_id {
+            let w = held.hand_shift.get(id).copied().unwrap_or([0.0; 3]);
+            assert_eq!(p.omega, sub(held.plates.by_id[id].omega, w));
+        }
+
+        // Let go, and the next balance starts from the plates' own motion.
+        held.hand = None;
+        held.tick();
+        assert!(held.hand_shift.is_empty());
+    }
+
+    #[test]
+    fn a_gripping_hand_folds_together_the_plates_meeting_under_it() {
+        let mut sim = settled_world();
+        // A spot on a boundary between two plates.
+        let a = (0..sim.mesh.arc_count())
+            .find(|&a| {
+                let (ca, cb) = (sim.mesh.arc_cells[a * 2], sim.mesh.arc_cells[a * 2 + 1]);
+                ca >= 0
+                    && cb >= 0
+                    && sim.front.plate_id[ca as usize] != sim.front.plate_id[cb as usize]
+            })
+            .expect("a boundary");
+        let (ca, cb) = (
+            sim.mesh.arc_cells[a * 2] as usize,
+            sim.mesh.arc_cells[a * 2 + 1] as usize,
+        );
+        let centre = crate::math::normalise(read3(&sim.mesh.arc_mid, a));
+        let hand = Hand {
+            centre,
+            radius: 0.3,
+            speed: 0.01,
+            grip: true,
+        };
+        let before = sim.plate_count();
+        sim.hand = Some(Hand {
+            grip: false,
+            ..hand
+        });
+        sim.tick();
+        assert_eq!(sim.front.plate_id.iter().filter(|&&p| p < 0).count(), 0);
+        let (pa, pb) = (sim.front.plate_id[ca], sim.front.plate_id[cb]);
+        assert!(
+            pa != pb || sim.plate_count() < before,
+            "they merged before the grip"
+        );
+        sim.hand = Some(hand);
+        sim.tick();
+        assert_eq!(
+            sim.front.plate_id[ca], sim.front.plate_id[cb],
+            "still two plates"
+        );
+        assert!(sim.plate_count() < before);
+    }
+
+    #[test]
+    fn a_gripping_hand_rifts_the_plate_under_it() {
+        let mut sim = settled_world();
+        let mut cells: HashMap<i32, usize> = HashMap::new();
+        for &p in &sim.front.plate_id {
+            *cells.entry(p).or_default() += 1;
+        }
+        let (&id, _) = cells
+            .iter()
+            .max_by_key(|(id, n)| (**n, -**id))
+            .expect("plates");
+        let mut sum = [0.0; 3];
+        for i in 0..sim.mesh.cell_count {
+            if sim.front.plate_id[i] == id {
+                sum = add(sum, read3(&sim.mesh.centres, i));
+            }
+        }
+        let centre = crate::math::normalise(sum);
+        let hand = Hand {
+            centre,
+            radius: 0.4,
+            speed: -0.01,
+            grip: true,
+        };
+        assert_eq!(sim.front.plate_id[cell_under(&sim.mesh, &hand)], id);
+        let mut free = Sim::from_state(&sim.save_state()).unwrap();
+        sim.hand = Some(hand);
+        let ticks = (sim.tuning.rift_duration / sim.tuning.dt_myr).ceil() as usize + 3;
+        for _ in 0..ticks {
+            sim.tick();
+            free.tick();
+        }
+        assert!(
+            sim.plates.rifts > free.plates.rifts,
+            "the plate never broke"
+        );
+        assert!(sim.hand_rifted);
+        // It broke where the hand is: more than one plate under its core.
+        let core = (hand.radius * CORE_SHARE).cos();
+        let under: std::collections::BTreeSet<i32> = (0..sim.mesh.cell_count)
+            .filter(|&i| crate::math::dot(read3(&sim.mesh.centres, i), centre) > core)
+            .map(|i| sim.front.plate_id[i])
+            .collect();
+        assert!(under.len() > 1, "the rift opened away from the hand");
     }
 
     /// A hemisphere of continent at rest over mantle heat just past what it

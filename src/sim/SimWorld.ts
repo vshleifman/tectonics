@@ -1,3 +1,4 @@
+import type { Vec3 } from "../math/vec3";
 import type { ArrayCellMesh } from "../mesh/ArrayCellMesh";
 import type { PlateSummary } from "../plates/PlateData";
 import type { WorldMetrics } from "./metrics";
@@ -134,6 +135,17 @@ export interface SimWorld {
    */
   refreshSurface(): void;
   setSimOptions(options: SimOptions): void;
+  /**
+   * Hold a hand on the globe from the next tick on: plates near `centre` (a
+   * unit vector) are drawn toward it at `speed` rad/Myr, or pushed away from
+   * it if `speed` is negative, fading out at `radius` radians, on top of their
+   * own forces. A hand that `grip`s also folds together the plates meeting
+   * near its centre, if drawing them in, or rifts the plate under it there, if
+   * pushing them apart.
+   */
+  setHand(centre: Vec3, radius: number, speed: number, grip: boolean): void;
+  /** Let go of the hand; the plates go back to their own forces. */
+  clearHand(): void;
   fields(): WorldFields;
   plateCount(): number;
   /** Flat `[id, wx, wy, wz]` quads, one per live plate. */

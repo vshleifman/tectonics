@@ -38,10 +38,7 @@ export class Picker {
    * Unit direction on the globe under the client point, or null if the point
    * misses the globe or lies off the edge of the map.
    */
-  private direction(
-    clientX: number,
-    clientY: number,
-  ): [number, number, number] | null {
+  direction(clientX: number, clientY: number): [number, number, number] | null {
     const rect = this.domElement.getBoundingClientRect();
     this.ndc.set(
       ((clientX - rect.left) / rect.width) * 2 - 1,

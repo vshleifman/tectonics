@@ -357,6 +357,12 @@ const handle = async (cmd: SimCommand): Promise<void> => {
       world?.setSimOptions(cmd.options);
       markDirty();
       return;
+    case "setHand":
+      world?.setHand(cmd.centre, cmd.radius, cmd.speed, cmd.grip);
+      return;
+    case "clearHand":
+      world?.clearHand();
+      return;
     case "run":
       ticksPerSecond = Math.max(0.1, cmd.ticksPerSecond);
       running = true;

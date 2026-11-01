@@ -33,6 +33,12 @@ export type ViewMode =
  */
 export type PlateOverlay = "off" | "lines" | "colours";
 
+/**
+ * What pressing and holding on the globe does: nothing beyond orbiting, draw
+ * the plates around the pointer toward it, or push them away from it.
+ */
+export type HandTool = "off" | "attract" | "repel";
+
 export type { ElevationStyle };
 
 /** Every user-tunable UI setting. The store below is the sole owner of these. */
@@ -66,6 +72,11 @@ export interface Settings {
   /** List every property of the cell under the pointer, over whatever view is shown. */
   cellReadout: boolean;
   plateOverlay: PlateOverlay;
+  handTool: HandTool;
+  /** Speed (cm/yr) the hand moves the crust under it at. */
+  handSpeed: number;
+  /** How far (degrees of arc) the hand reaches from the pointer. */
+  handRadius: number;
   running: boolean;
   /** Simulation ticks attempted per second of wall clock. */
   ticksPerSecond: number;

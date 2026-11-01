@@ -184,8 +184,9 @@ pub fn update_sutures(
     }
 }
 
-/// Fold one plate into the other; the larger keeps its identity.
-fn merge_plates(data: &mut CellData, plates: &mut PlateData, a: i32, b: i32) {
+/// Fold one plate into the other; the larger keeps its identity, and is
+/// returned.
+pub(crate) fn merge_plates(data: &mut CellData, plates: &mut PlateData, a: i32, b: i32) -> i32 {
     let mut count_a = 0usize;
     let mut count_b = 0usize;
     for &p in &data.plate_id {
@@ -211,6 +212,7 @@ fn merge_plates(data: &mut CellData, plates: &mut PlateData, a: i32, b: i32) {
     rehome(&mut plates.sutures, gone, keep);
     rehome(&mut plates.quiet, gone, keep);
     rehome(&mut plates.craton_welds, gone, keep);
+    keep
 }
 
 /// Move every ledger entry naming `gone` onto `keep`, dropping their shared one.

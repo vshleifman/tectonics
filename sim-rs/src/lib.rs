@@ -19,6 +19,7 @@ pub mod crust_lifecycle;
 pub mod elevation;
 pub mod erosion;
 pub mod geotherm;
+pub mod hand;
 pub mod heat;
 pub mod lithosphere;
 pub mod mantle;
@@ -185,6 +186,25 @@ impl World {
     pub fn set_options(&mut self, value: JsValue) -> Result<(), JsValue> {
         self.sim.options = serde_wasm_bindgen::from_value(value)?;
         Ok(())
+    }
+
+    /// Hold a hand on the globe at the unit vector `(x, y, z)`, reaching
+    /// `radius` radians and moving the crust under it at `speed` rad/Myr:
+    /// toward it if positive, away if negative. Acts from the next tick. A
+    /// hand that `grip`s also folds together the plates meeting in its core,
+    /// or rifts the plate under it (see `hand`).
+    pub fn set_hand(&mut self, x: f64, y: f64, z: f64, radius: f64, speed: f64, grip: bool) {
+        self.sim.hand = Some(hand::Hand {
+            centre: math::normalise([x, y, z]),
+            radius,
+            speed,
+            grip,
+        });
+    }
+
+    /// Let go of the hand; the plates go back to their own forces.
+    pub fn clear_hand(&mut self) {
+        self.sim.hand = None;
     }
 
     pub fn elevation_ptr(&self) -> *const f32 {

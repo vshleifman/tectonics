@@ -1,3 +1,4 @@
+import type { Vec3 } from "../math/vec3";
 import { ArrayCellMesh } from "../mesh/ArrayCellMesh";
 import type { PlateSummary } from "../plates/PlateData";
 import type { WorldMetrics } from "../sim/metrics";
@@ -95,6 +96,14 @@ export class WasmWorld implements SimWorld {
 
   setSimOptions(options: SimOptions): void {
     this.world.set_options(options);
+  }
+
+  setHand(centre: Vec3, radius: number, speed: number, grip: boolean): void {
+    this.world.set_hand(centre[0], centre[1], centre[2], radius, speed, grip);
+  }
+
+  clearHand(): void {
+    this.world.clear_hand();
   }
 
   fields(): WorldFields {

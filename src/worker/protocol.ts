@@ -1,4 +1,5 @@
 import type { BenchResult, BenchSpec } from "../bench/benchScenario";
+import type { Vec3 } from "../math/vec3";
 import type { MeshArrays } from "../mesh/CellMesh";
 import type { PlateSummary } from "../plates/PlateData";
 import type { WorldMetrics } from "../sim/metrics";
@@ -30,6 +31,15 @@ export type SimCommand =
   | { type: "setBranches"; count: number }
   | { type: "setTuning"; tuning: Tuning }
   | { type: "setSimOptions"; options: SimOptions }
+  /** Hold a hand on the globe (see `SimWorld.setHand`), or move it. */
+  | {
+      type: "setHand";
+      centre: Vec3;
+      radius: number;
+      speed: number;
+      grip: boolean;
+    }
+  | { type: "clearHand" }
   | { type: "run"; ticksPerSecond: number }
   | { type: "pause" }
   /** Write the world to storage now, if it has changed since the last save. */
