@@ -44,6 +44,14 @@ pub fn lid_density(t: &Tuning, keel: f64) -> f64 {
     t.mantle_density * (1.0 + t.thermal_expansion * t.lid_delta_t / 2.0) - keel * t.keel_depletion
 }
 
+/// Km of a column of `thickness` km, `mafic` of it mafic rock, that is eclogite:
+/// the mafic rock sits at the base of the column, where differentiation leaves
+/// it, and the part of it deeper than `eclogite_depth` has turned.
+pub fn eclogite_km(t: &Tuning, mafic: f64, thickness: f64) -> f64 {
+    let h = thickness.max(0.0);
+    (h - t.eclogite_depth.max(h * (1.0 - mafic))).max(0.0).min(mafic * h)
+}
+
 /// Mean density (g/cm³) of a column of `thickness` km of crust made of `lanes`.
 /// Basement is mafic, felsic and metasediment (the sediment that is no longer
 /// loose); cover lies on top, uncompacted. The mafic rock is taken to sit at
@@ -58,11 +66,7 @@ pub fn composition_density(t: &Tuning, lanes: &[f32; LANES], thickness: f64) -> 
     let felsic = share(LANE_FELSIC);
     let h = thickness.max(0.0);
     // Share of the whole column that is mafic rock deeper than eclogite_depth.
-    let eclogite = if h > 0.0 {
-        ((h - t.eclogite_depth.max(h * (1.0 - mafic))).max(0.0) / h).min(mafic)
-    } else {
-        0.0
-    };
+    let eclogite = if h > 0.0 { eclogite_km(t, mafic, h) / h } else { 0.0 };
     let total = mafic + felsic + metasediment + cover;
     if total <= 0.0 {
         return t.mafic_density;

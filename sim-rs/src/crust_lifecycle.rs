@@ -5,12 +5,13 @@
 
 use crate::advect::AdvectionField;
 use crate::cell_data::{
-    CONTINENTAL, CellData, FRESH_FLOOR, LANE_FELSIC, LANE_MAFIC, LANE_PLUME, LANES, Mix, NEVER, OCEANIC,
+    CONTINENTAL, CellData, FRESH_FLOOR, LANE_COVER_MAFIC, LANE_FELSIC, LANE_MAFIC, LANE_PLUME,
+    LANE_SEDIMENT, LANE_SEDIMENT_FELSIC, LANES, Mix, NEVER, OCEANIC,
     clamp_lane, is_cover, total_crust_mass,
 };
 use crate::geotherm::temperature_at;
 use crate::math::clamp01;
-use crate::elevation::column_height;
+use crate::elevation::{column_height, eclogite_km};
 use crate::lithosphere::neutral_age;
 use crate::mesh::Mesh;
 use crate::par::{self, Disjoint};
@@ -144,7 +145,7 @@ pub fn infill_enclosed_basins(
             // is held to the lower, reverting standard: filled to the
             // threshold with what the rim shed.
             let evolved = !t.composition_crust_type
-                || data.lanes.evolved(c, t.granite_min_temp) >= t.oceanic_felsic_share;
+                || data.lanes.evolved(c) >= t.oceanic_felsic_share;
             if h + gain >= threshold - 1e-4 && evolved {
                 data.crust_type[c] = CONTINENTAL;
                 infilled += mesh.area(c);
@@ -186,10 +187,12 @@ pub fn lay_new_floor(mesh: &Mesh, data: &mut CellData, field: &mut AdvectionFiel
 /// reworked arcs), so it is not limited to crust already called continental,
 /// but ocean crust only counts once it is thicker than a ridge lays: a ridge's
 /// own crust is thin, and the heat flow it loses is the cooling of new floor,
-/// not a hot base. Only mass moves between the mafic and felsic lanes:
+/// not a hot base. Buried sediment that mafic rock shed (greywacke off an arc
+/// or a plateau) melts with it to the same felsic melt; sediment that felsic
+/// rock shed already counts as evolved. Only mass moves between the lanes:
 /// thickness is untouched. `heat_flow` is the heat each cell loses (mW/m^2),
-/// as of the last step, raised toward `arc_heat_flow` where an arc has lately
-/// been active.
+/// as of the last step, which sets the base temperature by conduction; where
+/// an arc has lately been active, magma holds the base at `arc_base_temp`.
 pub fn differentiate(data: &mut CellData, heat_flow: &[f32], dt_myr: f64, t: &Tuning) {
     let (thickness, crust_type, arc_age) = (&data.thickness, &data.crust_type, &data.arc_age);
     let lanes = data.lanes.split_mut();
@@ -200,23 +203,70 @@ pub fn differentiate(data: &mut CellData, heat_flow: &[f32], dt_myr: f64, t: &Tu
         if crust_type[i] != CONTINENTAL && (!t.composition_crust_type || thickness[i] as f64 <= ridge) {
             continue;
         }
-        // Crust an arc has lately built or fed runs hot: melt carries heat up
-        // through it, fading over `arc_heat_duration` once the arc stops.
+        // Crust an arc has lately built or fed runs hot: basalt ponds at its
+        // base, fading over `arc_heat_duration` once the arc stops.
         let base = heat_flow[i] as f64;
         let fresh = if arc_age[i] == NEVER || !t.composition_crust_type {
             0.0
         } else {
             (1.0 - arc_age[i] as f64 / t.arc_heat_duration.max(1e-9)).clamp(0.0, 1.0)
         };
-        let flow = base + (t.arc_heat_flow - base).max(0.0) * fresh;
-        let moho = temperature_at(t, flow, thickness[i] as f64);
+        let conducted = temperature_at(t, base, thickness[i] as f64);
+        let moho = conducted + (t.arc_base_temp - conducted).max(0.0) * fresh;
         let melting = clamp01((moho - t.mafic_solidus) / t.melting_span.max(1e-9));
-        let moved = clamp01(t.differentiation_rate * melting * dt_myr) * lanes[LANE_MAFIC][i] as f64;
-        if moved > 0.0 {
-            lanes[LANE_MAFIC][i] = (lanes[LANE_MAFIC][i] as f64 - moved) as f32;
-            lanes[LANE_FELSIC][i] = (lanes[LANE_FELSIC][i] as f64 + moved) as f32;
+        let rate = clamp01(t.differentiation_rate * melting * dt_myr);
+        if rate <= 0.0 {
+            continue;
         }
+        let moved = rate * lanes[LANE_MAFIC][i] as f64;
+        lanes[LANE_MAFIC][i] = (lanes[LANE_MAFIC][i] as f64 - moved) as f32;
+        let buried_mafic = (lanes[LANE_SEDIMENT][i] - lanes[LANE_SEDIMENT_FELSIC][i] - lanes[LANE_COVER_MAFIC][i])
+            .max(0.0) as f64;
+        let melted = rate * buried_mafic;
+        lanes[LANE_SEDIMENT][i] = (lanes[LANE_SEDIMENT][i] as f64 - melted) as f32;
+        lanes[LANE_FELSIC][i] = (lanes[LANE_FELSIC][i] as f64 + moved + melted) as f32;
     }
+}
+
+/// Mafic rock at the base of the crust deeper than `eclogite_depth` has turned
+/// to eclogite, denser than the mantle beneath, and founders into it over
+/// `eclogite_founder_time`: the dense roots of arcs and orogens drip off (Jull &
+/// Kelemen 2001; Jagoutz & Behn 2013). It leaves from the base, so only the
+/// mafic lane loses mass and the rest of the column is a larger share of what
+/// is left; the records of the rock at the surface are untouched. Books the
+/// mass lost as delaminated and gone down.
+pub fn founder_eclogite(
+    mesh: &Mesh,
+    data: &mut CellData,
+    dt_myr: f64,
+    field: &mut AdvectionField,
+    t: &Tuning,
+) {
+    if t.eclogite_founder_time <= 0.0 {
+        return;
+    }
+    let rate = 1.0 - (-dt_myr / t.eclogite_founder_time).exp();
+    let mut lost = 0.0f64;
+    for i in 0..data.thickness.len() {
+        if field.rift_cell[i] != 0 {
+            continue;
+        }
+        let h = data.thickness[i] as f64;
+        let mafic = data.lanes.lane(LANE_MAFIC)[i] as f64;
+        let gone = rate * eclogite_km(t, mafic, h);
+        if gone <= 0.0 {
+            continue;
+        }
+        let after = h - gone;
+        for l in (0..LANES).filter(|&l| crate::cell_data::is_share(l)) {
+            let km = data.lanes.lane(l)[i] as f64 * h - if l == LANE_MAFIC { gone } else { 0.0 };
+            data.lanes.lane_mut(l)[i] = clamp_lane(l, km / after) as f32;
+        }
+        data.thickness[i] = after as f32;
+        lost += gone * mesh.area(i);
+    }
+    field.delaminated_this_step += lost;
+    field.subducted_total += lost;
 }
 
 /// Crust type, by thickness unless `composition_crust_type`; where it follows
@@ -273,7 +323,7 @@ pub fn apply_crust_lifecycle(
                     arc_age.set(i, (since_arc as f64 + dt_myr) as f32);
                 }
                 let h = thickness[i] as f64;
-                let evolved = lanes.evolved(i, t.granite_min_temp);
+                let evolved = lanes.evolved(i);
                 if crust_type.get(i) == OCEANIC {
                     let nucleates = if t.composition_crust_type {
                         // Basement thick enough to stay continental: loose cover
@@ -386,7 +436,7 @@ mod tests {
         let mesh = Mesh::icosphere(2);
         let n = mesh.cell_count;
         let mut data = CellData::new(n);
-        data.lanes.set(3, [1.0, 1.0, 0.0, 1.0, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0]);
+        data.lanes.set(3, [1.0, 1.0, 0.0, 1.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0]);
         data.arc_age[3] = 4.0;
         let mut field = AdvectionField::new(n);
         field.rift_cell[3] = 1;
@@ -413,7 +463,8 @@ mod tests {
     fn differentiation_moves_mass_between_lanes_and_leaves_thickness() {
         let t = Tuning::default();
         let (mut data, heat) = continent(&[(60.0, 90.0)]);
-        data.lanes.set(0, [0.2, 0.1, 0.7, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        // The buried sediment was shed by felsic rock: it is left as it is.
+        data.lanes.set(0, [0.2, 0.1, 0.7, 0.2, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.0]);
         let before = data.lanes.get(0);
         differentiate(&mut data, &heat, t.dt_myr, &t);
         let after = data.lanes.get(0);
@@ -423,6 +474,15 @@ mod tests {
         );
         assert_eq!(after[LANE_PLUME], before[LANE_PLUME]);
         assert_eq!(after[LANE_SEDIMENT], before[LANE_SEDIMENT]);
+        assert_eq!(data.thickness[0], 60.0);
+        // Shed by mafic rock, it melts with the mafic rock, into the felsic.
+        data.lanes.set(0, [0.2, 0.1, 0.7, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let before = data.lanes.get(0);
+        differentiate(&mut data, &heat, t.dt_myr, &t);
+        let after = data.lanes.get(0);
+        assert!(after[LANE_SEDIMENT] < before[LANE_SEDIMENT]);
+        let total = |l: [f32; LANES]| (l[LANE_MAFIC] + l[LANE_FELSIC] + l[LANE_SEDIMENT]) as f64;
+        assert!((total(after) - total(before)).abs() < 1e-6);
         assert_eq!(data.thickness[0], 60.0);
     }
 
@@ -470,6 +530,27 @@ mod tests {
         let mut field = AdvectionField::new(mesh.cell_count);
         let mut scratch = Scratch::new(mesh.cell_count);
         apply_crust_lifecycle(mesh, data, t.dt_myr, &mut field, &mut scratch, t);
+    }
+
+    #[test]
+    fn an_eclogite_root_founders_from_the_base_and_a_shallow_one_does_not() {
+        let t = Tuning::default();
+        // 60 km, half felsic over half mafic: the mafic below 45 km is eclogite.
+        let mut l = lanes_with_felsic(0.5);
+        l[LANE_SEDIMENT] = 0.0;
+        let (mesh, mut data) = lifecycle_cell(CONTINENTAL, 60.0, l);
+        data.thickness[1] = 35.0;
+        data.lanes.set(1, lanes_with_felsic(0.0));
+        let mut field = AdvectionField::new(mesh.cell_count);
+        for _ in 0..200 {
+            founder_eclogite(&mesh, &mut data, t.dt_myr, &mut field, &t);
+        }
+        let h = data.thickness[0] as f64;
+        assert!((h - t.eclogite_depth).abs() < 0.5, "root left at {h:.1} km");
+        let felsic_km = data.lanes.lane(LANE_FELSIC)[0] as f64 * h;
+        assert!((felsic_km - 30.0).abs() < 1e-3, "felsic went down: {felsic_km:.3} km");
+        // Mafic crust shallower than eclogite stays.
+        assert_eq!(data.thickness[1], 35.0);
     }
 
     fn lanes_with_felsic(felsic: f32) -> [f32; LANES] {
@@ -539,6 +620,7 @@ mod tests {
         l[crate::cell_data::LANE_SEDIMENT] = 0.5;
         l[LANE_MAFIC] = 0.5;
         l[crate::cell_data::LANE_COVER_FELSIC] = 0.5;
+        l[crate::cell_data::LANE_SEDIMENT_FELSIC] = 0.5;
         let (mesh, mut data) = lifecycle_cell(OCEANIC, 30.0, l);
         step(&mesh, &mut data, &t);
         assert_eq!(data.crust_type[0], OCEANIC);

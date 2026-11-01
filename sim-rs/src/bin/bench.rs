@@ -1416,7 +1416,7 @@ fn main() {
             "differentiation_rate" => t.differentiation_rate = value,
             "continental_felsic_share" => t.continental_felsic_share = value,
             "oceanic_felsic_share" => t.oceanic_felsic_share = value,
-            "arc_heat_flow" => t.arc_heat_flow = value,
+            "arc_base_temp" => t.arc_base_temp = value,
             "arc_heat_duration" => t.arc_heat_duration = value,
             "min_continent_area" => t.min_continent_area = value,
             "min_craton_area" => t.min_craton_area = value,

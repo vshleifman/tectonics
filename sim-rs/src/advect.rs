@@ -8,7 +8,7 @@ use crate::arcs::{arc_site, rings_for};
 use crate::boundaries::{BoundaryField, CONVERGENT};
 use crate::cell_data::{
     CONTINENTAL, CellData, FRESH_FLOOR, LANE_ARC_EXHUMED, LANE_EXHUMED, LANE_PEAK_PRESSURE,
-    LANE_PEAK_TEMP, LANE_SEDIMENT, LANES, Lanes, Mix, NEVER, OCEANIC, arc_mix, clamp_lane, is_cover,
+    LANE_PEAK_TEMP, LANE_SEDIMENT, LANE_SEDIMENT_FELSIC, LANES, Lanes, Mix, NEVER, OCEANIC, arc_mix, clamp_lane, is_cover,
     mixed_lane,
 };
 use crate::elevation::composition_density;
@@ -92,7 +92,8 @@ pub struct AdvectionField {
     pub sediment_deposited_trench_edge: f64,
     #[serde(default)]
     pub sediment_deposited_near_trench: f64,
-    /// Mass shed this step by roots past the thickness cap.
+    /// Mass shed this step by roots: past the thickness cap, and eclogite
+    /// foundering from the base of the crust.
     pub delaminated_this_step: f64,
     /// Crust mass this step that went into arcs behind trenches, and crust
     /// mass too buoyant to subduct that welded on instead, by whether it was
@@ -110,6 +111,10 @@ pub struct AdvectionField {
     pub arc_eroded_this_step: f64,
     #[serde(default)]
     pub welded_continental_this_step: f64,
+    /// Area of arc and plateau crust that jammed against a continental margin
+    /// this step and was accreted to it as a terrane.
+    #[serde(default)]
+    pub terrane_accreted_this_step: f64,
     /// Accreted mass this step that could not be taken up at the thickening cap
     /// and foundered into the mantle instead of spilling.
     pub foundered_this_step: f64,
@@ -199,6 +204,7 @@ impl AdvectionField {
             arc_eroded_this_step: 0.0,
             sediment_carried_down_this_step: 0.0,
             welded_continental_this_step: 0.0,
+            terrane_accreted_this_step: 0.0,
             sediment_eroded: 0.0,
             sediment_deposited: 0.0,
             sediment_eroded_cover: 0.0,
@@ -942,6 +948,7 @@ pub fn advect(
     out.arc_accreted_this_step = 0.0;
     out.welded_oceanic_this_step = 0.0;
     out.welded_continental_this_step = 0.0;
+    out.terrane_accreted_this_step = 0.0;
     out.arc_eroded_this_step = 0.0;
     out.sediment_carried_down_this_step = 0.0;
     for cell in 0..n {
@@ -965,8 +972,25 @@ pub fn advect(
                 subducted_this_step += eroded;
                 eroded_this_step += eroded;
                 out.subducted[cell] = 1;
-                if continental && out.rift_cell[cell] == 0 {
-                    dst.crust_type[cell] = CONTINENTAL;
+                // An arc or plateau jammed against a continental margin is
+                // accreted to it, a terrane of the continent from here on
+                // however mafic: Kohistan, Talkeetna and Wrangellia are
+                // counted as continental crust though mostly basalt and
+                // andesite. Against ocean it stays an ocean-side arc.
+                let taker = dst.plate_id[cell];
+                let onto_continent = || {
+                    mesh.nbrs(cell).any(|k| {
+                        let m = nbr[k] as usize;
+                        src.plate_id[m] == taker && src.crust_type[m] == CONTINENTAL
+                    })
+                };
+                if out.rift_cell[cell] == 0 {
+                    if continental {
+                        dst.crust_type[cell] = CONTINENTAL;
+                    } else if onto_continent() {
+                        dst.crust_type[cell] = CONTINENTAL;
+                        out.terrane_accreted_this_step += area(cell);
+                    }
                 }
                 (mass - eroded) / area(cell)
             } else {
@@ -1002,10 +1026,21 @@ pub fn advect(
             } else {
                 ahead as usize
             };
-            let accreted = t.accretion_fraction * mass;
-            subducted_this_step += mass - accreted;
-            out.sediment_carried_down_this_step +=
-                (mass - accreted) * src.lanes.lane(LANE_SEDIMENT)[cell] as f64;
+            // The trench scrapes part of the sediment off onto the plate
+            // above, an accretionary wedge that keeps what it is made of.
+            let sediment = src.lanes.lane(LANE_SEDIMENT)[cell] as f64 * mass;
+            let wedge = t.sediment_offscrape.clamp(0.0, 1.0) * sediment;
+            if wedge > 0.0 {
+                let laid = wedge / area(into);
+                let felsic = src.lanes.lane(LANE_SEDIMENT_FELSIC)[cell] as f64 * mass / sediment;
+                add_f32(&mut out.welded[into], laid);
+                add_f32(&mut out.welded_lanes.lane_mut(LANE_SEDIMENT)[into], laid);
+                add_f32(&mut out.welded_lanes.lane_mut(LANE_SEDIMENT_FELSIC)[into], laid * felsic.min(1.0));
+            }
+            let left = mass - wedge;
+            let accreted = t.accretion_fraction * left;
+            subducted_this_step += left - accreted;
+            out.sediment_carried_down_this_step += (left - accreted) * (sediment - wedge) / left.max(1e-12);
             // The arc builds behind the trench, not at it.
             let arc = arc_site(mesh, &dst.plate_id, &out.rift_cell, into, arc_rings);
             add_f32(&mut out.accreted[arc], accreted / area(arc));
@@ -1692,7 +1727,7 @@ pub fn advect(
         // out: thin crust pulled from a continent's flanks is ocean floor.
         let continental = if t.composition_crust_type {
             dst.thickness[d] as f64 >= t.continental_revert_thickness
-                && dst.lanes.evolved(d, t.granite_min_temp) >= t.continental_felsic_share
+                && dst.lanes.evolved(d) >= t.continental_felsic_share
         } else {
             dst.thickness[d] as f64 >= t.continental_thickness_threshold
         };
@@ -1807,6 +1842,20 @@ mod tests {
             scraped += sim.advection().arc_eroded_this_step;
         }
         assert!(scraped > 0.0, "no ocean arc was ever scraped");
+        assert!(sim.mass_drift().abs() < 1e-6, "mass drifted {}", sim.mass_drift());
+    }
+
+    #[test]
+    fn an_arc_jammed_against_a_continent_joins_it() {
+        let mut sim = Sim::new(4);
+        sim.options.composition_crust_type = true;
+        sim.crack_great_circles(4, "terranes");
+        let mut accreted = 0.0;
+        for _ in 0..400 {
+            sim.tick();
+            accreted += sim.advection().terrane_accreted_this_step;
+        }
+        assert!(accreted > 0.0, "no arc was ever accreted to a continent");
         assert!(sim.mass_drift().abs() < 1e-6, "mass drifted {}", sim.mass_drift());
     }
 

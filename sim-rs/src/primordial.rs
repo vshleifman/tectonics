@@ -38,7 +38,7 @@
 use crate::advect::AdvectionField;
 use crate::cell_data::{
     CONTINENTAL, CellData, LANE_COVER_FELSIC, LANE_COVER_MAFIC, LANE_FELSIC, LANE_MAFIC, LANE_PLUME,
-    LANE_EXHUMED, LANE_SEDIMENT, LANES,
+    LANE_EXHUMED, LANE_SEDIMENT, LANE_SEDIMENT_FELSIC, LANES,
 };
 use crate::heat::{PlanetHeat, hot_slab, modern_core_tw};
 use crate::mantle::MantleFlow;
@@ -420,8 +420,9 @@ impl Primordial {
                         (share * before as f64 / after).clamp(0.0, 1.0) as f32;
                     data.lanes.lane_mut(LANE_SEDIMENT)[i] =
                         (silt * before as f64 / after).clamp(0.0, 1.0) as f32;
-                    // The cover stays, so it is a larger share of what is left.
-                    for lane in [LANE_COVER_FELSIC, LANE_COVER_MAFIC] {
+                    // The cover stays, as does the rest of the sediment, so
+                    // each is a larger share of what is left.
+                    for lane in [LANE_SEDIMENT_FELSIC, LANE_COVER_FELSIC, LANE_COVER_MAFIC] {
                         let cover = data.lanes.lane(lane)[i] as f64;
                         data.lanes.lane_mut(lane)[i] =
                             (cover * before as f64 / after).clamp(0.0, 1.0) as f32;

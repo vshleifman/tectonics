@@ -25,29 +25,36 @@ pub const LANE_COVER_FELSIC: usize = 4;
 /// Share of the cell's crust, by mass, that is sediment cover made of mafic
 /// clastic rock (shed by basalt and gabbro).
 pub const LANE_COVER_MAFIC: usize = 5;
+/// Share of the cell's crust, by mass, that is sediment made of felsic clastic
+/// rock, cover or buried: the part of [`LANE_SEDIMENT`] that came off
+/// continental rock. It keeps that origin once the cover is buried, so
+/// greywacke and shale shed by a continent count as the evolved crust they
+/// are made of, however cool they have stayed.
+pub const LANE_SEDIMENT_FELSIC: usize = 6;
 /// Km of basement that erosion has removed from the crust since it formed:
 /// how deep the rock now at the surface once lay. A record, not a share.
-pub const LANE_EXHUMED: usize = 6;
+pub const LANE_EXHUMED: usize = 7;
 /// [`LANE_EXHUMED`] as it stood when the crust last took in arc crust, so the
 /// difference is the erosion since the last arc magmatism. A record.
-pub const LANE_ARC_EXHUMED: usize = 7;
+pub const LANE_ARC_EXHUMED: usize = 8;
 /// The hottest (°C) the rock now at the surface has been. A record.
-pub const LANE_PEAK_TEMP: usize = 8;
+pub const LANE_PEAK_TEMP: usize = 9;
 /// The greatest pressure (kbar) the rock now at the surface has been under.
 /// A record.
-pub const LANE_PEAK_PRESSURE: usize = 9;
+pub const LANE_PEAK_PRESSURE: usize = 10;
 /// How many composition lanes a cell carries.
 ///
 /// Mafic, felsic and sediment partition the crust and sum to 1; the plume
 /// lane is a record of where crust came from, not another part of the sum.
 /// Sediment is all the sediment in the column. Of it, the cover lanes are the
 /// part still lying on top, loose and in reach of erosion; the rest has been
-/// buried and deformed into the basement as metasediment.
+/// buried and deformed into the basement as metasediment. Felsic sediment is
+/// the part of the sediment shed by felsic rock, and holds the felsic cover.
 ///
 /// The last four lanes are records of what the exposed rock has been through
 /// (see [`is_share`]). They ride with the crust and mix by mass like the
 /// shares, but hold quantities, so they are not bounded above.
-pub const LANES: usize = 10;
+pub const LANES: usize = 11;
 
 /// Is lane `l` a share of the crust, in [0, 1], rather than a record of the
 /// rock's history?
@@ -149,15 +156,13 @@ impl Lanes {
         &mut self.v[l * self.n..(l + 1) * self.n]
     }
 
-    /// Share of cell `i`'s basement that has evolved: felsic rock and
-    /// sediment buried into the basement that has been hot enough to melt
-    /// (`melt_temp`, in the lane of hottest temperatures the rock has seen),
-    /// over the basement (the column less loose cover, which lies on whatever
-    /// crust is beneath it and says nothing about it). Sediment that has not
-    /// melted is still sediment on whatever crust it was buried into; melting
-    /// it makes S-type granite. 0 where there is no basement to speak of.
+    /// Share of cell `i`'s basement that has evolved: felsic rock, and buried
+    /// sediment shed by felsic rock, over the basement (the column less loose
+    /// cover, which lies on whatever crust is beneath it and says nothing about
+    /// it). Sediment shed by mafic rock is not evolved until it melts (see
+    /// `differentiate`). 0 where there is no basement to speak of.
     #[inline]
-    pub fn evolved(&self, i: usize, melt_temp: f64) -> f64 {
+    pub fn evolved(&self, i: usize) -> f64 {
         let n = self.n;
         let lane = |l: usize| self.v[l * n + i] as f64;
         let cover = lane(LANE_COVER_FELSIC) + lane(LANE_COVER_MAFIC);
@@ -165,11 +170,7 @@ impl Lanes {
         if basement < 1e-6 {
             return 0.0;
         }
-        let buried = if lane(LANE_PEAK_TEMP) >= melt_temp {
-            (lane(LANE_SEDIMENT) - cover).max(0.0)
-        } else {
-            0.0
-        };
+        let buried = (lane(LANE_SEDIMENT_FELSIC) - lane(LANE_COVER_FELSIC)).max(0.0);
         ((lane(LANE_FELSIC) + buried) / basement).clamp(0.0, 1.0)
     }
 
@@ -255,7 +256,8 @@ pub struct CellData {
     /// rift or a plume. Travels with crust.
     pub lithosphere: Vec<f32>,
     /// Composition lanes ([`LANE_PLUME`], [`LANE_SEDIMENT`], [`LANE_MAFIC`],
-    /// [`LANE_FELSIC`], [`LANE_COVER_FELSIC`], [`LANE_COVER_MAFIC`]): what the
+    /// [`LANE_FELSIC`], [`LANE_COVER_FELSIC`], [`LANE_COVER_MAFIC`],
+    /// [`LANE_SEDIMENT_FELSIC`]): what the
     /// crust is made of, as shares by mass in [0, 1].
     pub lanes: Lanes,
     /// Myr since the cell's crust last took in arc crust, or [`NEVER`].
@@ -322,7 +324,7 @@ mod tests {
 
     #[test]
         #[test]
-    fn evolved_counts_felsic_and_melted_buried_sediment_over_the_basement_not_loose_cover() {
+    fn evolved_counts_felsic_rock_and_buried_felsic_sediment_over_the_basement_not_loose_cover() {
         let mut l = Lanes::new(1);
         // Basement is 0.6 of the column: 0.3 felsic, 0.1 buried sediment, 0.2
         // mafic; cover is the other 0.4.
@@ -332,28 +334,28 @@ mod tests {
         v[LANE_SEDIMENT] = 0.5;
         v[LANE_COVER_FELSIC] = 0.25;
         v[LANE_COVER_MAFIC] = 0.15;
-        // Never hot enough to melt: only the felsic rock counts.
-        v[LANE_PEAK_TEMP] = 400.0;
+        // The buried sediment was shed by mafic rock: only the felsic rock counts.
+        v[LANE_SEDIMENT_FELSIC] = 0.25;
         l.set(0, v);
-        assert!((l.evolved(0, 650.0) - 0.3 / 0.6).abs() < 1e-6, "{}", l.evolved(0, 650.0));
-        // Cooked past melting: the buried sediment has become granite.
-        v[LANE_PEAK_TEMP] = 700.0;
+        assert!((l.evolved(0) - 0.3 / 0.6).abs() < 1e-6, "{}", l.evolved(0));
+        // Shed by felsic rock: it counts, however cool it has stayed.
+        v[LANE_SEDIMENT_FELSIC] = 0.35;
         l.set(0, v);
-        assert!((l.evolved(0, 650.0) - (0.3 + 0.1) / 0.6).abs() < 1e-6);
+        assert!((l.evolved(0) - (0.3 + 0.1) / 0.6).abs() < 1e-6);
         // Ocean floor under thick cover is still mafic.
         let mut v = [0.0f32; LANES];
         v[LANE_MAFIC] = 0.1;
         v[LANE_SEDIMENT] = 0.9;
         v[LANE_COVER_MAFIC] = 0.9;
-        v[LANE_PEAK_TEMP] = 900.0;
         l.set(0, v);
-        assert_eq!(l.evolved(0, 650.0), 0.0);
+        assert_eq!(l.evolved(0), 0.0);
         // Nothing but cover: no basement to judge.
         let mut v = [0.0f32; LANES];
         v[LANE_SEDIMENT] = 1.0;
+        v[LANE_SEDIMENT_FELSIC] = 1.0;
         v[LANE_COVER_FELSIC] = 1.0;
         l.set(0, v);
-        assert_eq!(l.evolved(0, 650.0), 0.0);
+        assert_eq!(l.evolved(0), 0.0);
     }
 
     /// A cell's lanes, the first few as given and the rest 0.

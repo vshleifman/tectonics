@@ -6,8 +6,8 @@
 //! plates of similar age would trade the pull back and forth.
 
 use crate::boundaries::{BoundaryField, CONVERGENT, DIVERGENT};
-use crate::cell_data::{CONTINENTAL, CellData};
-use crate::elevation::column_buoyancy;
+use crate::cell_data::{CONTINENTAL, CellData, LANE_FELSIC, LANE_MAFIC, LANES};
+use crate::elevation::{buoyancy, column_buoyancy, composition_density};
 use crate::math::clamp01;
 use crate::mesh::Mesh;
 use crate::par;
@@ -58,18 +58,40 @@ fn established(mesh: &Mesh, data: &CellData, cell: usize) -> f64 {
         })
 }
 
+/// Thickness (km) of cell `i`'s igneous crust, its column less all its
+/// sediment, and the buoyancy of that crust over the cell's lid: what a trench
+/// pulls on once the sediment is scraped off or carried down with the plate.
+fn igneous_column(t: &Tuning, data: &CellData, i: usize) -> (f64, f64) {
+    let lanes = data.lanes.get(i);
+    let igneous = (lanes[LANE_MAFIC] + lanes[LANE_FELSIC]) as f64;
+    let h = data.thickness[i] as f64 * igneous;
+    let mut rock = [0.0f32; LANES];
+    if igneous > 0.0 {
+        rock[LANE_MAFIC] = (lanes[LANE_MAFIC] as f64 / igneous) as f32;
+        rock[LANE_FELSIC] = (lanes[LANE_FELSIC] as f64 / igneous) as f32;
+    }
+    let density = composition_density(t, &rock, h);
+    let lift = buoyancy(t, h, density, data.lithosphere[i] as f64, data.keel[i] as f64);
+    (h, lift)
+}
+
 /// Is the crust at `i` too buoyant to be pulled down a trench? Continent always
-/// is. Ocean-type crust is too once its basement is thickened past
-/// `continental_revert_thickness`, as an arc or a plateau is (sediment piled on
-/// a shelf is not: it goes down with the plate it lies on), and its whole
-/// column floats on the mantle: Kohistan, Wrangellia and the Ontong Java
-/// plateau jammed their trenches and accreted instead of going down. Ordinary
+/// is. Ocean-type crust is too once its igneous crust is thickened past
+/// `continental_revert_thickness`, as an arc or a plateau is, and floats on the
+/// mantle with its lid: Kohistan, Wrangellia and the Ontong Java plateau jammed
+/// their trenches and accreted instead of going down. Sediment does not hold a
+/// plate up, however thick it lies: the trench scrapes some off and the rest
+/// goes down with the plate, as the Makran's and the Bengal fan's do. Ordinary
 /// ocean floor, thin, goes down however young.
 pub fn resists_subduction(t: &Tuning, data: &CellData, i: usize) -> bool {
-    data.crust_type[i] == CONTINENTAL
-        || (t.composition_crust_type
-            && data.basement_km(i) >= t.continental_revert_thickness
-            && column_buoyancy(t, data, i) >= 0.0)
+    if data.crust_type[i] == CONTINENTAL {
+        return true;
+    }
+    if !t.composition_crust_type {
+        return false;
+    }
+    let (h, lift) = igneous_column(t, data, i);
+    h >= t.continental_revert_thickness && lift >= 0.0
 }
 
 /// Polarity a new subduction zone would start with: crust that resists
@@ -321,6 +343,25 @@ mod tests {
         assert_eq!(data.crust_type[arc], OCEANIC);
         assert!(resists_subduction(&t, &data, arc), "a 25 km arc went down");
         assert!(!resists_subduction(&t, &data, floor), "old thin floor resisted");
+    }
+
+    #[test]
+    fn sediment_piled_on_old_floor_does_not_hold_it_up() {
+        use crate::cell_data::{LANE_SEDIMENT, LANE_SEDIMENT_FELSIC};
+        let t = Tuning {
+            composition_crust_type: true,
+            ..Tuning::default()
+        };
+        // 7 km of basalt under 15 km of sediment, on old floor.
+        let (_, mut data, fan, _) = neighbours(&t, (150.0, 22.0), (150.0, t.oceanic_thickness as f32));
+        let mut lanes = [0.0f32; LANES];
+        lanes[LANE_MAFIC] = 7.0 / 22.0;
+        lanes[LANE_SEDIMENT] = 15.0 / 22.0;
+        lanes[LANE_SEDIMENT_FELSIC] = 5.0 / 22.0;
+        data.lanes.set(fan, lanes);
+        data.density[fan] = 2.75;
+        assert!(column_buoyancy(&t, &data, fan) >= 0.0, "the whole column should float");
+        assert!(!resists_subduction(&t, &data, fan), "a sediment pile held its plate up");
     }
 
     #[test]

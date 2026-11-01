@@ -20,7 +20,7 @@
 use crate::advect::{AdvectionField, descending_key};
 use crate::cell_data::{
     CONTINENTAL, COVER_LANES, CellData, LANE_COVER_FELSIC, LANE_COVER_MAFIC, LANE_EXHUMED,
-    LANE_FELSIC, LANE_MAFIC, LANE_SEDIMENT, LANES,
+    LANE_FELSIC, LANE_MAFIC, LANE_SEDIMENT, LANE_SEDIMENT_FELSIC, LANES,
 };
 use crate::climate::{Climate, Setting, deposit_lanes, weathering_rate};
 use crate::elevation::water_load_factor;
@@ -58,8 +58,10 @@ fn strip(
     let cover_total = (cover[0] + cover[1]).min(h);
     let basement = (h - cover_total).max(0.0);
     let (mafic, felsic) = (lanes[LANE_MAFIC] * h, lanes[LANE_FELSIC] * h);
-    // Sediment that is no longer cover has been buried into the basement.
+    // Sediment that is no longer cover has been buried into the basement; of
+    // it, what felsic rock shed is felsic.
     let metasediment = (lanes[LANE_SEDIMENT] * h - cover_total).max(0.0);
+    let meta_felsic = (lanes[LANE_SEDIMENT_FELSIC] * h - cover[0]).clamp(0.0, metasediment);
 
     let from_cover = take.min(cover_total);
     let from_basement = (take - from_cover).min(basement);
@@ -70,9 +72,10 @@ fn strip(
         shed[1] += from_cover * cover[1] / sum;
     }
     if basement > 0.0 {
-        // Felsic rock and what was sediment shed felsic clastic; mafic sheds mafic.
-        shed[0] += from_basement * (felsic + metasediment) / basement;
-        shed[1] += from_basement * mafic / basement;
+        // Felsic rock and sediment shed by it shed felsic clastic; mafic rock
+        // and sediment shed by it, mafic.
+        shed[0] += from_basement * (felsic + meta_felsic) / basement;
+        shed[1] += from_basement * (mafic + metasediment - meta_felsic) / basement;
     }
 
     data.thickness[i] = (h - take) as f32;
@@ -80,10 +83,11 @@ fn strip(
     let left_cover = if cover_total > 0.0 { 1.0 - from_cover / cover_total } else { 0.0 };
     let left_basement = if basement > 0.0 { 1.0 - from_basement / basement } else { 0.0 };
     let cover = [cover[0] * left_cover, cover[1] * left_cover];
-    let (mafic, felsic, metasediment) = (
+    let (mafic, felsic, metasediment, meta_felsic) = (
         mafic * left_basement,
         felsic * left_basement,
         metasediment * left_basement,
+        meta_felsic * left_basement,
     );
     let share = |km: f64| (km / h_after).clamp(0.0, 1.0) as f32;
     data.lanes.lane_mut(LANE_MAFIC)[i] = share(mafic);
@@ -91,6 +95,7 @@ fn strip(
     data.lanes.lane_mut(LANE_COVER_FELSIC)[i] = share(cover[0]);
     data.lanes.lane_mut(LANE_COVER_MAFIC)[i] = share(cover[1]);
     data.lanes.lane_mut(LANE_SEDIMENT)[i] = share(metasediment + cover[0] + cover[1]);
+    data.lanes.lane_mut(LANE_SEDIMENT_FELSIC)[i] = share(meta_felsic + cover[0]);
     if from_basement > 0.0 {
         let exhumed = data.lanes.lane(LANE_EXHUMED)[i] as f64 + from_basement;
         data.lanes.lane_mut(LANE_EXHUMED)[i] = exhumed as f32;
@@ -306,6 +311,8 @@ pub fn erode_and_deposit(
                 [keep * made_of[0], keep * made_of[1]],
             );
             data.lanes.mix_lane(LANE_SEDIMENT, i, before, added, 1.0);
+            data.lanes
+                .mix_lane(LANE_SEDIMENT_FELSIC, i, before, added, laid[0] / keep);
             // Silt dilutes the igneous rock beneath it.
             data.lanes.mix_lane(LANE_MAFIC, i, before, added, 0.0);
             data.lanes.mix_lane(LANE_FELSIC, i, before, added, 0.0);
@@ -607,7 +614,7 @@ mod tests {
     fn continent_of(w: &mut World, felsic: bool) {
         for i in 0..w.mesh.cell_count {
             if w.data.crust_type[i] == CONTINENTAL {
-                let lanes = if felsic { [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] };
+                let lanes = if felsic { [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] };
                 w.data.lanes.set(i, lanes);
             }
         }
@@ -680,7 +687,7 @@ mod tests {
             .unwrap();
         // 60 km of crust, 3 km of it mafic silt, over 57 km of felsic basement.
         w.data.thickness[peak] = 60.0;
-        w.data.lanes.set(peak, [0.0, 0.05, 0.0, 0.95, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0]);
+        w.data.lanes.set(peak, [0.0, 0.05, 0.0, 0.95, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0]);
         w.rise();
         let (h0, basement0) = (w.data.thickness[peak] as f64, 0.95 * 60.0);
         w.step(2.0);
@@ -754,6 +761,7 @@ mod tests {
             let mut lanes = [0.0; LANES];
             lanes[LANE_FELSIC] = 0.9;
             lanes[LANE_SEDIMENT] = 0.1;
+            lanes[LANE_SEDIMENT_FELSIC] = 0.1;
             lanes[LANE_COVER_FELSIC] = 0.1;
             lanes
         });
@@ -785,7 +793,7 @@ mod tests {
             .min_by(|&a, &b| w.z(a).total_cmp(&w.z(b)))
             .unwrap();
         w.data.thickness[cell] = 7.0;
-        w.data.lanes.set(cell, [0.0, 5.0 / 7.0, 2.0 / 7.0, 0.0, 0.0, 5.0 / 7.0, 0.0, 0.0, 0.0, 0.0]);
+        w.data.lanes.set(cell, [0.0, 5.0 / 7.0, 2.0 / 7.0, 0.0, 0.0, 5.0 / 7.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         w.step(2.0);
         let lanes = w.data.lanes.get(cell);
         let cover = lanes[LANE_COVER_MAFIC] as f64 * 7.0;

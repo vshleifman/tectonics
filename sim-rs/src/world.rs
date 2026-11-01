@@ -9,7 +9,7 @@ use crate::climate::Climate;
 use crate::cohesion::{keep_continents_whole, keep_cratons_whole};
 use crate::craton::update_cratons;
 use crate::crust_lifecycle::{
-    apply_crust_lifecycle, differentiate, infill_enclosed_basins, lay_new_floor,
+    apply_crust_lifecycle, differentiate, founder_eclogite, infill_enclosed_basins, lay_new_floor,
 };
 use crate::elevation::{apply_elevation, dynamic_topography, update_densities};
 use crate::erosion::erode_and_deposit;
@@ -477,6 +477,8 @@ impl Sim {
         erode_and_deposit(mesh, front, advection, dt, t, climate, &heat.heat_flow, heat.mantle_c());
         lap(timings, &mut mark, 9);
         primordial.update(mesh, front, plates, advection, mantle, heat, dt, t);
+        // Before the lifecycle, which takes the census of the crust left.
+        founder_eclogite(mesh, front, dt, advection, t);
         if t.composition_crust_type {
             // Differentiate first: the type follows what the crust is made of.
             differentiate(front, &heat.heat_flow, dt, t);
@@ -871,6 +873,7 @@ mod tests {
     fn composition_flaws(sim: &Sim) -> (f64, f32, f32) {
         use crate::cell_data::{
             LANE_COVER_FELSIC, LANE_COVER_MAFIC, LANE_FELSIC, LANE_MAFIC, LANE_SEDIMENT,
+            LANE_SEDIMENT_FELSIC,
         };
         let d = &sim.front;
         let (mut worst, mut lo, mut hi) = (0.0f64, f32::MAX, f32::MIN);
@@ -890,6 +893,10 @@ mod tests {
             // The cover is part of the sediment: never more of it than there is.
             let cover = (d.lanes.lane(LANE_COVER_FELSIC)[i] + d.lanes.lane(LANE_COVER_MAFIC)[i]) as f64;
             worst = worst.max(cover - d.lanes.lane(LANE_SEDIMENT)[i] as f64);
+            // Felsic sediment is part of the sediment, and holds the felsic cover.
+            let felsic_sediment = d.lanes.lane(LANE_SEDIMENT_FELSIC)[i] as f64;
+            worst = worst.max(felsic_sediment - d.lanes.lane(LANE_SEDIMENT)[i] as f64);
+            worst = worst.max(d.lanes.lane(LANE_COVER_FELSIC)[i] as f64 - felsic_sediment);
         }
         (worst, lo, hi)
     }

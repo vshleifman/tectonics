@@ -79,6 +79,12 @@ pub struct Tuning {
     pub cover_density: f64,
     pub eclogite_density: f64,
     pub eclogite_depth: f64,
+    /// Time (Myr) over which mafic rock that has turned to eclogite at the
+    /// base of the crust founders into the mantle it is denser than. Dense
+    /// roots under arcs and orogens drip off in a few Myr where the lower
+    /// crust is hot and weak, longer where it is cold (Jull & Kelemen 2001;
+    /// Jagoutz & Behn 2013): ~10.
+    pub eclogite_founder_time: f64,
     pub oceanic_thickness: f64,
     pub continental_thickness_threshold: f64,
     pub continental_revert_thickness: f64,
@@ -94,14 +100,14 @@ pub struct Tuning {
     /// `continental_felsic_share` so a cell near the line does not flicker; the
     /// gap is hysteresis, not a physical claim.
     pub oceanic_felsic_share: f64,
-    /// Surface heat flow (mW/m2) of crust over active arc magmatism, which
-    /// carries heat up in melt and so runs far above the cooling of the floor
-    /// it was built on: 80-90 mW/m2 across the Sumatra-Andaman arc and back arc,
-    /// ~80 in the Japanese volcanic zone, against 40-70 in the forearcs
-    /// (regional studies; no global compilation checked). Raises the Moho
-    /// temperature `differentiate` reads, which is what lets a thick arc melt
+    /// Temperature (°C) at the base of crust over active arc magmatism. Basalt
+    /// from the mantle wedge ponds and intrudes there, holding the lower crust
+    /// near its own temperature whatever the surface loses: deep crustal hot
+    /// zones run ~900-1100 °C (Annen, Blundy & Sparks 2006; the MASH zone of
+    /// Hildreth & Moorbath 1988). Heat carried in by magma, not conducted, so
+    /// the surface heat flow says little about it. It is what lets an arc melt
     /// its base and evolve toward continental crust.
-    pub arc_heat_flow: f64,
+    pub arc_base_temp: f64,
     /// Myr over which that extra heat fades once arc magmatism stops: the
     /// conductive time of a ~30 km crust (L^2 / kappa, about 30 Myr), taken up
     /// to 50 for the lower crust a pulse has to warm.
@@ -126,6 +132,12 @@ pub struct Tuning {
     /// sea floor made, Rowley 2002, at ~7 km): ~0.11. The model's arcs lose
     /// almost nothing to foundering later, so this is net crust kept.
     pub accretion_fraction: f64,
+    /// Share of the sediment on crust going down a trench that is scraped off
+    /// onto the plate above as an accretionary wedge; the rest goes down with
+    /// the plate. Most trench sediment is subducted, accretionary margins
+    /// keeping part of it (von Huene & Scholl 1991; Clift & Vannucchi 2004):
+    /// roughly a quarter.
+    pub sediment_offscrape: f64,
     pub arc_setback: f64,
     pub back_arc_width: f64,
     pub back_arc_extension: f64,
@@ -357,13 +369,14 @@ impl Default for Tuning {
             cover_density: 2.4,
             eclogite_density: 3.45,
             eclogite_depth: 45.0,
+            eclogite_founder_time: 10.0,
             oceanic_thickness: 7.0,
             continental_thickness_threshold: 15.0,
             continental_revert_thickness: 10.0,
             continental_nucleation_thickness: 20.0,
             continental_felsic_share: 0.35,
             oceanic_felsic_share: 0.20,
-            arc_heat_flow: 80.0,
+            arc_base_temp: 1000.0,
             arc_heat_duration: 50.0,
             max_crust_thickness: 60.0,
             delamination_rate: 0.3,
@@ -380,6 +393,7 @@ impl Default for Tuning {
             keel_depletion: 0.025,
 
             accretion_fraction: 0.11,
+            sediment_offscrape: 0.25,
             arc_setback: 0.025,
             back_arc_width: 0.05,
             back_arc_extension: 0.25,
