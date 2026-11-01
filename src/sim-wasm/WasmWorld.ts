@@ -15,9 +15,9 @@ const LANE_MAFIC = 2;
 const LANE_FELSIC = 3;
 const LANE_COVER_FELSIC = 4;
 const LANE_COVER_MAFIC = 5;
-const LANE_EXHUMED = 6;
-const LANE_PEAK_TEMP = 8;
-const LANE_PEAK_PRESSURE = 9;
+const LANE_EXHUMED = 7;
+const LANE_PEAK_TEMP = 9;
+const LANE_PEAK_PRESSURE = 10;
 
 /**
  * The `World` class of either build, single-threaded (`pkg`) or threaded

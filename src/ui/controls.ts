@@ -178,6 +178,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
   eclogiteDensity:
     "Density of mafic rock that has turned to eclogite at depth.",
   eclogiteDepth: "Depth below which mafic rock turns to eclogite.",
+  eclogiteFounderTime:
+    "Time over which eclogite at the base of the crust sinks into the mantle.",
   oceanicThickness: "Starting thickness of oceanic crust.",
   continentalThicknessThreshold:
     "Thickness at which accreted ocean counts as continent.",
@@ -187,8 +189,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "Thickness at which ocean floor away from any continent turns continental.",
   continentalFelsicShare:
     "Evolved (felsic or buried sediment) share of the basement at which ocean crust counts as continental. Bulk continental crust is andesitic, roughly 35-50% felsic.",
-  arcHeatFlow:
-    "Heat flow over active arc magmatism, which warms the base of thick arc crust enough to melt and evolve it. Arcs run about 80 mW/m2, forearcs 40-70.",
+  arcBaseTemp:
+    "Temperature at the base of crust over active arc magmatism, where basalt ponds and intrudes; it lets the arc melt its base and evolve. Deep crustal hot zones run about 900-1100 °C.",
   arcHeatDuration:
     "Million years over which that extra arc heat fades once the arc stops.",
   oceanicFelsicShare:
@@ -213,6 +215,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "How much lighter a full keel's depleted residue is than ordinary lid.",
   accretionFraction:
     "Share of a subducting cell that sticks onto the plate above.",
+  sedimentOffscrape:
+    "Share of the sediment on a subducting cell scraped onto the plate above.",
   arcSetback: "How far behind the trench an arc builds (radians).",
   backArcWidth: "Width of the band behind an arc that stretches (radians).",
   backArcExtension:
@@ -866,6 +870,13 @@ const TUNING_GROUP_FIELDS: {
         step: 1,
       },
       {
+        key: "eclogiteFounderTime",
+        label: "Eclogite founders over (Myr)",
+        min: 1,
+        max: 100,
+        step: 1,
+      },
+      {
         key: "oceanicThickness",
         label: "Oceanic thickness",
         min: 1,
@@ -908,11 +919,11 @@ const TUNING_GROUP_FIELDS: {
         step: 0.01,
       },
       {
-        key: "arcHeatFlow",
-        label: "Arc heat flow (mW/m2)",
-        min: 30,
-        max: 150,
-        step: 5,
+        key: "arcBaseTemp",
+        label: "Arc base temperature (°C)",
+        min: 500,
+        max: 1300,
+        step: 10,
       },
       {
         key: "arcHeatDuration",
@@ -1301,6 +1312,13 @@ const TUNING_GROUP_FIELDS: {
       {
         key: "accretionFraction",
         label: "Accretion fraction",
+        min: 0,
+        max: 1,
+        step: 0.01,
+      },
+      {
+        key: "sedimentOffscrape",
+        label: "Sediment scraped off",
         min: 0,
         max: 1,
         step: 0.01,

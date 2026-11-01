@@ -336,6 +336,12 @@ export interface Tuning {
   eclogiteDensity: number;
   /** Depth (km) below which mafic rock is eclogite: about 12 kbar, 45 km. */
   eclogiteDepth: number;
+  /**
+   * Time (Myr) over which eclogite at the base of the crust founders into the
+   * mantle it is denser than: a few Myr under hot, weak lower crust, longer
+   * under cold (Jull & Kelemen 2001; Jagoutz & Behn 2013): ~10.
+   */
+  eclogiteFounderTime: number;
   /** Starting oceanic crust thickness (km). */
   oceanicThickness: number;
   /** Thickness (km) above which accreted oceanic crust becomes continental. */
@@ -369,12 +375,12 @@ export interface Tuning {
    */
   oceanicFelsicShare: number;
   /**
-   * Surface heat flow (mW/m2) of crust over active arc magmatism, which carries
-   * heat up in melt: 80-90 across the Sumatra-Andaman arc, about 80 in Japan's
-   * volcanic zone, against 40-70 in forearcs. Raises the base temperature
-   * thick arc crust differentiates at.
+   * Temperature (°C) at the base of crust over active arc magmatism, where
+   * basalt from the mantle wedge ponds and intrudes: deep crustal hot zones run
+   * ~900-1100 °C (Annen, Blundy & Sparks 2006; Hildreth & Moorbath 1988). The
+   * temperature arc crust differentiates at while the arc is active.
    */
-  arcHeatFlow: number;
+  arcBaseTemp: number;
   /** Myr over which that extra heat fades once arc magmatism stops. */
   arcHeatDuration: number;
   /**
@@ -443,6 +449,12 @@ export interface Tuning {
    * and turns them over faster.
    */
   accretionFraction: number;
+  /**
+   * Share of the sediment on crust going down a trench that is scraped off
+   * onto the plate above as an accretionary wedge; the rest goes down with the
+   * plate (von Huene & Scholl 1991; Clift & Vannucchi 2004): roughly a quarter.
+   */
+  sedimentOffscrape: number;
   /**
    * How far behind the trench, in radians along the surface, an arc builds
    * (0.025 is ~160 km). Crust a trench consumes is melted at depth and rises
@@ -1067,13 +1079,14 @@ export const defaultTuning: Tuning = {
   coverDensity: 2.4,
   eclogiteDensity: 3.45,
   eclogiteDepth: 45,
+  eclogiteFounderTime: 10,
   oceanicThickness: 7,
   continentalThicknessThreshold: 15,
   continentalRevertThickness: 10,
   continentalNucleationThickness: 20,
   continentalFelsicShare: 0.35,
   oceanicFelsicShare: 0.2,
-  arcHeatFlow: 80,
+  arcBaseTemp: 1000,
   arcHeatDuration: 50,
   maxCrustThickness: 60,
   delaminationRate: 0.3,
@@ -1090,6 +1103,7 @@ export const defaultTuning: Tuning = {
   keelDepletion: 0.025,
 
   accretionFraction: 0.11,
+  sedimentOffscrape: 0.25,
   arcSetback: 0.025,
   backArcWidth: 0.05,
   backArcExtension: 0.25,
