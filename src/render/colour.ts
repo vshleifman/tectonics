@@ -495,6 +495,30 @@ const writeElevationColours = (
   }
 };
 
+/** Elevation range (km) the smooth surface's colour ramp spans; beyond it the end colours hold. */
+export const ELEVATION_RAMP_MIN = -8;
+export const ELEVATION_RAMP_MAX = 9;
+
+/**
+ * Fill `out` (RGBA8, `width` texels) with the elevation colours from
+ * {@link ELEVATION_RAMP_MIN} to {@link ELEVATION_RAMP_MAX} km, end texels on
+ * the ends. The smooth surface interpolates elevation between cell centres and
+ * looks the colour up here, so a coastline falls where the interpolated height
+ * crosses sea level instead of being smeared into a blend of sea and land.
+ */
+export const writeElevationRamp = (
+  out: Uint8Array,
+  width: number,
+  style: ElevationStyle,
+): void => {
+  const span = ELEVATION_RAMP_MAX - ELEVATION_RAMP_MIN;
+  const heights = new Float32Array(width);
+  for (let k = 0; k < width; k++) {
+    heights[k] = ELEVATION_RAMP_MIN + (span * k) / (width - 1);
+  }
+  writeElevationColours(out, width, heights, style);
+};
+
 /** Golden-ratio hue stepping gives every plate a distinct, stable colour. */
 export const colourForPlate = (plateId: number): Rgb => {
   if (plateId < 0) return NO_PLATE;

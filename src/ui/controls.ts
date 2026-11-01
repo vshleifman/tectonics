@@ -2251,6 +2251,15 @@ export const createControls = (
     },
   );
 
+  const smoothToggle = makeToggle("Smooth surface", initial.smoothSurface);
+  smoothToggle.input.addEventListener("change", () => {
+    store.set({ smoothSurface: smoothToggle.input.checked });
+  });
+  tooltip.attach(
+    smoothToggle.row,
+    "Blend each value between cell centres instead of drawing every cell flat. Plates, crust type, metamorphism and boundaries are always drawn as cells.",
+  );
+
   const viewLabel = makeLabel();
   viewLabel.textContent = "View";
   const viewSelect = makeSelect(
@@ -2598,6 +2607,7 @@ export const createControls = (
   view.panel.append(
     projectionLabel,
     projectionControl.row,
+    smoothToggle.row,
     viewLabel,
     viewSelect,
     resourceSelect,
@@ -2635,6 +2645,9 @@ export const createControls = (
     }
     if (changed.has("resource")) {
       resourceSelect.value = String(state.resource);
+    }
+    if (changed.has("smoothSurface")) {
+      smoothToggle.input.checked = state.smoothSurface;
     }
     if (changed.has("hillshade")) {
       hillshadeToggle.input.checked = state.hillshade;

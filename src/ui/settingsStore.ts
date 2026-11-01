@@ -49,6 +49,11 @@ export interface Settings {
    * continental colours.
    */
   elevationStyle: ElevationStyle;
+  /**
+   * Blend values between cell centres instead of drawing each cell flat.
+   * Categorical views are drawn flat either way.
+   */
+  smoothSurface: boolean;
   /** Light the elevation view from the north-west so relief reads as relief. */
   hillshade: boolean;
   /** How far shading swings the colour, 0 (none) to 1.5. */

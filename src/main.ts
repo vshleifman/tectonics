@@ -27,6 +27,7 @@ const INITIAL_AUTO_ROTATE = false;
 const INITIAL_PROJECTION: Projection = "sphere";
 const INITIAL_VIEW_MODE: ViewMode = "colour";
 const INITIAL_ELEVATION_STYLE: ElevationStyle = "absolute";
+const INITIAL_SMOOTH_SURFACE = true;
 const INITIAL_HILLSHADE = true;
 const INITIAL_HILLSHADE_STRENGTH = 0.8;
 const INITIAL_HILLSHADE_EXAGGERATION = 15;
@@ -164,6 +165,7 @@ const settings = createSettingsStore(
     viewMode: INITIAL_VIEW_MODE,
     resource: 0,
     elevationStyle: INITIAL_ELEVATION_STYLE,
+    smoothSurface: INITIAL_SMOOTH_SURFACE,
     hillshade: INITIAL_HILLSHADE,
     hillshadeStrength: INITIAL_HILLSHADE_STRENGTH,
     hillshadeExaggeration: INITIAL_HILLSHADE_EXAGGERATION,
@@ -283,6 +285,7 @@ const onMesh = (
   }
   cellMesh = new ArrayCellMesh(arrays);
   cellRenderer = new CellRenderer(cellMesh);
+  cellRenderer.setSmooth(settings.get("smoothSurface"));
   scene.add(cellRenderer.object3D);
   cellRenderer.setProjection(settings.get("projection"));
   seedCount = 0;
@@ -418,6 +421,10 @@ settings.on("level", (level) => {
 });
 settings.on("elevationStyle", () => recolour());
 settings.on("resource", () => recolour());
+settings.on("smoothSurface", (smooth) => {
+  cellRenderer?.setSmooth(smooth);
+  recolour();
+});
 settings.on("hillshade", () => recolour());
 settings.on("hillshadeStrength", () => recolour());
 settings.on("hillshadeExaggeration", () => recolour());

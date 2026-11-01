@@ -6,9 +6,12 @@ import { BoundaryKind } from "../sim/boundaries";
 import {
   type ColourFields,
   type ColourMode,
+  ELEVATION_RAMP_MAX,
+  ELEVATION_RAMP_MIN,
   type ElevationStyle,
   type Rgb,
   writeCellColours,
+  writeElevationRamp,
 } from "./colour";
 import { type HillshadeOptions, writeHillshade } from "./hillshade";
 import {
@@ -256,6 +259,277 @@ const makeCellMaterial = (
     depthWrite: overlay === null,
   });
 
+/** Texels in the elevation colour ramp: about 8 m of height each. */
+const ELEVATION_RAMP_WIDTH = 2048;
+
+/**
+ * Views whose cells hold a categorical value (a plate, a crust type, a facies,
+ * a boundary kind). Blending two categories gives a colour that means
+ * nothing, so these stay as flat cells even when the surface is smooth.
+ */
+const CATEGORICAL_MODES: ReadonlySet<ColourMode> = new Set<ColourMode>([
+  "plate",
+  "crust",
+  "metamorphism",
+  "boundary",
+]);
+
+/** A unit-sphere point counts as a pole, where longitude means nothing, below this |xz|^2. */
+const POLE_EPSILON = 1e-10;
+
+/**
+ * Per-cell values the smooth surface interpolates between cell centres
+ * instead of colours: elevation (km) and the hillshade multiplier.
+ */
+const makeValueTexture = (cellCount: number): THREE.DataTexture => {
+  const width = Math.min(COLOUR_TEXTURE_WIDTH, Math.max(1, cellCount));
+  const height = Math.ceil(cellCount / width);
+  const texture = new THREE.DataTexture(
+    new Float32Array(width * height * 2),
+    width,
+    height,
+    THREE.RGFormat,
+    THREE.FloatType,
+  );
+  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.NearestFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+};
+
+/** The elevation colours as a 1D lookup, linearly filtered between texels. */
+const makeRampTexture = (): THREE.DataTexture => {
+  const texture = new THREE.DataTexture(
+    new Uint8Array(ELEVATION_RAMP_WIDTH * 4),
+    ELEVATION_RAMP_WIDTH,
+    1,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType,
+  );
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+};
+
+/**
+ * The smooth surface's material. Each vertex sits on a cell centre and reads
+ * that cell's texels; the rasteriser blends them across the triangle.
+ *
+ * With `useValue` (the elevation view) it is elevation and shade that are
+ * blended, and the colour is looked up per pixel from the ramp, so sea level
+ * and every colour band fall on the interpolated height: true iso-lines rather
+ * than a smear between the colours of neighbouring cells. Otherwise the cell
+ * colours themselves are blended, which suits the continuous ramps.
+ */
+const makeSmoothMaterial = (
+  colours: THREE.DataTexture,
+  values: THREE.DataTexture,
+  ramp: THREE.DataTexture,
+): THREE.ShaderMaterial =>
+  new THREE.ShaderMaterial({
+    uniforms: {
+      colours: { value: colours },
+      values: { value: values },
+      ramp: { value: ramp },
+      texWidth: { value: colours.image.width },
+      useValue: { value: false },
+      rampRange: {
+        value: new THREE.Vector2(ELEVATION_RAMP_MIN, ELEVATION_RAMP_MAX),
+      },
+      rampWidth: { value: ELEVATION_RAMP_WIDTH },
+    },
+    vertexShader: /* glsl */ `
+      #include <clipping_planes_pars_vertex>
+      attribute float cellIndex;
+      uniform sampler2D colours;
+      uniform sampler2D values;
+      uniform float texWidth;
+      varying vec3 vColour;
+      varying float vValue;
+      varying float vShade;
+      void main() {
+        int i = int(cellIndex + 0.5);
+        int w = int(texWidth);
+        ivec2 at = ivec2(i % w, i / w);
+        vColour = texelFetch(colours, at, 0).rgb;
+        vec2 v = texelFetch(values, at, 0).rg;
+        vValue = v.r;
+        vShade = v.g;
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <clipping_planes_vertex>
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      #include <clipping_planes_pars_fragment>
+      uniform sampler2D ramp;
+      uniform bool useValue;
+      uniform vec2 rampRange;
+      uniform float rampWidth;
+      varying vec3 vColour;
+      varying float vValue;
+      varying float vShade;
+      void main() {
+        #include <clipping_planes_fragment>
+        vec3 colour = vColour;
+        if (useValue) {
+          float t = clamp((vValue - rampRange.x) / (rampRange.y - rampRange.x), 0.0, 1.0);
+          // Onto texel centres, so the ends of the ramp are its end colours.
+          float u = (t * (rampWidth - 1.0) + 0.5) / rampWidth;
+          colour = min(texture2D(ramp, vec2(u, 0.5)).rgb * vShade, vec3(1.0));
+        }
+        gl_FragColor = linearToOutputTexel(vec4(colour, 1.0));
+      }
+    `,
+    clipping: true,
+    side: THREE.DoubleSide,
+  });
+
+/** Vertex buffers of the smooth surface, in both projections. */
+interface SmoothSurface {
+  sphere: Float32Array;
+  mercator: Float32Array;
+  cellIndex: Float32Array;
+}
+
+/**
+ * The triangulation the cells are the dual of: one triangle per junction,
+ * spanning the three cell centres that meet there. Every triangle has its own
+ * three vertices so the map can unwrap it on its own.
+ *
+ * On the map a triangle is unwrapped around its junction's longitude; one that
+ * hangs off an edge gets a copy a map width across, as the flat cells do, and
+ * the overhangs are clipped. A vertex on a pole has no longitude, so there the
+ * triangle becomes a quad with two copies of the pole, one under each of the
+ * other two corners, along the map's top or bottom edge.
+ */
+const buildSmoothSurface = (cellMesh: CellMesh): SmoothSurface => {
+  const { centres } = cellMesh;
+  const graph = cellMesh.boundaryGraph();
+  const { junctionPos, junctionArcOffsets, junctionArcs, arcCells } = graph;
+  // One triangle per junction, plus a few for map-edge copies and poles;
+  // grown by doubling if that runs out.
+  let capacity = graph.junctionCount + 1024;
+  let sphere = new Float32Array(capacity * 9);
+  let mercator = new Float32Array(capacity * 9);
+  let cellIndex = new Float32Array(capacity * 3);
+  let count = 0;
+  const grow = (): void => {
+    capacity *= 2;
+    const resize = (
+      from: Float32Array<ArrayBuffer>,
+      per: number,
+    ): Float32Array<ArrayBuffer> => {
+      const to = new Float32Array(capacity * per);
+      to.set(from);
+      return to;
+    };
+    sphere = resize(sphere, 9);
+    mercator = resize(mercator, 9);
+    cellIndex = resize(cellIndex, 3);
+  };
+
+  const corner = (c: number): Vec3 => [
+    centres[c * 3],
+    centres[c * 3 + 1],
+    centres[c * 3 + 2],
+  ];
+  const atPole = (p: Vec3): boolean => p[0] * p[0] + p[2] * p[2] < POLE_EPSILON;
+
+  // Map position of `p`, unwrapped about `refLon`; a pole takes `poleLon`.
+  const mapPoint = (p: Vec3, refLon: number, poleLon: number): Vec3 => {
+    if (!atPole(p))
+      return projectPoint(p[0], p[1], p[2], "mercator", 0, refLon);
+    const y = projectPoint(0, p[1], 0, "mercator")[1];
+    return [poleLon / Math.PI, y, 0];
+  };
+
+  const cells: number[] = [];
+  for (let j = 0; j < graph.junctionCount; j++) {
+    cells.length = 0;
+    for (let k = junctionArcOffsets[j]; k < junctionArcOffsets[j + 1]; k++) {
+      const a = junctionArcs[k];
+      for (const c of [arcCells[a * 2], arcCells[a * 2 + 1]]) {
+        if (c >= 0 && !cells.includes(c)) cells.push(c);
+      }
+    }
+    if (cells.length !== 3) continue;
+
+    const refLon = longitudeOf(
+      junctionPos[j * 3],
+      junctionPos[j * 3 + 1],
+      junctionPos[j * 3 + 2],
+    );
+    // Rotate a pole corner, if any, to the front.
+    const pole = cells.findIndex((c) => atPole(corner(c)));
+    const order =
+      pole > 0 ? [...cells.slice(pole), ...cells.slice(0, pole)] : [...cells];
+    const pts = order.map(corner);
+    const lonOf = (p: Vec3): number => mapPoint(p, refLon, 0)[0] * Math.PI;
+
+    // Triangles as corner index triples into `order`, plus each corner's
+    // longitude for a pole: (pole under b, b, c) and (pole under b, c, pole under c).
+    const tris: [number, number][][] = [];
+    if (pole >= 0) {
+      const lb = lonOf(pts[1]);
+      const lc = lonOf(pts[2]);
+      tris.push([
+        [0, lb],
+        [1, 0],
+        [2, 0],
+      ]);
+      tris.push([
+        [0, lb],
+        [2, 0],
+        [0, lc],
+      ]);
+    } else {
+      tris.push([
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ]);
+    }
+
+    for (const tri of tris) {
+      const flat = tri.map(([v, poleLon]) => mapPoint(pts[v], refLon, poleLon));
+      let minX = Infinity;
+      let maxX = -Infinity;
+      for (const p of flat) {
+        minX = Math.min(minX, p[0]);
+        maxX = Math.max(maxX, p[0]);
+      }
+      const shifts = [0];
+      if (minX < -MAP_HALF_EXTENT) shifts.push(2 * MAP_HALF_EXTENT);
+      else if (maxX > MAP_HALF_EXTENT) shifts.push(-2 * MAP_HALF_EXTENT);
+      for (const shift of shifts) {
+        if (count === capacity) grow();
+        for (let k = 0; k < 3; k++) {
+          const v = count * 3 + k;
+          // A copy has nothing to add on the globe: collapse it to a point.
+          const p = pts[shift === 0 ? tri[k][0] : tri[0][0]];
+          sphere.set(p, v * 3);
+          const m = flat[k];
+          mercator[v * 3] = m[0] + shift;
+          mercator[v * 3 + 1] = m[1];
+          mercator[v * 3 + 2] = m[2];
+          cellIndex[v] = order[tri[k][0]];
+        }
+        count++;
+      }
+    }
+  }
+  return {
+    sphere: sphere.slice(0, count * 9),
+    mercator: mercator.slice(0, count * 9),
+    cellIndex: cellIndex.slice(0, count * 3),
+  };
+};
+
 /**
  * Builds a single static Three.js mesh for the whole cell grid and exposes a
  * cheap colour-only update path.
@@ -331,6 +605,22 @@ export class CellRenderer {
 
   /** Per-cell hillshade multipliers, allocated on first use. */
   private shadeBuffer: Float32Array | undefined;
+
+  /**
+   * The smooth surface: the triangles between cell centres, colours blended
+   * across them. Drawn instead of the flat cells while smoothing is on and the
+   * view is not categorical. Shares the flat cells' colour texture.
+   */
+  private readonly flatMesh: THREE.Mesh;
+  private readonly smoothGeometry: THREE.BufferGeometry;
+  private readonly smoothMaterial: THREE.ShaderMaterial;
+  private readonly smoothMesh: THREE.Mesh;
+  private readonly smoothSphere: Float32Array;
+  private readonly smoothMercator: Float32Array;
+  private readonly valueTexture: THREE.DataTexture;
+  private readonly rampTexture: THREE.DataTexture;
+  private smooth = true;
+  private mode: ColourMode = "elevation";
 
   constructor(cellMesh: CellMesh) {
     this.cellMesh = cellMesh;
@@ -451,6 +741,30 @@ export class CellRenderer {
     this.colourTexture = makeColourTexture(cellCount);
     this.material = makeCellMaterial(this.colourTexture, null);
     const mesh = new THREE.Mesh(this.geometry, this.material);
+    this.flatMesh = mesh;
+
+    const surface = buildSmoothSurface(cellMesh);
+    this.smoothSphere = surface.sphere;
+    this.smoothMercator = surface.mercator;
+    this.smoothGeometry = new THREE.BufferGeometry();
+    this.smoothGeometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(surface.sphere.slice(), 3),
+    );
+    this.smoothGeometry.setAttribute(
+      "cellIndex",
+      new THREE.BufferAttribute(surface.cellIndex, 1),
+    );
+    this.smoothGeometry.computeBoundingSphere();
+    this.valueTexture = makeValueTexture(cellCount);
+    this.rampTexture = makeRampTexture();
+    this.smoothMaterial = makeSmoothMaterial(
+      this.colourTexture,
+      this.valueTexture,
+      this.rampTexture,
+    );
+    this.smoothMesh = new THREE.Mesh(this.smoothGeometry, this.smoothMaterial);
+    this.syncSurface();
 
     // Fault overlay: preallocate room for every arc, draw only cracked ones.
     const graph = cellMesh.boundaryGraph();
@@ -549,6 +863,7 @@ export class CellRenderer {
 
     this.object3D.add(
       mesh,
+      this.smoothMesh,
       this.faultLines,
       this.seedPoints,
       this.velocityArrows,
@@ -589,10 +904,28 @@ export class CellRenderer {
     relief?: ReliefOptions,
     resource = 0,
   ): void {
+    this.mode = mode;
+    this.syncSurface();
     let shade: Float32Array | undefined;
     if (relief?.hillshade && mode === "elevation") {
       shade = this.shadeBuffer ??= new Float32Array(this.cellMesh.cellCount);
       writeHillshade(shade, this.cellMesh, data.elevation, relief);
+    }
+    const useValue = mode === "elevation";
+    this.smoothMaterial.uniforms.useValue.value = useValue;
+    if (useValue && this.smoothMesh.visible) {
+      const values = this.valueTexture.image.data as unknown as Float32Array;
+      for (let i = 0; i < this.cellMesh.cellCount; i++) {
+        values[i * 2] = data.elevation[i];
+        values[i * 2 + 1] = shade ? shade[i] : 1;
+      }
+      this.valueTexture.needsUpdate = true;
+      writeElevationRamp(
+        this.rampTexture.image.data as Uint8Array,
+        ELEVATION_RAMP_WIDTH,
+        elevationStyle,
+      );
+      this.rampTexture.needsUpdate = true;
     }
     writeCellColours(
       this.colourTexture.image.data as Uint8Array,
@@ -605,6 +938,23 @@ export class CellRenderer {
       resource,
     );
     this.colourTexture.needsUpdate = true;
+  }
+
+  /**
+   * Draw the surface smooth (blended between cell centres) or as flat cells.
+   * Categorical views are always flat. Call {@link updateColours} after
+   * turning smoothing on, so the interpolated values are filled.
+   */
+  setSmooth(smooth: boolean): void {
+    this.smooth = smooth;
+    this.syncSurface();
+  }
+
+  /** Show whichever of the flat cells and the smooth surface the view wants. */
+  private syncSurface(): void {
+    const smooth = this.smooth && !CATEGORICAL_MODES.has(this.mode);
+    this.smoothMesh.visible = smooth;
+    this.flatMesh.visible = !smooth;
   }
 
   /**
@@ -972,6 +1322,15 @@ export class CellRenderer {
     faceAttr.needsUpdate = true;
     this.geometry.computeBoundingSphere();
 
+    const smoothAttr = this.smoothGeometry.getAttribute(
+      "position",
+    ) as THREE.BufferAttribute;
+    (smoothAttr.array as Float32Array).set(
+      projection === "sphere" ? this.smoothSphere : this.smoothMercator,
+    );
+    smoothAttr.needsUpdate = true;
+    this.smoothGeometry.computeBoundingSphere();
+
     // The plates overlay shares the face geometry; lift it off the faces with
     // a radial scale on the sphere and a flat +z nudge on the map.
     if (projection === "sphere") {
@@ -1035,6 +1394,10 @@ export class CellRenderer {
     this.velocityGeometry.dispose();
     this.velocityMaterial.dispose();
     this.platesMaterial.dispose();
+    this.smoothGeometry.dispose();
+    this.smoothMaterial.dispose();
+    this.valueTexture.dispose();
+    this.rampTexture.dispose();
   }
 }
 
