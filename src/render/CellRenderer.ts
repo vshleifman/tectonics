@@ -11,7 +11,12 @@ import {
   writeCellColours,
 } from "./colour";
 import { type HillshadeOptions, writeHillshade } from "./hillshade";
-import { longitudeOf, type Projection, projectPoint } from "./projection";
+import {
+  longitudeOf,
+  MAP_HALF_EXTENT,
+  type Projection,
+  projectPoint,
+} from "./projection";
 
 export type { ColourMode } from "./colour";
 
@@ -220,7 +225,9 @@ const makeCellMaterial = (
       texWidth: { value: texture.image.width },
       opacity: { value: overlay ? overlay.opacity : 1 },
     },
+    // The clipping chunks let the map's edge planes trim the faces.
     vertexShader: /* glsl */ `
+      #include <clipping_planes_pars_vertex>
       attribute float cellIndex;
       uniform sampler2D colours;
       uniform float texWidth;
@@ -229,16 +236,21 @@ const makeCellMaterial = (
         int i = int(cellIndex + 0.5);
         int w = int(texWidth);
         vColour = texelFetch(colours, ivec2(i % w, i / w), 0).rgb;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mvPosition;
+        #include <clipping_planes_vertex>
       }
     `,
     fragmentShader: /* glsl */ `
+      #include <clipping_planes_pars_fragment>
       uniform float opacity;
       varying vec3 vColour;
       void main() {
+        #include <clipping_planes_fragment>
         gl_FragColor = linearToOutputTexel(vec4(vColour, opacity));
       }
     `,
+    clipping: true,
     side: THREE.DoubleSide,
     transparent: overlay !== null,
     depthWrite: overlay === null,
@@ -324,21 +336,53 @@ export class CellRenderer {
     this.cellMesh = cellMesh;
     const { cellCount } = cellMesh;
 
-    // Count vertices/triangles: per cell = 1 centre + C corners, C triangles.
-    const cellVertexStart = new Int32Array(cellCount + 1);
-    let triangleCount = 0;
+    // Each cell's map outline is unwrapped around its centre's longitude, so a
+    // cell on the antimeridian hangs off one edge of the map and leaves a notch
+    // in the other. Such a cell gets a second copy shifted a whole map width
+    // across, filling the notch; the overhangs are clipped away when the map
+    // is drawn (see `MAP_CLIP_PLANES`). `wrap` is the copy's shift in map
+    // widths, 0 for none.
+    const wrap = new Int8Array(cellCount);
+    let copies = 0;
     for (let i = 0; i < cellCount; i++) {
-      const corners = cellMesh.polygon(i).length;
-      cellVertexStart[i + 1] = cellVertexStart[i] + corners + 1;
-      triangleCount += corners;
+      const [cx, cy, cz] = cellMesh.position(i);
+      const refLon = longitudeOf(cx, cy, cz);
+      let minX = Infinity;
+      let maxX = -Infinity;
+      for (const [x, y, z] of cellMesh.polygon(i)) {
+        const mapX = projectPoint(x, y, z, "mercator", 0, refLon)[0];
+        minX = Math.min(minX, mapX);
+        maxX = Math.max(maxX, mapX);
+      }
+      if (minX < -MAP_HALF_EXTENT) wrap[i] = 1;
+      else if (maxX > MAP_HALF_EXTENT) wrap[i] = -1;
+      if (wrap[i] !== 0) copies++;
     }
-    const vertexCount = cellVertexStart[cellCount];
+
+    // Count vertices/triangles: per cell = 1 centre + C corners, C triangles.
+    // The copies follow every original cell.
+    const drawn = cellCount + copies;
+    const cellVertexStart = new Int32Array(drawn + 1);
+    const drawnCell = new Int32Array(drawn);
+    let triangleCount = 0;
+    let slot = 0;
+    for (const copy of [false, true]) {
+      for (let i = 0; i < cellCount; i++) {
+        if (copy && wrap[i] === 0) continue;
+        const corners = cellMesh.polygon(i).length;
+        drawnCell[slot] = i;
+        cellVertexStart[slot + 1] = cellVertexStart[slot] + corners + 1;
+        triangleCount += corners;
+        slot++;
+      }
+    }
+    const vertexCount = cellVertexStart[drawn];
 
     const positions = new Float32Array(vertexCount * 3);
     const mercatorPositions = new Float32Array(vertexCount * 3);
     const cellIndex = new Float32Array(vertexCount);
-    for (let i = 0; i < cellCount; i++) {
-      cellIndex.fill(i, cellVertexStart[i], cellVertexStart[i + 1]);
+    for (let d = 0; d < drawn; d++) {
+      cellIndex.fill(drawnCell[d], cellVertexStart[d], cellVertexStart[d + 1]);
     }
     const indices = new Uint32Array(triangleCount * 3);
 
@@ -353,36 +397,29 @@ export class CellRenderer {
     };
 
     let indexWrite = 0;
-    for (let i = 0; i < cellCount; i++) {
+    for (let d = 0; d < drawn; d++) {
+      const i = drawnCell[d];
+      const copy = d >= cellCount;
       const centre = cellMesh.position(i);
       const corners = cellMesh.polygon(i);
-      const base = cellVertexStart[i];
+      const base = cellVertexStart[d];
       // Unwrap every corner of this cell to the centre longitude so the
       // polygon stays contiguous across the antimeridian seam on the map.
-      const refLon = longitudeOf(centre[0], centre[1], centre[2]);
+      // A copy is unwrapped a whole turn over, to the far side of the map.
+      const refLon =
+        longitudeOf(centre[0], centre[1], centre[2]) +
+        (copy ? wrap[i] * 2 * Math.PI : 0);
+      const mapPoint = (p: Vec3) =>
+        projectPoint(p[0], p[1], p[2], "mercator", 0, refLon);
 
-      // Vertex 0 of the cell is the centre; 1..C are the corners.
+      // Vertex 0 of the cell is the centre; 1..C are the corners. On the
+      // sphere a copy collapses onto the centre, drawing nothing.
       writeTriple(positions, base, centre);
-      writeTriple(
-        mercatorPositions,
-        base,
-        projectPoint(centre[0], centre[1], centre[2], "mercator", 0, refLon),
-      );
+      writeTriple(mercatorPositions, base, mapPoint(centre));
       for (let k = 0; k < corners.length; k++) {
         const v = base + 1 + k;
-        writeTriple(positions, v, corners[k]);
-        writeTriple(
-          mercatorPositions,
-          v,
-          projectPoint(
-            corners[k][0],
-            corners[k][1],
-            corners[k][2],
-            "mercator",
-            0,
-            refLon,
-          ),
-        );
+        writeTriple(positions, v, copy ? centre : corners[k]);
+        writeTriple(mercatorPositions, v, mapPoint(corners[k]));
       }
 
       // Fan triangles: (centre, corner k, corner k+1).

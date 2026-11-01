@@ -4,9 +4,10 @@
  * re-places the entire scene without rebuilding any data.
  *
  * Convention (matching the icosphere mesh): y is up, so for a unit-sphere point
- * `lat = asin(y)` and `lon = atan2(z, x)`. The Mercator map is a 2x2 plane on
- * z = 0: longitude maps to `[-1, 1]` and the clamped Mercator y maps to roughly
- * `[-1, 1]` as well, so the map is square in world units.
+ * `lat = asin(y)` and `lon = atan2(z, x)`. The Mercator map lies on z = 0:
+ * longitude maps to `[-1, 1]` and the clamped, flattened Mercator y to
+ * `[-MAP_HALF_HEIGHT, MAP_HALF_HEIGHT]`, about half that, so the map is a
+ * rectangle roughly twice as wide as it is tall.
  */
 
 import { clamp } from "../math/scalar";
@@ -14,19 +15,25 @@ import { clamp } from "../math/scalar";
 /** Which projection the scene is currently drawn in. */
 export type Projection = "sphere" | "mercator";
 
-/** Half-extent of the Mercator map in world units (the map spans -1..1 in x/y). */
+/** Half-extent of the Mercator map in world units (the map spans -1..1 in x). */
 export const MAP_HALF_EXTENT = 1;
 
-/**
- * Latitude clamp (~85.05 deg) so the poles don't stretch to infinity. At this
- * limit `mercatorY` reaches ~PI, which is why dividing by PI lands the map in
- * roughly the same -1..1 range as longitude.
- */
+/** Latitude clamp (~85.05 deg) so the poles don't stretch to infinity. */
 export const MERCATOR_LAT_LIMIT = (85.05 * Math.PI) / 180;
 
-/** Forward Mercator latitude stretch. */
+/**
+ * Divisor of latitude inside the Mercator stretch. True Mercator's 2 reaches
+ * ~PI at the clamp and makes the map square; 2.5 flattens the high latitudes
+ * so the map is about twice as wide as it is tall.
+ */
+const LAT_DIVISOR = 2.5;
+
+/** Forward Mercator latitude stretch, flattened by {@link LAT_DIVISOR}. */
 const mercatorY = (lat: number): number =>
-  Math.log(Math.tan(Math.PI / 4 + lat / 2.5));
+  Math.log(Math.tan(Math.PI / 4 + lat / LAT_DIVISOR));
+
+/** Half-height of the Mercator map in world units: where the clamp lands. */
+export const MAP_HALF_HEIGHT = mercatorY(MERCATOR_LAT_LIMIT) / Math.PI;
 
 /**
  * Shift `lon` by whole turns so it lands within PI of `refLon`. This is the
@@ -84,7 +91,7 @@ export const unprojectMercator = (
   Y: number,
 ): [number, number, number] => {
   const lon = X * Math.PI;
-  const lat = 2 * Math.atan(Math.exp(Y * Math.PI)) - Math.PI / 2;
+  const lat = LAT_DIVISOR * (Math.atan(Math.exp(Y * Math.PI)) - Math.PI / 4);
   const cosLat = Math.cos(lat);
   return [cosLat * Math.cos(lon), Math.sin(lat), cosLat * Math.sin(lon)];
 };

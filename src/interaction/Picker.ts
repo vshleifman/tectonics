@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { BoundaryGraph, CellMesh } from "../mesh/CellMesh";
 import {
   MAP_HALF_EXTENT,
+  MAP_HALF_HEIGHT,
   type Projection,
   unprojectMercator,
 } from "../render/projection";
@@ -52,7 +53,7 @@ export class Picker {
       this.point.set(this.ndc.x, this.ndc.y, 0).unproject(this.camera);
       if (
         Math.abs(this.point.x) > MAP_HALF_EXTENT ||
-        Math.abs(this.point.y) > MAP_HALF_EXTENT
+        Math.abs(this.point.y) > MAP_HALF_HEIGHT
       ) {
         return null;
       }

@@ -6,7 +6,11 @@ import { ArrayCellMesh } from "./mesh/ArrayCellMesh";
 import { CellReadout } from "./render/CellReadout";
 import { CellRenderer, type ColourMode } from "./render/CellRenderer";
 import type { ElevationStyle } from "./render/colour";
-import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
+import {
+  MAP_HALF_EXTENT,
+  MAP_HALF_HEIGHT,
+  type Projection,
+} from "./render/projection";
 import { simOptions, tuning } from "./sim/tuning";
 import { createControls } from "./ui/controls";
 import { loadSettings, loadTuning, persistSettings } from "./ui/persist";
@@ -79,6 +83,18 @@ const setMapFrustum = (aspect: number): void => {
   mapCamera.updateProjectionMatrix();
 };
 setMapFrustum(window.innerWidth / window.innerHeight);
+
+/**
+ * The map's rectangle, as planes keeping what lies inside it. Cells on the
+ * antimeridian and the overlays drawn over them overhang the left and right
+ * edges; the renderer clips them off while the map is shown.
+ */
+const MAP_CLIP_PLANES = [
+  new THREE.Plane(new THREE.Vector3(1, 0, 0), MAP_HALF_EXTENT),
+  new THREE.Plane(new THREE.Vector3(-1, 0, 0), MAP_HALF_EXTENT),
+  new THREE.Plane(new THREE.Vector3(0, 1, 0), MAP_HALF_HEIGHT),
+  new THREE.Plane(new THREE.Vector3(0, -1, 0), MAP_HALF_HEIGHT),
+];
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -234,6 +250,7 @@ const applyProjection = (): void => {
   const onMap = projection === "mercator";
   cellRenderer?.setProjection(projection);
 
+  renderer.clippingPlanes = onMap ? MAP_CLIP_PLANES : [];
   activeCamera = onMap ? mapCamera : camera;
   activeControls = onMap ? mapControls : controls;
   controls.enabled = !onMap;
