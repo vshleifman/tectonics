@@ -18,10 +18,9 @@ export type { ColourMode } from "./colour";
 /**
  * How far each overlay floats above the faces. On the sphere this scales the
  * radius (`1 + lift`); on the Mercator map it becomes a small +z offset toward
- * the camera. Edges sit just above the faces, faults above the wireframe, and
- * velocity arrows above everything else so they stay readable.
+ * the camera. Faults sit just above the faces, and velocity arrows above
+ * everything else so they stay readable.
  */
-const EDGE_LIFT = 0.003;
 const FAULT_LIFT = 0.005;
 const VELOCITY_LIFT = 0.012;
 /**
@@ -267,14 +266,6 @@ export class CellRenderer {
   private readonly spherePositions: Float32Array;
   private readonly mercatorPositions: Float32Array;
 
-  private readonly edgeGeometry: THREE.BufferGeometry;
-  private readonly edgeMaterial: THREE.LineBasicMaterial;
-  private readonly edges: THREE.LineSegments;
-
-  /** Edge segment positions precomputed for both projections; swapped on toggle. */
-  private readonly sphereEdgePositions: Float32Array;
-  private readonly mercatorEdgePositions: Float32Array;
-
   /** Active projection. Overlays are re-derived through it on every update. */
   private projection: Projection = "sphere";
 
@@ -336,12 +327,10 @@ export class CellRenderer {
     // Count vertices/triangles: per cell = 1 centre + C corners, C triangles.
     const cellVertexStart = new Int32Array(cellCount + 1);
     let triangleCount = 0;
-    let cornerTotal = 0;
     for (let i = 0; i < cellCount; i++) {
       const corners = cellMesh.polygon(i).length;
       cellVertexStart[i + 1] = cellVertexStart[i] + corners + 1;
       triangleCount += corners;
-      cornerTotal += corners;
     }
     const vertexCount = cellVertexStart[cellCount];
 
@@ -352,11 +341,6 @@ export class CellRenderer {
       cellIndex.fill(i, cellVertexStart[i], cellVertexStart[i + 1]);
     }
     const indices = new Uint32Array(triangleCount * 3);
-
-    // Edge line segments: one per polygon side, both endpoints per segment.
-    const edgePositions = new Float32Array(cornerTotal * 2 * 3);
-    const mercatorEdgePositions = new Float32Array(cornerTotal * 2 * 3);
-    let edgeVertex = 0;
 
     const writeTriple = (
       target: Float32Array,
@@ -407,39 +391,11 @@ export class CellRenderer {
         indices[indexWrite++] = base;
         indices[indexWrite++] = base + 1 + k;
         indices[indexWrite++] = base + 1 + next;
-
-        // Boundary segment corner[k] -> corner[next], lifted off the faces.
-        const a = corners[k];
-        const b = corners[next];
-        writeTriple(
-          edgePositions,
-          edgeVertex,
-          projectPoint(a[0], a[1], a[2], "sphere", EDGE_LIFT),
-        );
-        writeTriple(
-          mercatorEdgePositions,
-          edgeVertex,
-          projectPoint(a[0], a[1], a[2], "mercator", EDGE_LIFT, refLon),
-        );
-        edgeVertex++;
-        writeTriple(
-          edgePositions,
-          edgeVertex,
-          projectPoint(b[0], b[1], b[2], "sphere", EDGE_LIFT),
-        );
-        writeTriple(
-          mercatorEdgePositions,
-          edgeVertex,
-          projectPoint(b[0], b[1], b[2], "mercator", EDGE_LIFT, refLon),
-        );
-        edgeVertex++;
       }
     }
 
     this.spherePositions = positions;
     this.mercatorPositions = mercatorPositions;
-    this.sphereEdgePositions = edgePositions;
-    this.mercatorEdgePositions = mercatorEdgePositions;
 
     this.geometry = new THREE.BufferGeometry();
     this.geometry.setAttribute(
@@ -458,16 +414,6 @@ export class CellRenderer {
     this.colourTexture = makeColourTexture(cellCount);
     this.material = makeCellMaterial(this.colourTexture, null);
     const mesh = new THREE.Mesh(this.geometry, this.material);
-
-    this.edgeGeometry = new THREE.BufferGeometry();
-    this.edgeGeometry.setAttribute(
-      "position",
-      new THREE.BufferAttribute(edgePositions.slice(), 3),
-    );
-    this.edgeMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
-    this.edges = new THREE.LineSegments(this.edgeGeometry, this.edgeMaterial);
-    this.edges.visible = false;
-    this.edges.frustumCulled = false;
 
     // Fault overlay: preallocate room for every arc, draw only cracked ones.
     const graph = cellMesh.boundaryGraph();
@@ -566,7 +512,6 @@ export class CellRenderer {
 
     this.object3D.add(
       mesh,
-      this.edges,
       this.faultLines,
       this.seedPoints,
       this.velocityArrows,
@@ -582,7 +527,6 @@ export class CellRenderer {
    * - `"elevation"`: ocean/land ramp split at sea level, 0. `"land"` flattens
    *   the ocean to one colour and stretches the continental colours.
    *   With `hillshade`, relief is lit from the north-west (elevation only).
-   * - `"data"`: flat white faces (the black wireframe carries the structure).
    * - `"plate"`: a stable per-`plateId` hue so plates read as solid regions.
    * - `"crust"`: oceanic vs continental two-tone.
    * - `"density"`: a light-to-dark ramp over the crust density range.
@@ -974,7 +918,7 @@ export class CellRenderer {
 
   /**
    * Switch the projection the scene is drawn in. Swaps the precomputed face
-   * and edge buffers and re-derives the dynamic overlays (faults, seeds,
+   * buffers and re-derives the dynamic overlays (faults, seeds,
    * velocity arrows) from their cached inputs so the map shows exactly what
    * the sphere showed. Colours are untouched.
    */
@@ -1000,16 +944,6 @@ export class CellRenderer {
       this.platesMesh.scale.setScalar(1);
       this.platesMesh.position.set(0, 0, PLATE_LIFT);
     }
-
-    const edgePositions =
-      projection === "sphere"
-        ? this.sphereEdgePositions
-        : this.mercatorEdgePositions;
-    const edgeAttr = this.edgeGeometry.getAttribute(
-      "position",
-    ) as THREE.BufferAttribute;
-    (edgeAttr.array as Float32Array).set(edgePositions);
-    edgeAttr.needsUpdate = true;
 
     if (this.crackedCache) this.updateFaults(this.crackedCache);
     if (this.plateIdCache) this.updatePlateLines(this.plateIdCache);
@@ -1044,11 +978,6 @@ export class CellRenderer {
     this.plateLines.visible = visible;
   }
 
-  /** Show or hide the black cell-boundary lines (used in data mode). */
-  setEdgesVisible(visible: boolean): void {
-    this.edges.visible = visible;
-  }
-
   /** Show or hide the fault overlay and seed markers together. */
   setFaultsVisible(visible: boolean): void {
     this.faultLines.visible = visible;
@@ -1060,8 +989,6 @@ export class CellRenderer {
     this.material.dispose();
     this.colourTexture.dispose();
     this.platesTexture.dispose();
-    this.edgeGeometry.dispose();
-    this.edgeMaterial.dispose();
     this.faultGeometry.dispose();
     this.faultMaterial.dispose();
     this.plateLineGeometry.dispose();

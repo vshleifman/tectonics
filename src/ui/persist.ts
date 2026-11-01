@@ -37,7 +37,6 @@ const CHOICES: Partial<Record<keyof Settings, readonly string[]>> = {
   elevationStyle: ["absolute", "land"],
   viewMode: [
     "colour",
-    "data",
     "crust",
     "density",
     "lithosphere",

@@ -334,11 +334,15 @@ const handle = async (cmd: SimCommand): Promise<void> => {
       if (running) loop();
       return;
     }
+    // Faults are laid on the mesh as it was built; once plates have moved,
+    // regrowing plates from them would overwrite the evolved layout.
     case "addSeed":
+      if (tick > 0) return;
       plates?.addSeed(cmd.junction);
       reassign();
       return;
     case "clearFaults":
+      if (tick > 0) return;
       plates?.clear();
       reassign();
       return;

@@ -9,7 +9,7 @@ import { tuning } from "../sim/tuning";
  * stored.
  */
 export interface PlateSummary {
-  /** Stable plate id — the same id the per-cell data view labels cells with. */
+  /** Stable plate id — the same id the cell readout gives each cell. */
   id: number;
   /** Cells currently belonging to this plate. */
   cellCount: number;

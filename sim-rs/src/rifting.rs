@@ -109,6 +109,10 @@ pub fn update_rifting(
     });
     if o.supercontinent_insulation {
         insulate(mesh, data, mantle.cell_temps(), dt_myr, s, t);
+    } else {
+        // Heat built up before insulation was switched off would otherwise
+        // stay frozen in place, still pushing domes and damping heat flow.
+        data.mantle_heat.fill(0.0);
     }
 
     // Each plate's cells by one counting sort, visited in order of lowest cell.

@@ -1372,6 +1372,16 @@ mod tests {
     }
 
     #[test]
+    fn switching_insulation_off_releases_the_heat_already_trapped() {
+        // Left in place, the heat would keep pushing domes apart and damping
+        // the heat flow of a model that no longer has it.
+        let mut sim = hot_continent(|_| {});
+        sim.options.supercontinent_insulation = false;
+        sim.tick();
+        assert!(sim.front.mantle_heat.iter().all(|&heat| heat == 0.0));
+    }
+
+    #[test]
     fn a_rift_that_would_vent_all_its_heat_does_not_open() {
         // Breaking open would take away the dome that parts the pieces, so the
         // test of whether they part sees none, and the plate holds.

@@ -6,12 +6,11 @@ import { BoundaryKind } from "../sim/boundaries";
 export type Rgb = readonly [number, number, number];
 
 /**
- * How cells are coloured: by elevation, flat (data view), by plate id, by crust
+ * How cells are coloured: by elevation, by plate id, by crust
  * type (oceanic vs continental), by density, or by boundary type.
  */
 export type ColourMode =
   | "elevation"
-  | "data"
   | "plate"
   | "crust"
   | "density"
@@ -59,7 +58,6 @@ export interface ColourFields {
   dynTopo: ArrayLike<number>;
 }
 
-const WHITE: Rgb = [1, 1, 1];
 const NO_PLATE: Rgb = [0.5, 0.5, 0.5];
 const CONTINENTAL: Rgb = [0.82, 0.71, 0.48];
 /** Cratons in the deep rose-brown geological maps give Archean shields. */
@@ -300,9 +298,6 @@ export const writeCellColours = (
   resource = 0,
 ): void => {
   switch (mode) {
-    case "data":
-      for (let i = 0; i < cellCount; i++) put(out, i * 4, WHITE);
-      return;
     case "plate": {
       const cache = new Map<number, Rgb>();
       for (let i = 0; i < cellCount; i++) {
@@ -607,16 +602,6 @@ export const legendForView = (
       return style === "land"
         ? landElevationLegend()
         : absoluteElevationLegend();
-    case "data":
-      return {
-        gradient: null,
-        ticks: [],
-        swatches: [
-          { colour: toCssRgb(WHITE), label: "Cell" },
-          { colour: "rgb(8, 10, 14)", label: "Edge" },
-        ],
-        note: "Every cell is labelled with its properties.",
-      };
     case "crust":
       return {
         gradient: null,

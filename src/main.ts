@@ -3,7 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { describeBench, parseBenchSpec } from "./bench/benchScenario";
 import { Picker } from "./interaction/Picker";
 import { ArrayCellMesh } from "./mesh/ArrayCellMesh";
-import { CellLabels } from "./render/CellLabels";
+import { CellReadout } from "./render/CellReadout";
 import { CellRenderer, type ColourMode } from "./render/CellRenderer";
 import type { ElevationStyle } from "./render/colour";
 import { MAP_HALF_EXTENT, type Projection } from "./render/projection";
@@ -29,6 +29,7 @@ const INITIAL_HILLSHADE_EXAGGERATION = 15;
 const INITIAL_SEED_MODE = true;
 const INITIAL_BRANCHES_PER_SEED = 3;
 const INITIAL_SHOW_VELOCITIES = false;
+const INITIAL_CELL_READOUT = false;
 const INITIAL_PLATE_OVERLAY: PlateOverlay = "colours";
 const INITIAL_UI_HIDDEN = false;
 const INITIAL_RUNNING = false;
@@ -108,8 +109,7 @@ mapControls.enabled = false;
 let activeCamera: THREE.Camera = camera;
 let activeControls: OrbitControls = controls;
 
-const cellLabels = new CellLabels(document.body);
-scene.add(cellLabels.object3D);
+const cellReadout = new CellReadout(document.body);
 
 const picker = new Picker(camera, renderer.domElement);
 
@@ -128,6 +128,12 @@ let seedCount = 0;
  * ticks and put back only when a new network is placed while paused.
  */
 let showSeedOverlay = true;
+/**
+ * Whether the world has ticked. Seeds carve plates out of the mesh as it was
+ * built, which a world whose plates have moved no longer matches, so seeding
+ * stops until a new world.
+ */
+let seedingLocked = false;
 
 // What the user last chose, laid over the defaults below. The tuning goes in
 // before the control panel is built, which reads it for the sliders.
@@ -148,6 +154,7 @@ const settings = createSettingsStore(
     seedMode: INITIAL_SEED_MODE,
     branchesPerSeed: INITIAL_BRANCHES_PER_SEED,
     showVelocities: INITIAL_SHOW_VELOCITIES,
+    cellReadout: INITIAL_CELL_READOUT,
     plateOverlay: INITIAL_PLATE_OVERLAY,
     running: INITIAL_RUNNING,
     ticksPerSecond: INITIAL_TICKS_PER_SECOND,
@@ -226,7 +233,6 @@ const applyProjection = (): void => {
   const projection = settings.get("projection");
   const onMap = projection === "mercator";
   cellRenderer?.setProjection(projection);
-  cellLabels.setProjection(projection);
 
   activeCamera = onMap ? mapCamera : camera;
   activeControls = onMap ? mapControls : controls;
@@ -238,20 +244,10 @@ const applyProjection = (): void => {
 };
 
 const applyViewMode = (): void => {
-  const viewMode = settings.get("viewMode");
-  const showLabels = viewMode === "data";
   recolour();
-  cellRenderer?.setEdgesVisible(viewMode === "data");
   applySeedOverlay();
   applyVelocities();
-  cellLabels.setVisible(showLabels);
-  if (showLabels) {
-    ui.setNote(
-      cellLabels.isSuppressed
-        ? "Labels hidden: too many cells. Lower subdivision level."
-        : "Showing all per-cell properties.",
-    );
-  } else if (settings.get("seedMode")) {
+  if (settings.get("seedMode") && !seedingLocked) {
     ui.setNote("Click the globe to drop plate seeds; drag to orbit.");
   } else {
     ui.setNote("");
@@ -272,7 +268,6 @@ const onMesh = (
   cellRenderer = new CellRenderer(cellMesh);
   scene.add(cellRenderer.object3D);
   cellRenderer.setProjection(settings.get("projection"));
-  cellLabels.build(cellMesh);
   seedCount = 0;
   showSeedOverlay = true;
   ui.setCellCount(cellMesh.cellCount);
@@ -286,6 +281,12 @@ const onSnapshot = (snapshot: Snapshot): void => {
   if (!cellRenderer) return;
   const start = performance.now();
   const { buffers } = snapshot;
+  const ticked = snapshot.tick > 0;
+  if (ticked !== seedingLocked) {
+    seedingLocked = ticked;
+    ui.setSeedingLocked(ticked);
+    applyViewMode();
+  }
   if (snapshot.faults) {
     cellRenderer.updateFaults(snapshot.faults.cracked);
     cellRenderer.updateSeeds(snapshot.faults.seeds);
@@ -300,7 +301,7 @@ const onSnapshot = (snapshot: Snapshot): void => {
     buffers.plateId,
     buffers.arcKind,
   );
-  cellLabels.refresh(buffers);
+  hoverStale = true;
   ui.setPlateCount(snapshot.plateCount);
   ui.setMassReadout(snapshot.mass.liveMass, snapshot.mass.drift);
   if (snapshot.metrics) ui.setMetrics(snapshot.metrics);
@@ -390,6 +391,7 @@ const ui = createControls(
     dismissSeedOverlay();
     client.step();
   },
+  () => rebuild(settings.get("level")),
 );
 
 // React to setting changes. The store is the source of truth; these subscriptions
@@ -449,7 +451,7 @@ renderer.domElement.addEventListener("pointerdown", (event) => {
   pointerDownY = event.clientY;
 });
 renderer.domElement.addEventListener("pointerup", (event) => {
-  if (!settings.get("seedMode")) return;
+  if (!settings.get("seedMode") || seedingLocked) return;
   const travel = Math.hypot(
     event.clientX - pointerDownX,
     event.clientY - pointerDownY,
@@ -457,6 +459,44 @@ renderer.domElement.addEventListener("pointerup", (event) => {
   if (travel > CLICK_DRAG_THRESHOLD) return; // was an orbit drag
   placeSeed(event);
 });
+
+// --- Cell readout: every property of the cell under the pointer, while it is
+// switched on. The pointer and the camera both move the cell under the
+// pointer, so it is looked up once a frame while the pointer is over the world.
+
+/** Pointer position over the canvas, or null while it is elsewhere. */
+let hoverPoint: { x: number; y: number } | null = null;
+/** Cell the readout shows, or -1 for none; also where the next lookup starts. */
+let hoveredCell = -1;
+/** The readout needs redrawing even if the cell under the pointer is the same. */
+let hoverStale = false;
+
+renderer.domElement.addEventListener("pointermove", (event) => {
+  hoverPoint = { x: event.clientX, y: event.clientY };
+  hoverStale = true;
+});
+renderer.domElement.addEventListener("pointerleave", () => {
+  hoverPoint = null;
+  hoverStale = true;
+});
+
+const updateHover = (): void => {
+  const snapshot = client.snapshot;
+  const point = hoverPoint;
+  const cell =
+    settings.get("cellReadout") && point && cellMesh && snapshot
+      ? picker.pickCell(point.x, point.y, cellMesh, Math.max(0, hoveredCell))
+      : null;
+  if (cell === null || !point || !snapshot) {
+    if (hoveredCell >= 0) cellReadout.hide();
+    hoveredCell = -1;
+    return;
+  }
+  if (cell === hoveredCell && !hoverStale) return;
+  hoveredCell = cell;
+  hoverStale = false;
+  cellReadout.show(snapshot.buffers, cell, point.x, point.y);
+};
 
 // --- Render loop: 60fps, only re-colours / redraws a static mesh -----------
 
@@ -477,8 +517,7 @@ const animate = (): void => {
 
   activeControls.update();
   renderer.render(scene, activeCamera);
-  cellLabels.update(activeCamera);
-  cellLabels.render(scene, activeCamera);
+  updateHover();
 };
 animate();
 
@@ -488,5 +527,4 @@ window.addEventListener("resize", () => {
   camera.updateProjectionMatrix();
   setMapFrustum(aspect);
   renderer.setSize(window.innerWidth, window.innerHeight);
-  cellLabels.resize();
 });

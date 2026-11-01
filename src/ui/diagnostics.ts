@@ -112,9 +112,37 @@ const makePinButton = (): HTMLButtonElement => {
   return button;
 };
 
+/** Browser storage for the pinned readings' ids, in the order they were pinned. */
+const PINS_KEY = "tectonics.pins";
+
 /**
- * Session memory of which readings are pinned. The first registration of an id
- * owns the label and the formatter, so a chart series and the matching
+ * The stored pins. Storage can be missing or hold something an older version
+ * wrote, so anything that is not a list of strings reads as nothing pinned.
+ */
+const loadPins = (): string[] => {
+  try {
+    const text = localStorage.getItem(PINS_KEY);
+    if (text === null) return [];
+    const value: unknown = JSON.parse(text);
+    return Array.isArray(value)
+      ? value.filter((id): id is string => typeof id === "string")
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+const savePins = (ids: readonly string[]): void => {
+  try {
+    localStorage.setItem(PINS_KEY, JSON.stringify(ids));
+  } catch {
+    // Storage is unavailable or full; pins then last the session.
+  }
+};
+
+/**
+ * Which readings are pinned, kept across reloads. The first registration of
+ * an id owns the label and the formatter, so a chart series and the matching
  * overview row share one pin.
  */
 const createPinBoard = (): PinBoardHandle => {
@@ -123,7 +151,7 @@ const createPinBoard = (): PinBoardHandle => {
     { label: string; read: (metrics: WorldMetrics) => string }
   >();
   const buttons = new Map<string, HTMLButtonElement[]>();
-  const pinned = new Set<string>();
+  const pinned = new Set<string>(loadPins());
   let latest: WorldMetrics | undefined;
 
   const panel = document.createElement("div");
@@ -196,6 +224,9 @@ const createPinBoard = (): PinBoardHandle => {
         event.stopPropagation();
         if (pinned.has(id)) pinned.delete(id);
         else pinned.add(id);
+        // Every reading has registered by the time one is clicked, so a pin
+        // left over from a reading since removed is dropped here.
+        savePins([...pinned].filter((key) => items.has(key)));
         for (const entry of buttons.get(id) ?? []) paintButton(id, entry);
         render();
       });
@@ -913,7 +944,7 @@ const makeOverview = (
 
   const elapsedValue = addRow(
     "Elapsed",
-    "—",
+    "",
     (metrics) => `${Math.round(metrics.elapsedMyr)} Myr`,
   );
   const plateValue = addRow(
@@ -943,10 +974,10 @@ const makeOverview = (
         ? "never"
         : `${Math.round(metrics.oceanRecyclingMyr)} Myr · Earth ${EARTH.oceanRecyclingMyr} Myr`,
   );
-  const boundaryValue = addRow("Conv/div/trans %", "", (metrics) => {
-    const [conv, div, trans] = metrics.boundaryShare;
-    return `${Math.round(conv * 100)}/${Math.round(div * 100)}/${Math.round(trans * 100)}`;
-  });
+  // Every share, inactive included, so the row adds up to 100.
+  const boundaryShares = (metrics: WorldMetrics): string =>
+    metrics.boundaryShare.map((share) => Math.round(share * 100)).join("/");
+  const boundaryValue = addRow("Conv/div/trans/inactive %", "", boundaryShares);
   const driveValue = addRow(
     "Speed vs trench",
     `+${EARTH.speedTrenchCorrelation.toFixed(1)}`,
@@ -966,8 +997,7 @@ const makeOverview = (
       metrics.oceanRecyclingMyr === null
         ? "never"
         : `${Math.round(metrics.oceanRecyclingMyr)} Myr`;
-    const [conv, div, trans] = metrics.boundaryShare;
-    boundaryValue.textContent = `${Math.round(conv * 100)}/${Math.round(div * 100)}/${Math.round(trans * 100)}`;
+    boundaryValue.textContent = boundaryShares(metrics);
     driveValue.textContent =
       metrics.speedTrenchCorrelation === null
         ? "—"

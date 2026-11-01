@@ -2,8 +2,7 @@ import type { ElevationStyle } from "../render/colour";
 import type { Projection } from "../render/projection";
 
 /**
- * How cells render: elevation colour ("colour"), greyscale with per-cell
- * id/elevation labels ("data"), crust type ("crust"), crust density ramp
+ * How cells render: elevation colour ("colour"), crust type ("crust"), crust density ramp
  * ("density"), mantle lid thickness ("lithosphere"), sediment share ("sediment"), mafic/felsic/sediment
  * makeup ("composition"), loose sediment cover ("cover"), metamorphic facies ("metamorphism"), km of crust eroded away ("exhumation"), resource potential ("resources"), surface heat loss
  * ("heat-flow"), upper-mantle temperature ("mantle-temp"), slab piled in the
@@ -13,7 +12,6 @@ import type { Projection } from "../render/projection";
  */
 export type ViewMode =
   | "colour"
-  | "data"
   | "crust"
   | "density"
   | "lithosphere"
@@ -60,6 +58,8 @@ export interface Settings {
   seedMode: boolean;
   branchesPerSeed: number;
   showVelocities: boolean;
+  /** List every property of the cell under the pointer, over whatever view is shown. */
+  cellReadout: boolean;
   plateOverlay: PlateOverlay;
   running: boolean;
   /** Simulation ticks attempted per second of wall clock. */

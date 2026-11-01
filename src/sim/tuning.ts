@@ -244,6 +244,14 @@ export interface Tuning {
    * for continents to gather over.
    */
   downwellingMemory: number;
+  /**
+   * Upwelling per Myr, as a share of a site's area, from upper mantle running
+   * as hot as {@link upperTempMax}. Hot mantle rises and the surface flows out
+   * from it, which is what turns the mantle beneath a long-lived
+   * supercontinent from downwelling to upwelling. 0 leaves the mantle driven
+   * by sinking slabs alone.
+   */
+  upwellingGain: number;
 
   // --- Upper-mantle temperature (see sim-rs/src/mantle.rs) ---
   /**
@@ -650,6 +658,11 @@ export interface Tuning {
    * union can still rift along it later.
    */
   cratonMergeTime: number;
+  /**
+   * Share of the way two welded plates whose cratons touch are drawn to a
+   * common target motion each tick, on top of {@link sutureCoupling}.
+   */
+  cratonWeldCoupling: number;
 
   // --- Rifting (see sim-rs/src/rifting.rs) ---
   /**
@@ -1056,6 +1069,7 @@ export const defaultTuning: Tuning = {
   mergeQuietSpeed: 0.002,
   mantleFlowCoupling: 30,
   downwellingMemory: 800,
+  upwellingGain: 0,
 
   slabCooling: 25,
   siteInsulation: 1,
@@ -1130,6 +1144,7 @@ export const defaultTuning: Tuning = {
   cratonKeelGain: 1,
   cratonDurability: 0.75,
   cratonMergeTime: 60,
+  cratonWeldCoupling: 0.75,
 
   riftStrength: 0.65,
   oceanicStrengthYoung: 0.7,
@@ -1229,7 +1244,8 @@ export interface SimOptions {
    * Whether mantle heat builds under continental crust and weakens the plate
    * above it. On, supercontinents assemble and then tear themselves apart, which
    * is what Earth does; off, rifting is driven by inherited weakness and slab
-   * tension alone and the per-cell heat field is never touched.
+   * tension alone and the per-cell heat field is held at zero, releasing any
+   * heat built up before it was switched off.
    */
   supercontinentInsulation: boolean;
   /**

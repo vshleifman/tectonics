@@ -15,7 +15,9 @@ import type { Projection } from "../render/projection";
 import type { WorldMetrics } from "../sim/metrics";
 import { RESOURCE_NAMES } from "../sim/SimWorld";
 import {
+  defaultSimOptions,
   resetTuning,
+  type SimOptions,
   setSimOptions,
   setTuning,
   simOptions,
@@ -30,6 +32,12 @@ const ACCENT = "#4f8ff0";
 /** Imperative handle for pushing live sim readouts back into the panels. */
 export interface Controls {
   setCellCount: (count: number) => void;
+  /**
+   * Whether the world has ticked. Seeds and faults carve plates out of the
+   * mesh as it was built, so once plates have moved they would overwrite the
+   * evolved layout; their controls are put away until a new world.
+   */
+  setSeedingLocked: (locked: boolean) => void;
   setPlateCount: (count: number) => void;
   setFps: (fps: number) => void;
   /** The simulation build running the world, shown with the timings. */
@@ -147,6 +155,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "How strongly mantle flow toward trenches carries continents along.",
   downwellingMemory:
     "How long a mantle downwelling outlives the trench that fed it.",
+  upwellingGain:
+    "How strongly hot upper mantle rises and spreads the surface away from it; 0 leaves the flow to sinking slabs.",
   slabCooling:
     "How much the upper mantle cools for each site's area of slab sunk into it.",
   siteInsulation:
@@ -261,6 +271,8 @@ const TUNING_TOOLTIPS: Record<keyof Tuning, string> = {
     "How hard cratons are to erode; above ~0.85 they can lock the plates up.",
   cratonMergeTime:
     "How long two plates' cratons must stay welded before the plates merge; 0 to never force it.",
+  cratonWeldCoupling:
+    "How firmly welded plates whose cratons touch are held to one motion, on top of suture coupling.",
   riftStrength:
     "Tension continental lithosphere must be under before it tears.",
   oceanicStrengthYoung:
@@ -641,6 +653,13 @@ const TUNING_GROUP_FIELDS: {
         min: 10,
         max: 2000,
         step: 10,
+      },
+      {
+        key: "upwellingGain",
+        label: "Hot mantle upwelling /Myr",
+        min: 0,
+        max: 0.1,
+        step: 0.002,
       },
     ],
   },
@@ -1078,6 +1097,13 @@ const TUNING_GROUP_FIELDS: {
         min: 0,
         max: 500,
         step: 10,
+      },
+      {
+        key: "cratonWeldCoupling",
+        label: "Craton weld coupling",
+        min: 0,
+        max: 1,
+        step: 0.05,
       },
     ],
   },
@@ -1780,6 +1806,29 @@ const TUNING_GROUPS: TuningGroupSpec[] = TUNING_GROUP_FIELDS.map((group) => ({
 }));
 
 /**
+ * Sliders that only act under one setting of a modelling option, hidden
+ * otherwise. Insulation's are read only where mantle heat is built up, which
+ * nothing does with insulation off; the area target's only by the controller
+ * that holds it, and the fixed recycling rate only when that is off.
+ */
+const SLIDER_CONDITIONS: Partial<
+  Record<keyof Tuning, (options: SimOptions) => boolean>
+> = {
+  insulationRate: (o) => o.supercontinentInsulation,
+  insulationReach: (o) => o.supercontinentInsulation,
+  insulationCooling: (o) => o.supercontinentInsulation,
+  insulationWeakening: (o) => o.supercontinentInsulation,
+  insulationDrive: (o) => o.supercontinentInsulation,
+  insulationSiteGain: (o) => o.supercontinentInsulation,
+  domePush: (o) => o.supercontinentInsulation,
+  riftHeatRelease: (o) => o.supercontinentInsulation,
+  continentalAreaTarget: (o) => o.holdContinentalArea,
+  continentalTargetTime: (o) => o.holdContinentalArea,
+  continentalTargetGain: (o) => o.holdContinentalArea,
+  continentalRecyclingRate: (o) => !o.holdContinentalArea,
+};
+
+/**
  * Framework-free overlay split into two panels. The left "Simulation" panel owns
  * world structure (subdivision, branches, seeds, run state) plus every tunable
  * simulation constant as live sliders; the right "View" panel owns what the user
@@ -1794,6 +1843,7 @@ export const createControls = (
   onClearFaults: () => void,
   onTuningChange: () => void,
   onStepOnce: () => void,
+  onNewWorld: () => void,
 ): Controls => {
   const initial = store.getAll();
   const tooltip = makeTooltip(parent);
@@ -1853,18 +1903,32 @@ export const createControls = (
   };
   const stepButton = makeButton("Step once");
   const clearButton = makeButton("Clear faults");
+  const newWorldButton = makeButton("New world");
+  tooltip.attach(
+    newWorldButton,
+    "Start again from bare crust at this subdivision level, ready for new seeds.",
+  );
+
+  // Placing seeds is how a world starts; it is put away once the world ticks.
+  const seedBlock = document.createElement("div");
+  seedBlock.append(branchesLabel, branchesSlider, seedToggle.row, clearButton);
+
+  const changeOptions = (patch: Partial<SimOptions>): void => {
+    setSimOptions(patch);
+    syncConditionalSliders();
+    onTuningChange();
+  };
   // A modelling choice rather than a dial: with it off, rifting is driven by
   // inherited weakness and slab tension alone and the mantle-heat field is
-  // never touched, which is one fewer pass over every cell each tick.
+  // held at zero.
   const insulationToggle = makeToggle(
     "Supercontinent insulation",
     simOptions.supercontinentInsulation,
   );
   insulationToggle.input.addEventListener("change", () => {
-    setSimOptions({
+    changeOptions({
       supercontinentInsulation: insulationToggle.input.checked,
     });
-    onTuningChange();
   });
   tooltip.attach(
     insulationToggle.row,
@@ -1875,8 +1939,7 @@ export const createControls = (
     simOptions.twoSidedTension,
   );
   tensionToggle.input.addEventListener("change", () => {
-    setSimOptions({ twoSidedTension: tensionToggle.input.checked });
-    onTuningChange();
+    changeOptions({ twoSidedTension: tensionToggle.input.checked });
   });
   tooltip.attach(
     tensionToggle.row,
@@ -1887,8 +1950,7 @@ export const createControls = (
     simOptions.quietByMeanSpeed,
   );
   quietToggle.input.addEventListener("change", () => {
-    setSimOptions({ quietByMeanSpeed: quietToggle.input.checked });
-    onTuningChange();
+    changeOptions({ quietByMeanSpeed: quietToggle.input.checked });
   });
   tooltip.attach(
     quietToggle.row,
@@ -1899,8 +1961,7 @@ export const createControls = (
     simOptions.collapseStagnantOnly,
   );
   collapseToggle.input.addEventListener("change", () => {
-    setSimOptions({ collapseStagnantOnly: collapseToggle.input.checked });
-    onTuningChange();
+    changeOptions({ collapseStagnantOnly: collapseToggle.input.checked });
   });
   tooltip.attach(
     collapseToggle.row,
@@ -1912,8 +1973,7 @@ export const createControls = (
     simOptions.holdContinentalArea,
   );
   holdAreaToggle.input.addEventListener("change", () => {
-    setSimOptions({ holdContinentalArea: holdAreaToggle.input.checked });
-    onTuningChange();
+    changeOptions({ holdContinentalArea: holdAreaToggle.input.checked });
   });
   tooltip.attach(
     holdAreaToggle.row,
@@ -1925,8 +1985,7 @@ export const createControls = (
     simOptions.compositionCrustType,
   );
   compositionToggle.input.addEventListener("change", () => {
-    setSimOptions({ compositionCrustType: compositionToggle.input.checked });
-    onTuningChange();
+    changeOptions({ compositionCrustType: compositionToggle.input.checked });
   });
   tooltip.attach(
     compositionToggle.row,
@@ -1938,23 +1997,35 @@ export const createControls = (
     simOptions.riftNeedsSeparation,
   );
   separationToggle.input.addEventListener("change", () => {
-    setSimOptions({ riftNeedsSeparation: separationToggle.input.checked });
-    onTuningChange();
+    changeOptions({ riftNeedsSeparation: separationToggle.input.checked });
   });
   tooltip.attach(
     separationToggle.row,
     "A plate only rifts where the two pieces would move apart under their own forces. Off, slab tension against strength is enough, and many pieces never part.",
   );
 
-  const netWeldToggle = makeToggle("Weld only on net closing", simOptions.weldOnNetClosing);
+  const netWeldToggle = makeToggle(
+    "Weld only on net closing",
+    simOptions.weldOnNetClosing,
+  );
   netWeldToggle.input.addEventListener("change", () => {
-    setSimOptions({ weldOnNetClosing: netWeldToggle.input.checked });
-    onTuningChange();
+    changeOptions({ weldOnNetClosing: netWeldToggle.input.checked });
   });
   tooltip.attach(
     netWeldToggle.row,
     "Plates weld only where their continents close on balance along the whole contact, and never just after breaking apart. Off, any closing stretch welds them.",
   );
+
+  const optionToggles: [keyof SimOptions, Toggle][] = [
+    ["supercontinentInsulation", insulationToggle],
+    ["twoSidedTension", tensionToggle],
+    ["quietByMeanSpeed", quietToggle],
+    ["collapseStagnantOnly", collapseToggle],
+    ["holdContinentalArea", holdAreaToggle],
+    ["compositionCrustType", compositionToggle],
+    ["riftNeedsSeparation", separationToggle],
+    ["weldOnNetClosing", netWeldToggle],
+  ];
 
   const readout = document.createElement("div");
   Object.assign(readout.style, {
@@ -1999,6 +2070,12 @@ export const createControls = (
     render: () => void;
   }
   const sliderRefs: SliderRef[] = [];
+  const conditionalFields: [keyof Tuning, HTMLElement][] = [];
+  const syncConditionalSliders = (): void => {
+    for (const [key, field] of conditionalFields) {
+      field.style.display = SLIDER_CONDITIONS[key]?.(simOptions) ? "" : "none";
+    }
+  };
 
   const buildTuningGroup = (group: TuningGroupSpec): HTMLDetailsElement => {
     const details = document.createElement("details");
@@ -2044,12 +2121,15 @@ export const createControls = (
       const field = document.createElement("div");
       field.append(label, slider);
       tooltip.attach(field, spec.tooltip);
+      if (SLIDER_CONDITIONS[spec.key])
+        conditionalFields.push([spec.key, field]);
       details.append(field);
     }
     return details;
   };
 
   const tuningGroups = TUNING_GROUPS.map(buildTuningGroup);
+  syncConditionalSliders();
 
   const resetButton = makeButton("Reset tuning to defaults");
   resetButton.addEventListener("click", () => {
@@ -2060,12 +2140,17 @@ export const createControls = (
     }
     waterSlider.value = String(tuning.oceanVolume);
     renderWaterLabel();
+    setSimOptions(defaultSimOptions);
+    for (const [key, toggle] of optionToggles) {
+      toggle.input.checked = simOptions[key];
+    }
+    syncConditionalSliders();
     onTuningChange();
     renderViewLegend();
   });
   tooltip.attach(
     resetButton,
-    "Restore every tuning slider to its starting value.",
+    "Restore every tuning slider and model switch to its starting value.",
   );
 
   const diagnostics = createDiagnostics(parent);
@@ -2119,18 +2204,19 @@ export const createControls = (
   clearButton.addEventListener("click", () => {
     onClearFaults();
   });
+  newWorldButton.addEventListener("click", () => {
+    onNewWorld();
+  });
 
   sim.panel.append(
     levelLabel,
     levelControl.row,
-    branchesLabel,
-    branchesSlider,
-    seedToggle.row,
+    seedBlock,
+    newWorldButton,
     runButton,
     rateLabel,
     rateSlider,
     stepButton,
-    clearButton,
     insulationToggle.row,
     tensionToggle.row,
     quietToggle.row,
@@ -2170,7 +2256,6 @@ export const createControls = (
   const viewSelect = makeSelect(
     [
       { value: "colour", label: "Elevation colour" },
-      { value: "data", label: "Data (all properties)" },
       { value: "crust", label: "Crust type" },
       { value: "density", label: "Crust density" },
       { value: "lithosphere", label: "Lithosphere" },
@@ -2291,6 +2376,15 @@ export const createControls = (
   tooltip.attach(
     waterBlock,
     "Water on the planet, as an even layer over the globe (Earth ~2.6 km). Sea level is whatever fills the basins with it, and the map re-colours at once, even while paused.",
+  );
+
+  const readoutToggle = makeToggle("Cell data on hover", initial.cellReadout);
+  readoutToggle.input.addEventListener("change", () => {
+    store.set({ cellReadout: readoutToggle.input.checked });
+  });
+  tooltip.attach(
+    readoutToggle.row,
+    "List every property of the cell under the pointer, over whichever view is shown.",
   );
 
   const rotateToggle = makeToggle("Auto-rotate", initial.autoRotate);
@@ -2510,6 +2604,7 @@ export const createControls = (
     elevationBlock,
     viewLegend,
     waterBlock,
+    readoutToggle.row,
     rotateToggle.row,
     platesLabel,
     platesControl.row,
@@ -2562,6 +2657,9 @@ export const createControls = (
     if (changed.has("seedMode")) {
       seedToggle.input.checked = state.seedMode;
     }
+    if (changed.has("cellReadout")) {
+      readoutToggle.input.checked = state.cellReadout;
+    }
     if (changed.has("showVelocities")) {
       velocityToggle.input.checked = state.showVelocities;
       arrowLegend.style.display = state.showVelocities ? "flex" : "none";
@@ -2595,7 +2693,6 @@ export const createControls = (
     const display = hidden ? "none" : "";
     sim.panel.style.display = display;
     view.panel.style.display = display;
-    note.style.display = display;
     diagnostics.dialog.style.display = display;
     hideButton.setAttribute(
       "aria-label",
@@ -2632,6 +2729,9 @@ export const createControls = (
   return {
     setCellCount: (count: number) => {
       cellEl.textContent = `Cells: ${count.toLocaleString()}`;
+    },
+    setSeedingLocked: (locked: boolean) => {
+      seedBlock.style.display = locked ? "none" : "";
     },
     setPlateCount: (count: number) => {
       plateEl.textContent = `Plates: ${count.toLocaleString()}`;
@@ -2679,7 +2779,7 @@ const makeEmptyPlateNote = (): HTMLDivElement => {
 
 /**
  * One plate row: a swatch in the plate's overlay colour, its stable id (the same
- * id the data view labels cells with), an arrow glyph rotated to its heading,
+ * id the cell readout gives each cell), an arrow glyph rotated to its heading,
  * and its speed, bearing and share of the globe underneath.
  *
  * Speed is converted out of the simulation's rad/Myr into the cm/yr plate
