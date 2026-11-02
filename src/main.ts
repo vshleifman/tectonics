@@ -44,6 +44,9 @@ const INITIAL_HAND_TOOL: HandTool = "off";
 /** Fast against today's plates (1 to 10 cm/yr), so the hand shows in a few ticks. */
 const INITIAL_HAND_SPEED = 15;
 const INITIAL_HAND_RADIUS = 20;
+/** Metres a second at the brush's centre: a few km of relief in a few seconds. */
+const INITIAL_SCULPT_RATE = 200;
+const INITIAL_SCULPT_NOISE = 50;
 const INITIAL_UI_HIDDEN = false;
 const INITIAL_RUNNING = false;
 /**
@@ -193,6 +196,12 @@ let handAnchor: [number, number, number] | null = null;
 let handHeldMs = 0;
 /** Whether the hand has been held long enough to grip. */
 let handGripping = false;
+/** The noise pattern of the current sculpting press. */
+let sculptSeed = 0;
+
+/** Whether `tool` shapes the land rather than moving plates. */
+const sculpting = (tool: HandTool): boolean =>
+    tool === "elevate" || tool === "lower";
 
 /** Lay a band `radius` radians round `c` into `out`, inner and outer edges. */
 const traceBand = (
@@ -308,6 +317,8 @@ const settings = createSettingsStore(
         handTool: INITIAL_HAND_TOOL,
         handSpeed: INITIAL_HAND_SPEED,
         handRadius: INITIAL_HAND_RADIUS,
+        sculptRate: INITIAL_SCULPT_RATE,
+        sculptNoise: INITIAL_SCULPT_NOISE,
         running: INITIAL_RUNNING,
         ticksPerSecond: INITIAL_TICKS_PER_SECOND,
         uiHidden: INITIAL_UI_HIDDEN,
@@ -527,12 +538,13 @@ const dismissSeedOverlay = (): void => {
 };
 
 /**
- * Run the world while it is set running, or while a hand is held on it: the
- * hand moves plates only as the world ticks, so holding it on a paused world
- * runs the world until it is let go.
+ * Run the world while it is set running, or while a plate tool is held on it:
+ * the hand moves plates only as the world ticks, so holding it on a paused
+ * world runs the world until it is let go. Sculpting needs no time to pass.
  */
 const applyRunning = (): void => {
-    if (settings.get("running") || handHeld) {
+    const pushing = handHeld && !sculpting(settings.get("handTool"));
+    if (settings.get("running") || pushing) {
         dismissSeedOverlay();
         client.run(settings.get("ticksPerSecond"));
     } else {
@@ -617,15 +629,30 @@ document.addEventListener("visibilitychange", () => {
 // go. Held in one place for HAND_GRIP_MS it grips: drawing plates
 // in, it folds together those meeting in its core; pushing them apart, it
 // rifts the plate under it. Moving it out of its core starts the count again.
+// The terrain tools instead raise or lower the land under the brush, at once
+// and whether or not the world is running, with one noise pattern per press.
 
 /** Put the hand down at {@link handCentre}, or move it there. */
 const sendHand = (): void => {
     const tool = settings.get("handTool");
     if (!handHeld || !handCentre || tool === "off") return;
+    const radius = (settings.get("handRadius") * Math.PI) / 180;
+    if (sculpting(tool)) {
+        const rate = settings.get("sculptRate") / 1000;
+        client.setSculpt(
+            handCentre,
+            radius,
+            tool === "elevate" ? rate : -rate,
+            settings.get("sculptNoise") / 100,
+            sculptSeed,
+            tool === "elevate",
+        );
+        return;
+    }
     const speed = settings.get("handSpeed") / CM_PER_YR_PER_RAD_MYR;
     client.setHand(
         handCentre,
-        (settings.get("handRadius") * Math.PI) / 180,
+        radius,
         tool === "attract" ? speed : -speed,
         handGripping,
     );
@@ -640,7 +667,9 @@ const resetGrip = (): void => {
 
 /** Count time held towards a grip; called once a frame. */
 const holdHand = (deltaMs: number): void => {
-    if (!handHeld || handGripping) return;
+    if (!handHeld || handGripping || sculpting(settings.get("handTool"))) {
+        return;
+    }
     handHeldMs += deltaMs;
     if (handHeldMs >= HAND_GRIP_MS) {
         handGripping = true;
@@ -654,7 +683,9 @@ const releaseHand = (): void => {
     handHeld = false;
     resetGrip();
     activeControls.enabled = true;
+    // Either may be held: the tool can change while the button is down.
     client.clearHand();
+    client.clearSculpt();
     applyRunning();
     drawHandRing();
 };
@@ -670,6 +701,7 @@ renderer.domElement.addEventListener(
         handCentre = centre;
         handHeld = true;
         resetGrip();
+        sculptSeed = Math.floor(Math.random() * 0x1_0000_0000);
         activeControls.enabled = false;
         renderer.domElement.setPointerCapture(event.pointerId);
         sendHand();
@@ -710,6 +742,8 @@ settings.on("handTool", () => {
     drawHandRing();
 });
 settings.on("handSpeed", () => sendHand());
+settings.on("sculptRate", () => sendHand());
+settings.on("sculptNoise", () => sendHand());
 settings.on("handRadius", () => {
     sendHand();
     drawHandRing();

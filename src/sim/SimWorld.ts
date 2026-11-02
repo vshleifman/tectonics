@@ -146,6 +146,20 @@ export interface SimWorld {
   setHand(centre: Vec3, radius: number, speed: number, grip: boolean): void;
   /** Let go of the hand; the plates go back to their own forces. */
   clearHand(): void;
+  /**
+   * Raise the land within `radius` radians of `centre` (a unit vector) by up
+   * to `height` km, or lower it if negative, by thickening or thinning the
+   * crust there, at once and with no time passing. `noise` (0 to 1) breaks the
+   * stroke up in the pattern `seed` picks, into crests if `ridged`.
+   */
+  sculpt(
+    centre: Vec3,
+    radius: number,
+    height: number,
+    noise: number,
+    seed: number,
+    ridged: boolean,
+  ): void;
   fields(): WorldFields;
   plateCount(): number;
   /** Flat `[id, wx, wy, wz]` quads, one per live plate. */

@@ -71,6 +71,8 @@ pub struct AdvectionField {
     pub subducted_total: f64,
     pub created_this_step: f64,
     pub created_total: f64,
+    /// Crust added by sculpting, less what sculpting took away (area x km).
+    pub sculpted_total: f64,
     /// Continental mass lost this step to subduction erosion of eaten margins
     /// and to ocean-under-continent margin erosion.
     pub eroded_this_step: f64,
@@ -126,6 +128,9 @@ pub struct AdvectionField {
     pub continentalised_by_infill: f64,
     /// Thickness each cell gained this step over a plume.
     pub plume_in: Vec<f32>,
+    /// Ocean floor each cell has had built up on it by sculpting since the
+    /// last tick, which that tick takes as plume crust (km).
+    pub sculpt_in: Vec<f32>,
     /// Crust mass plumes made this step.
     pub plume_created_this_step: f64,
     /// Thickened ocean crust that foundered into a hot mantle this step.
@@ -197,6 +202,7 @@ impl AdvectionField {
             subducted_total: 0.0,
             created_this_step: 0.0,
             created_total: 0.0,
+            sculpted_total: 0.0,
             eroded_this_step: 0.0,
             delaminated_this_step: 0.0,
             arc_accreted_this_step: 0.0,
@@ -216,6 +222,7 @@ impl AdvectionField {
             continentalised_by_spreading: 0.0,
             continentalised_by_infill: 0.0,
             plume_in: vec![0.0; n],
+            sculpt_in: vec![0.0; n],
             plume_created_this_step: 0.0,
             dripped_this_step: 0.0,
             continentalised_by_plume: 0.0,

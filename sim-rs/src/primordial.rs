@@ -171,25 +171,29 @@ fn raise(
     let before = data.thickness[i];
     data.thickness[i] = (h + gain) as f32;
     let added = (data.thickness[i] - before) as f64;
-    data.lanes.mix_lane(LANE_PLUME, i, before as f64, added, 1.0);
-    // Plume crust is mafic. It dilutes the felsic part; sediment is left as it
-    // was (it never was diluted by plume crust, and what the drip below reads
-    // must not change), so mafic takes up what is left.
-    data.lanes.mix_lane(LANE_FELSIC, i, before as f64, added, 0.0);
-    // The cover it lay under is now a thinner share of the crust.
-    data.lanes.mix_lane(LANE_COVER_FELSIC, i, before as f64, added, 0.0);
-    data.lanes.mix_lane(LANE_COVER_MAFIC, i, before as f64, added, 0.0);
-    // New crust has not been buried or eroded: it dilutes the records.
-    for lane in LANE_EXHUMED..LANES {
-        data.lanes.mix_lane(lane, i, before as f64, added, 0.0);
-    }
-    let rest = 1.0
-        - data.lanes.lane(LANE_FELSIC)[i] as f64
-        - data.lanes.lane(LANE_SEDIMENT)[i] as f64;
-    data.lanes.lane_mut(LANE_MAFIC)[i] = rest.clamp(0.0, 1.0) as f32;
+    mix_in_plume_crust(data, i, before as f64, added);
     field.plume_in[i] += added as f32;
     *created += added * mesh.area(i);
     Some(h + gain)
+}
+
+/// Take `added` km of plume crust into the lanes of cell `i`, which held
+/// `before` km: mafic, and marked as a plume's.
+pub(crate) fn mix_in_plume_crust(data: &mut CellData, i: usize, before: f64, added: f64) {
+    data.lanes.mix_lane(LANE_PLUME, i, before, added, 1.0);
+    // Plume crust is mafic. It dilutes the felsic part; sediment is left as it
+    // was (it never was diluted by plume crust, and what the drip below reads
+    // must not change), so mafic takes up what is left.
+    data.lanes.mix_lane(LANE_FELSIC, i, before, added, 0.0);
+    // The cover it lay under is now a thinner share of the crust.
+    data.lanes.mix_lane(LANE_COVER_FELSIC, i, before, added, 0.0);
+    data.lanes.mix_lane(LANE_COVER_MAFIC, i, before, added, 0.0);
+    // New crust has not been buried or eroded: it dilutes the records.
+    for lane in LANE_EXHUMED..LANES {
+        data.lanes.mix_lane(lane, i, before, added, 0.0);
+    }
+    let rest = 1.0 - data.lanes.lane(LANE_FELSIC)[i] as f64 - data.lanes.lane(LANE_SEDIMENT)[i] as f64;
+    data.lanes.lane_mut(LANE_MAFIC)[i] = rest.clamp(0.0, 1.0) as f32;
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -269,7 +273,11 @@ impl Primordial {
         dt_myr: f64,
         t: &Tuning,
     ) {
-        field.plume_in.fill(0.0);
+        // Ocean floor a sculpting brush has built up since the last tick is
+        // a plateau, which only plumes build: it counts as this step's plume
+        // crust.
+        field.plume_in.copy_from_slice(&field.sculpt_in);
+        field.sculpt_in.fill(0.0);
         field.plume_created_this_step = 0.0;
         field.dripped_this_step = 0.0;
         let excess = heat.excess();

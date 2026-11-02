@@ -124,6 +124,30 @@ export class SimClient {
     this.send({ type: "clearHand" });
   }
 
+  /** Hold a sculpting brush on the globe, or move it (see the protocol). */
+  setSculpt(
+    centre: Vec3,
+    radius: number,
+    rate: number,
+    noise: number,
+    seed: number,
+    ridged: boolean,
+  ): void {
+    this.send({
+      type: "setSculpt",
+      centre,
+      radius,
+      rate,
+      noise,
+      seed,
+      ridged,
+    });
+  }
+
+  clearSculpt(): void {
+    this.send({ type: "clearSculpt" });
+  }
+
   run(ticksPerSecond: number): void {
     this.send({ type: "run", ticksPerSecond });
   }

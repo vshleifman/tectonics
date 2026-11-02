@@ -69,6 +69,44 @@ let lastStats = 0;
 let dirty = false;
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** The sculpting brush held on the world, if any. */
+let brush: Extract<SimCommand, { type: "setSculpt" }> | null = null;
+let sculptTimer: ReturnType<typeof setInterval> | null = null;
+/** When the brush last shaped the land (ms, `performance.now`). */
+let lastSculpt = 0;
+
+/** How often a held brush shapes the land and the result is shown (ms). */
+const SCULPT_INTERVAL_MS = 100;
+
+/**
+ * Shape the land under the brush by as much as it rises in the time since
+ * the last stroke. Runs on its own timer, so it works the same whether the
+ * world is running or paused.
+ */
+const sculptStep = (): void => {
+  const now = performance.now();
+  const seconds = (now - lastSculpt) / 1000;
+  lastSculpt = now;
+  if (!brush || !world) return;
+  world.sculpt(
+    brush.centre,
+    brush.radius,
+    brush.rate * seconds,
+    brush.noise,
+    brush.seed,
+    brush.ridged,
+  );
+  markDirty();
+  statsDue = true;
+  publish();
+};
+
+const stopSculpting = (): void => {
+  if (sculptTimer !== null) clearInterval(sculptTimer);
+  sculptTimer = null;
+  brush = null;
+};
+
 /** Commands are handled strictly in order, even across an async world build. */
 let queue: Promise<void> = Promise.resolve();
 
@@ -296,6 +334,7 @@ const handle = async (cmd: SimCommand): Promise<void> => {
   switch (cmd.type) {
     case "init": {
       stopLoop();
+      stopSculpting();
       world?.dispose();
       world = null;
       const engine = await loadEngine();
@@ -362,6 +401,18 @@ const handle = async (cmd: SimCommand): Promise<void> => {
       return;
     case "clearHand":
       world?.clearHand();
+      return;
+    case "setSculpt":
+      brush = cmd;
+      if (sculptTimer === null) {
+        lastSculpt = performance.now();
+        sculptTimer = setInterval(sculptStep, SCULPT_INTERVAL_MS);
+      }
+      return;
+    case "clearSculpt":
+      // What was held since the last stroke still counts.
+      sculptStep();
+      stopSculpting();
       return;
     case "run":
       ticksPerSecond = Math.max(0.1, cmd.ticksPerSecond);

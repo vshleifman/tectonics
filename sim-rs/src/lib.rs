@@ -39,6 +39,7 @@ pub mod resources;
 pub mod rifting;
 pub mod rng;
 pub mod scratch;
+pub mod sculpt;
 pub mod shape;
 pub mod slabs;
 pub mod sutures;
@@ -205,6 +206,32 @@ impl World {
     /// Let go of the hand; the plates go back to their own forces.
     pub fn clear_hand(&mut self) {
         self.sim.hand = None;
+    }
+
+    /// Raise the land within `radius` radians of the unit vector `(x, y, z)`
+    /// by up to `height` km, or lower it if negative, by thickening or
+    /// thinning the crust, at once. `noise` (0 to 1) breaks the stroke up in
+    /// the pattern `seed` picks, `ridged` into crests (see `sculpt`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn sculpt(
+        &mut self,
+        x: f64,
+        y: f64,
+        z: f64,
+        radius: f64,
+        height: f64,
+        noise: f64,
+        seed: u32,
+        ridged: bool,
+    ) {
+        let brush = sculpt::Sculpt {
+            centre: math::normalise([x, y, z]),
+            radius,
+            noise: noise.clamp(0.0, 1.0),
+            seed,
+            ridged,
+        };
+        self.sim.sculpt(&brush, height);
     }
 
     pub fn elevation_ptr(&self) -> *const f32 {

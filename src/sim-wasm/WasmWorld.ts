@@ -106,6 +106,26 @@ export class WasmWorld implements SimWorld {
     this.world.clear_hand();
   }
 
+  sculpt(
+    centre: Vec3,
+    radius: number,
+    height: number,
+    noise: number,
+    seed: number,
+    ridged: boolean,
+  ): void {
+    this.world.sculpt(
+      centre[0],
+      centre[1],
+      centre[2],
+      radius,
+      height,
+      noise,
+      seed,
+      ridged,
+    );
+  }
+
   fields(): WorldFields {
     const { buffer } = this.memory;
     const w = this.world;

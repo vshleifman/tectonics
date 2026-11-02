@@ -58,7 +58,13 @@ const CHOICES: Partial<Record<keyof Settings, readonly string[]>> = {
     "boundary",
   ] satisfies ViewMode[],
   plateOverlay: ["off", "lines", "colours"] satisfies PlateOverlay[],
-  handTool: ["off", "attract", "repel"] satisfies HandTool[],
+  handTool: [
+    "off",
+    "attract",
+    "repel",
+    "elevate",
+    "lower",
+  ] satisfies HandTool[],
 };
 
 const readJson = (key: string): Record<string, unknown> | null => {

@@ -33,6 +33,7 @@ use crate::registry::{Registry, assign_plates};
 use crate::rifting::{open_rift_through, update_rifting};
 use crate::rng::Rng;
 use crate::scratch::Scratch;
+use crate::sculpt::{Sculpt, sculpt};
 use crate::slabs::{seed_slabs, update_slabs};
 use crate::sutures::update_sutures;
 use crate::timer::now_ms;
@@ -291,6 +292,7 @@ impl Sim {
             self.advection.live_mass = self.initial_mass;
             self.advection.subducted_total = 0.0;
             self.advection.created_total = 0.0;
+            self.advection.sculpted_total = 0.0;
             self.advection.recycle_debt = 0.0;
             self.advection.continental_growth = 0.0;
             self.advection.continental_share_before = None;
@@ -682,7 +684,7 @@ impl Sim {
     /// Conservation drift as a fraction of the initial crust mass.
     pub fn mass_drift(&self) -> f64 {
         let a = &self.advection;
-        let tracked = a.live_mass + a.subducted_total - a.created_total;
+        let tracked = a.live_mass + a.subducted_total - a.created_total - a.sculpted_total;
         if self.initial_mass > 0.0 {
             (tracked - self.initial_mass) / self.initial_mass
         } else {
@@ -693,6 +695,27 @@ impl Sim {
     /// Sea level (km above the datum) the water fills the basins to.
     pub fn sea_level(&self) -> f64 {
         self.sea_level
+    }
+
+    /// Raise the land under `brush` by up to `height` km (lower it if
+    /// negative) by thickening or thinning the crust there, with no time
+    /// passing, and re-solve the surface to show it. The crust it adds or
+    /// takes away is booked in the mass ledger.
+    pub fn sculpt(&mut self, brush: &Sculpt, height: f64) {
+        let t = self.effective_tuning();
+        let mass = sculpt(
+            &self.mesh,
+            &mut self.front,
+            &mut self.advection.sculpt_in,
+            &self.dyn_topo,
+            self.sea_level,
+            &t,
+            brush,
+            height,
+        );
+        self.advection.sculpted_total += mass;
+        self.advection.live_mass += mass;
+        self.refresh_surface();
     }
 
     /// Re-solve sea level and rewrite every elevation from the current crust,
@@ -1363,6 +1386,103 @@ mod tests {
         let m = sim.metrics();
         assert!(m.elapsed_myr > 0.0);
         assert!(m.boundary_share[0] > 0.0, "no convergence at all");
+    }
+
+    /// The cell nearest `p`, and the mean elevation within `r` radians of it.
+    fn around(sim: &Sim, p: Vec3, r: f64) -> (usize, f64) {
+        let mut best = (0, -2.0);
+        let (mut sum, mut n) = (0.0, 0.0);
+        for i in 0..sim.mesh.cell_count {
+            let d = crate::math::dot(read3(&sim.mesh.centres, i), p);
+            if d > best.1 {
+                best = (i, d);
+            }
+            if d > r.cos() {
+                sum += sim.front.elevation[i] as f64;
+                n += 1.0;
+            }
+        }
+        (best.0, sum / n)
+    }
+
+    fn brush(noise: f64) -> Sculpt {
+        Sculpt {
+            centre: crate::math::normalise([0.2, 0.9, 0.3]),
+            radius: 0.3,
+            noise,
+            seed: 11,
+            ridged: true,
+        }
+    }
+
+    #[test]
+    fn sculpting_raises_and_lowers_the_land_through_the_crust_and_keeps_the_ledger() {
+        let mut sim = settled_world();
+        let b = brush(0.0);
+        let (centre, _) = around(&sim, b.centre, 0.0);
+        let before = sim.front.elevation[centre] as f64;
+        let thick = sim.front.thickness[centre];
+        sim.sculpt(&b, 0.5);
+        let raised = sim.front.elevation[centre] as f64;
+        assert!(sim.front.thickness[centre] > thick, "the crust did not thicken");
+        assert!((raised - before - 0.5).abs() < 0.15, "rose {} km", raised - before);
+        sim.sculpt(&b, -0.5);
+        let lowered = sim.front.elevation[centre] as f64;
+        assert!((lowered - before).abs() < 0.15, "back to {lowered} from {before}");
+
+        sim.sculpt(&b, 1.0);
+        assert!(sim.mass_drift().abs() < 1e-6, "drift {}", sim.mass_drift());
+        for _ in 0..5 {
+            sim.tick();
+        }
+        assert!(sim.mass_drift().abs() < 1e-4, "drift {}", sim.mass_drift());
+    }
+
+    #[test]
+    fn ocean_floor_raised_into_land_stays_land() {
+        let mut sim = settled_world();
+        let b = brush(0.5);
+        let (centre, _) = around(&sim, b.centre, 0.0);
+        assert_ne!(sim.front.crust_type[centre], CONTINENTAL, "the brush is meant to be over ocean");
+        let mut free = Sim::from_state(&sim.save_state()).unwrap();
+        sim.sculpt(&b, 5.0);
+        // Land within the brush's reach, here and in the world left alone.
+        let land = |s: &Sim| {
+            (0..s.mesh.cell_count)
+                .filter(|&i| crate::math::dot(read3(&s.mesh.centres, i), b.centre) > b.radius.cos())
+                .filter(|&i| s.front.elevation[i] > 0.0)
+                .count()
+        };
+        let raised = land(&sim);
+        assert!(raised > land(&free) + 5, "the brush raised no land");
+        for _ in 0..10 {
+            sim.tick();
+            free.tick();
+        }
+        // Built up as a plume's plateau is, it turns continental rather than
+        // foundering, and erosion wears it only slowly.
+        assert_eq!(sim.front.crust_type[around(&sim, b.centre, 0.0).0], CONTINENTAL);
+        assert!(land(&sim) > land(&free) + raised / 2, "{} cells of land left of {raised}", land(&sim));
+        assert!(sim.mass_drift().abs() < 1e-4, "drift {}", sim.mass_drift());
+    }
+
+    #[test]
+    fn noise_breaks_the_stroke_up() {
+        let spread = |noise: f64| {
+            let mut sim = settled_world();
+            let b = brush(noise);
+            let before: Vec<f32> = sim.front.elevation.clone();
+            sim.sculpt(&b, 1.0);
+            // Rise across the cells near the centre, where the fade is flat.
+            let rises: Vec<f64> = (0..sim.mesh.cell_count)
+                .filter(|&i| crate::math::dot(read3(&sim.mesh.centres, i), b.centre) > 0.1f64.cos())
+                .map(|i| (sim.front.elevation[i] - before[i]) as f64)
+                .collect();
+            let mean = rises.iter().sum::<f64>() / rises.len() as f64;
+            (rises.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / rises.len() as f64).sqrt()
+        };
+        let (even, broken) = (spread(0.0), spread(1.0));
+        assert!(broken > 2.0 * even, "even {even:.3}, with noise {broken:.3}");
     }
 
     #[test]

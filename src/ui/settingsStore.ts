@@ -35,9 +35,10 @@ export type PlateOverlay = "off" | "lines" | "colours";
 
 /**
  * What pressing and holding on the globe does: nothing beyond orbiting, draw
- * the plates around the pointer toward it, or push them away from it.
+ * the plates around the pointer toward it or push them away from it, or raise
+ * or lower the land under it.
  */
-export type HandTool = "off" | "attract" | "repel";
+export type HandTool = "off" | "attract" | "repel" | "elevate" | "lower";
 
 export type { ElevationStyle };
 
@@ -77,6 +78,10 @@ export interface Settings {
   handSpeed: number;
   /** How far (degrees of arc) the hand reaches from the pointer. */
   handRadius: number;
+  /** How fast (m/s of holding) the land rises or sinks at the brush's centre. */
+  sculptRate: number;
+  /** How much (percent) noise breaks up a sculpting stroke. */
+  sculptNoise: number;
   running: boolean;
   /** Simulation ticks attempted per second of wall clock. */
   ticksPerSecond: number;

@@ -76,6 +76,10 @@ const MIN_HAND_SPEED = 1;
 const MAX_HAND_SPEED = 50;
 const MIN_HAND_RADIUS = 5;
 const MAX_HAND_RADIUS = 60;
+const MIN_SCULPT_RATE = 10;
+const MAX_SCULPT_RATE = 1000;
+const MIN_SCULPT_NOISE = 0;
+const MAX_SCULPT_NOISE = 100;
 
 /** One tunable simulation constant exposed as a slider. */
 interface TuningSliderSpec {
@@ -1937,6 +1941,22 @@ export const createControls = (
       store.set({ handTool });
     },
   );
+  // The terrain tools share the one setting with the plate tools, so picking
+  // either row's button clears the other row.
+  const terrainControl = makeSegmented<HandTool>(
+    [
+      { value: "elevate", label: "Elevate" },
+      { value: "lower", label: "Lower" },
+    ],
+    initial.handTool,
+    (handTool) => {
+      store.set({ handTool });
+    },
+  );
+  tooltip.attach(
+    terrainControl.row,
+    "Elevate raises the land under the pointer while the button is held; Lower sinks it. Both work by thickening or thinning the crust there, which floats higher or lower, so what you shape moves with its plate and erodes like any other land. They work the same whether the world is running or paused.",
+  );
   tooltip.attach(
     handControl.row,
     "Attract draws the plates around the pointer toward it; Repel pushes them away. Each acts on top of the plates' own forces while the button is held, and the plates go back to those forces when it is let go. Holding the hand on a paused world runs it until the hand is let go. Held in one place for 7 s, the hand grips: Attract folds together the plates meeting inside its inner circle, and Repel rifts the plate under it there (not through a craton), holding the rift open until it breaks. Dragging moves the hand; orbiting is paused meanwhile.",
@@ -1961,20 +1981,80 @@ export const createControls = (
   const renderHandRadiusLabel = (): void => {
     handRadiusLabel.textContent = `Hand reach: ${store.get("handRadius")}°`;
   };
+  const sculptRateLabel = makeLabel();
+  const sculptRateSlider = makeSlider(
+    MIN_SCULPT_RATE,
+    MAX_SCULPT_RATE,
+    10,
+    initial.sculptRate,
+  );
+  const renderSculptRateLabel = (): void => {
+    sculptRateLabel.textContent = `Sculpt rate: ${store.get("sculptRate")} m/s`;
+  };
+  const sculptNoiseLabel = makeLabel();
+  const sculptNoiseSlider = makeSlider(
+    MIN_SCULPT_NOISE,
+    MAX_SCULPT_NOISE,
+    5,
+    initial.sculptNoise,
+  );
+  const renderSculptNoiseLabel = (): void => {
+    sculptNoiseLabel.textContent = `Sculpt noise: ${store.get("sculptNoise")}%`;
+  };
   renderHandSpeedLabel();
   renderHandRadiusLabel();
-  const handSliders = document.createElement("div");
-  handSliders.append(
-    handSpeedLabel,
-    handSpeedSlider,
-    handRadiusLabel,
-    handRadiusSlider,
-  );
-  handSliders.style.display = initial.handTool === "off" ? "none" : "";
+  renderSculptRateLabel();
+  renderSculptNoiseLabel();
+  const handSpeedBlock = document.createElement("div");
+  handSpeedBlock.append(handSpeedLabel, handSpeedSlider);
   tooltip.attach(
-    handSliders,
-    "How fast the hand moves the crust under it (plates today move 1 to 10 cm/yr), and how far from the pointer it reaches, fading to nothing at the edge.",
+    handSpeedBlock,
+    "How fast the hand moves the crust under it (plates today move 1 to 10 cm/yr).",
   );
+  const handRadiusBlock = document.createElement("div");
+  handRadiusBlock.append(handRadiusLabel, handRadiusSlider);
+  tooltip.attach(
+    handRadiusBlock,
+    "How far from the pointer the tool reaches, fading to nothing at the edge.",
+  );
+  const sculptBlock = document.createElement("div");
+  sculptBlock.append(
+    sculptRateLabel,
+    sculptRateSlider,
+    sculptNoiseLabel,
+    sculptNoiseSlider,
+  );
+  tooltip.attach(
+    sculptBlock,
+    "How fast the land rises or sinks at the centre of the brush, and how much noise breaks the stroke up: none gives an even dome, more gives lumps (ridges when elevating) and a ragged edge. Each press lays a new pattern, and holding grows the same one.",
+  );
+  /** Show the sliders the picked tool uses. */
+  const syncHandChrome = (tool: HandTool): void => {
+    const sculpting = tool === "elevate" || tool === "lower";
+    handSpeedBlock.style.display =
+      tool === "attract" || tool === "repel" ? "" : "none";
+    handRadiusBlock.style.display = tool === "off" ? "none" : "";
+    sculptBlock.style.display = sculpting ? "" : "none";
+  };
+  syncHandChrome(initial.handTool);
+  sculptRateSlider.addEventListener("input", () => {
+    store.set({
+      sculptRate: clamp(
+        Math.round(Number(sculptRateSlider.value)),
+        MIN_SCULPT_RATE,
+        MAX_SCULPT_RATE,
+      ),
+    });
+  });
+  sculptNoiseSlider.addEventListener("input", () => {
+    store.set({
+      sculptNoise: clamp(
+        Math.round(Number(sculptNoiseSlider.value)),
+        MIN_SCULPT_NOISE,
+        MAX_SCULPT_NOISE,
+      ),
+    });
+  });
   handSpeedSlider.addEventListener("input", () => {
     store.set({
       handSpeed: clamp(
@@ -1994,7 +2074,14 @@ export const createControls = (
     });
   });
   const handBlock = document.createElement("div");
-  handBlock.append(handLabel, handControl.row, handSliders);
+  handBlock.append(
+    handLabel,
+    handControl.row,
+    terrainControl.row,
+    handSpeedBlock,
+    handRadiusBlock,
+    sculptBlock,
+  );
 
   const changeOptions = (patch: Partial<SimOptions>): void => {
     setSimOptions(patch);
@@ -2756,7 +2843,16 @@ export const createControls = (
     }
     if (changed.has("handTool")) {
       handControl.setSelected(state.handTool);
-      handSliders.style.display = state.handTool === "off" ? "none" : "";
+      terrainControl.setSelected(state.handTool);
+      syncHandChrome(state.handTool);
+    }
+    if (changed.has("sculptRate")) {
+      sculptRateSlider.value = String(state.sculptRate);
+      renderSculptRateLabel();
+    }
+    if (changed.has("sculptNoise")) {
+      sculptNoiseSlider.value = String(state.sculptNoise);
+      renderSculptNoiseLabel();
     }
     if (changed.has("handSpeed")) {
       handSpeedSlider.value = String(state.handSpeed);

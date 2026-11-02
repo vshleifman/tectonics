@@ -40,6 +40,21 @@ export type SimCommand =
       grip: boolean;
     }
   | { type: "clearHand" }
+  /**
+   * Hold a sculpting brush on the globe, or move it: the land under it rises
+   * at `rate` km per second of holding (sinks if negative) until cleared. See
+   * `SimWorld.sculpt` for the rest.
+   */
+  | {
+      type: "setSculpt";
+      centre: Vec3;
+      radius: number;
+      rate: number;
+      noise: number;
+      seed: number;
+      ridged: boolean;
+    }
+  | { type: "clearSculpt" }
   | { type: "run"; ticksPerSecond: number }
   | { type: "pause" }
   /** Write the world to storage now, if it has changed since the last save. */
